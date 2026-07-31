@@ -1,0 +1,62 @@
+{
+ "frozen": "2026-07-23",
+ "note": "F4 update (2026-07-23): the synthetic focus self-verification chain (_synthetic_focus_sql_result and the qexec focus-id registration in agents/reporting.py) was deleted; new reports carry Selected Analysis Focus as structured ReportSection.focus_items, not claims. The frozen bundles keep their 24 legacy-form qfocus claims (fixtures untouched, corpus_sha256 unchanged), but on replay their qexec_* refs now resolve nothing, which is the honest state: resolvable_refs 141->138 (the 3 qfocus refs that only resolved through the synthetic pool), clean_unverified_tokens 12->15 (the three qfocus title tokens 2026/2026/1000 move from number_verified to unverified; all three are policy 'label' in the manifest, so the pinned verified tier counts 49/57/2 are untouched), hard detection 367->355 (those 3 tokens x 4 mutation classes were only ever 'caught' against the synthetic pool - a self-proving detection, not a real one; totals stay 416), disposition stays 413 (the unverified band still credits them), threshold_injection no_eligible totals 107->104 with blocked 106->103 (the 3 tokens leave the clean-verified probe population; the single world_cup pass is unchanged), clean_claim_mismatches stays 0 (unresolvable refs are unverified, never failed). Replay now also surfaces missing_evidence_artifact CRITICALs for the legacy qfocus refs - disclosure of ids that never existed on disk, not a regression. --- Previous note (F2): F2 baseline (value-tiered numeric matching; supersedes the F1 numbers, see git history for the F0/F1 notes) with the 2026-07-23 cross-review follow-ups. Matching derives a per-value policy deterministically (producer-declared SQL 'count' units and locator semantics first, JSON native type otherwise): exact for counts (a float-serialized count cell is still exact), rounded (half-ulp of the token's displayed decimals, relative slack) for continuous stats; the global +/-1% window and its 0.01 absolute floor are gone from the numeric gate. Number tokens include scientific notation ('1e-10' is one token, not a truncated '1'). Tokens preceded by </>/<=/>= are inequalities that only threshold-eligible values (stat p_value/statistic/effect_size locators) in the token's own unit pool may satisfy; without eligible values the token falls back to plain exact/rounded matching, so a bare '< 9999' no longer washes through an arbitrary pool. Ratchet raises and reasons: hard 318->367 and disposition 364->413 (near-miss counts and <1-stat x1.05 injections no longer sit inside the old windows; all floor-swallowed <1-stat cases converted - 7 distinct values / 8 token cases); plus1 hard 26->61 / count_plus1 21->48 (exact and rounded(0) both reject +/-1). count_plus1 deviation record: the F2 plan targeted 100%; adjudicated 2026-07-23: the structural hard ceiling on this corpus is 49/59 - 10 count tokens sit on the 4 zero-resolution claims (QualityIssue prose numbers, F1 coverage ceiling; disposition already blocks all of them as never-verified) - and 1 more (stack_overflow claim_2 '0'->'1') is a true-value collision (the mutated 1 equals a genuine 1.0 in a 120-value pool), part of the claim-to-cell binding class adjudicated out of scope in analysis-v3 section 10; 8 of the 11 original collision misses were eliminated by per-value policy; achieved 48/59. The 3 residual disposition misses (that plus1 collision and world_cup claim_1 20->40, 40->42) are same-claim pool collisions where the mutated value equals another true value - the same deferred binding class. clean_claim_mismatches 0 and clean_unverified_tokens 12 unchanged: no legit published number was killed (the in-window legitimate renderings of section 5.5 number 43-45 depending on the counting rule; the pinned guard is clean_claim_mismatches==0). threshold_injection (new with the follow-ups): each clean number_verified non-threshold token republished as '< {2x, original format}' - no_eligible_blocked 106/107, where the single pass is world_cup claim_1 '20'->'< 40' (40 is another true value in the same claim pool: the same section-10 binding residue; under pre-fix merged-pool semantics only 2/108 were blocked), and eligible_passed_by_design 1/1 (stack_overflow_2018 claim_8 'p = 0.129623' -> '< 0.259246': an inequality over a stat p_value is legal design, reported as-is). Totals stay pinned; detection counts only go up.",
+ "corpus_sha256": "3195273ca6cf6e64659e37a689512d63cff9323d6252498e87bbb77d53fa1e45",
+ "manifest_policy_distribution": {"count": 59, "rounded": 59, "threshold": 2, "label": 4},
+ "hard_gate_detection": {
+  "mutation_overall": [355, 416],
+  "mutation_by_class": {
+   "x1.05": [88, 104],
+   "x1.5": [105, 120],
+   "x2": [104, 120],
+   "plus1": [58, 72]
+  },
+  "count_plus1": [48, 59]
+ },
+ "not_verified_disposition": {
+  "mutation_overall": [413, 416],
+  "mutation_by_class": {
+   "x1.05": [103, 104],
+   "x1.5": [120, 120],
+   "x2": [119, 120],
+   "plus1": [71, 72]
+  },
+  "count_plus1": [58, 59]
+ },
+ "resolvable_refs": [138, 234],
+ "clean_claim_mismatches": 0,
+ "clean_unverified_tokens": 15,
+ "collateral_only_detections": 0,
+ "threshold_injection": {
+  "no_eligible_blocked": [103, 104],
+  "eligible_passed_by_design": [1, 1]
+ },
+ "evidence_strength": {
+  "note": "F6 number-binding update (2026-07-23 cross-review fix 1; supersedes the first F6 measurement, see git history): when a claim asserts numbers, the tier is now the strongest ref that actually VERIFIED >=1 number token (unit pools / thresholds / policies mirror the numeric gate); numbers with zero verified tokens -> exploratory (a QualityIssueSet index hit no longer washes an unsupported figure); numberless claims keep strongest-resolved-ref semantics including the QualityIssueSet relaxation. 8 of the previous 60 strong claims moved: 4 strong->indicative (their only verifiable figures resolve from sql cells: credit_card claim_3/claim_4, default_071054 c7, genai_llm_usage c7 - HHI/average metrics) and 4 strong->exploratory (duplicate/outlier counts living only in QualityIssueSet prose, resolving nothing: brazilian claim_2, credit_card claim_1/claim_6, hr_attrition c4). New totals 52/30/8 over the same 90-claim denominator (qfocus_* still excluded). Verdict = strong ratio >= strong_ratio_cut; 0.60 remains the PLACEHOLDER pending lead-model adjudication. Pre-registered control at 0.60: the three subjectively-weakest runs (brazilian_e_commerce 40.0%, stack_overflow_2018 50.0%, world_cup 50.0%) are still degraded, but credit_card (33.3%; 4 of its 7 strong claims were rebased) now degrades too, so 'degraded == exactly the pre-registered three' no longer holds; any cut in (0.50, 0.625] yields this same 4-run partition. Cut sweep: 30% -> 8 pass, 40% -> 7, 50% -> 6, 60% -> 4, 70% -> 3. Pinned exactly: a drift in counts or verdicts is an explicit decision, not noise.",
+  "strong_ratio_cut": 0.6,
+  "by_run": {
+   "brazilian_e_commerce": {"strong": 10, "indicative": 14, "exploratory": 1, "verdict": "degraded"},
+   "credit_card": {"strong": 3, "indicative": 4, "exploratory": 2, "verdict": "degraded"},
+   "default_064005": {"strong": 11, "indicative": 0, "exploratory": 3, "verdict": "pass"},
+   "default_071054": {"strong": 5, "indicative": 3, "exploratory": 0, "verdict": "pass"},
+   "genai_llm_usage": {"strong": 9, "indicative": 2, "exploratory": 0, "verdict": "pass"},
+   "hr_attrition": {"strong": 8, "indicative": 2, "exploratory": 1, "verdict": "pass"},
+   "stack_overflow_2018": {"strong": 3, "indicative": 2, "exploratory": 1, "verdict": "degraded"},
+   "world_cup": {"strong": 3, "indicative": 3, "exploratory": 0, "verdict": "degraded"}
+  }
+ },
+ "quantitative_coverage_gaps": {
+  "note": "F3 measurement of the number-deletion disease on the clean corpus: quantitative-section claims published with zero number_verified tokens, via validate_report_bundle. Section list expanded 2026-07-23 (cross-review adjudication): the section-5.1 HR sanitization ('The dataset contains employee records with attributes...') was published in hr_attrition Executive Summary c1, outside the original Business Findings / Key EDA Insights / Data Quality Findings list, so Executive Summary and Dataset Overview joined QUANTITATIVE_SECTIONS; all three section-5.1 draft-vs-published pairs are now flagged (stack_overflow_2018 claim_3, default_071054 c3, hr_attrition c1). Selected Analysis Focus / Business Recommendations / Limitations stay out. Total 15->26: +11 new gaps in the two added sections, 0 removed. New entries are numberless prose citing numeric evidence ('a large number of responses' over rows/columns refs) or verbal quantitative facts ('non-significant', 'extreme missing rates', 'no missing values'); borderline-qualitative default_064005 claim_2 (schema-file purpose, cites a column-count ref) and claim_8 (distribution shape, same class as the already-pinned stack_overflow_2018 claim_5) kept in per the zero-verified-numbers definition. Disclosure metric only: no finding, no rewrite, no gate_verdict change. Platform deterministic-source fallback claims are exempt (none exist in this corpus).",
+  "total": 26,
+  "by_run": {
+   "brazilian_e_commerce": 1,
+   "credit_card": 1,
+   "default_064005": 11,
+   "default_071054": 2,
+   "genai_llm_usage": 3,
+   "hr_attrition": 5,
+   "stack_overflow_2018": 3,
+   "world_cup": 0
+  }
+ }
+}

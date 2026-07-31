@@ -1,0 +1,7 @@
+customer_id,name,region,signup_date
+CU001,Alice Chen,East,2025-11-01
+CU002,Bob Li,West,2025-11-03
+CU003,Carol Wang,East,2025-12-10
+CU004,David Zhao,North,2026-01-05
+CU004,David Zhao,North,2026-01-05
+CU005,Eve Sun,South,2026-02-01

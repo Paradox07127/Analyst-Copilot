@@ -1,0 +1,36 @@
+# Single-service production deployment. From this directory:
+#   docker compose up --build
+# App: http://127.0.0.1:8000 (published on host loopback only, see §14).
+# Optional Caddy front proxy:  docker compose --profile caddy up --build
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: docker/app/Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Named volume by default. To keep data on the host instead, replace with
+      # a bind mount to a dedicated directory, e.g. ./workspace:/workspace —
+      # never share an uncontrolled host directory.
+      - workspace:/workspace
+    environment:
+      EDA_WORKSPACE: /workspace
+      # Live LLM providers: set EDA_LLM_PROVIDER / EDA_LLM_MODEL and the
+      # provider API key here or via an env_file (never bake keys into images).
+      EDA_LLM_PROVIDER: offline
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  workspace:

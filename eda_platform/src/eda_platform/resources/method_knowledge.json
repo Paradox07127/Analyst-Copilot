@@ -1,0 +1,143 @@
+{
+  "_note": "Original heuristics written for this project. Semantics cross-checked against the scipy and statsmodels documentation listed in references.",
+  "references": [
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_ind.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.mannwhitneyu.html",
+    "https://www.statsmodels.org/stable/generated/statsmodels.stats.oneway.anova_oneway.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.kruskal.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_rel.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wilcoxon.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.chi2_contingency.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.fisher_exact.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.pearsonr.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.spearmanr.html",
+    "https://www.statsmodels.org/stable/generated/statsmodels.stats.proportion.proportions_ztest.html",
+    "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.shapiro.html"
+  ],
+  "statistical_tests": [
+    {
+      "when": "numeric outcome, 2 independent groups, ~normal or n>=30 each",
+      "method": "Welch t-test",
+      "caveats": "default over Student t; handles unequal variances",
+      "tags": ["comparison"]
+    },
+    {
+      "when": "numeric outcome, 2 independent groups, non-normal or ordinal",
+      "method": "Mann-Whitney U",
+      "caveats": "rank-based; a median-shift reading needs similar shapes",
+      "tags": ["comparison", "distribution"]
+    },
+    {
+      "when": "numeric outcome, 3+ independent groups, ~normal",
+      "method": "Welch ANOVA",
+      "caveats": "robust to unequal variances; add corrected post-hoc tests",
+      "tags": ["comparison"]
+    },
+    {
+      "when": "numeric outcome, 3+ independent groups, non-normal",
+      "method": "Kruskal-Wallis H",
+      "caveats": "omnibus only; locate differences with a post-hoc (Dunn)",
+      "tags": ["comparison", "distribution"]
+    },
+    {
+      "when": "paired numeric measurements, differences ~normal",
+      "method": "paired t-test",
+      "caveats": "pairs must be matched one-to-one",
+      "tags": ["comparison"]
+    },
+    {
+      "when": "paired numeric measurements, differences non-normal",
+      "method": "Wilcoxon signed-rank",
+      "caveats": "zero differences are dropped by default",
+      "tags": ["comparison"]
+    },
+    {
+      "when": "2 categorical variables, expected counts >= 5 per cell",
+      "method": "chi-square independence test",
+      "caveats": "use raw counts, never percentages",
+      "tags": ["share", "comparison"]
+    },
+    {
+      "when": "2 categorical variables, 2x2 table, any expected count < 5",
+      "method": "Fisher exact test",
+      "caveats": "exact; chi-square is the large-count alternative",
+      "tags": ["share", "comparison"]
+    },
+    {
+      "when": "2 numeric variables, linear association",
+      "method": "Pearson r",
+      "caveats": "linear only; outlier-sensitive; not causal",
+      "tags": ["relationship"]
+    },
+    {
+      "when": "2 numeric or ordinal variables, monotonic association",
+      "method": "Spearman rho",
+      "caveats": "rank-based; robust to outliers and nonlinearity",
+      "tags": ["relationship", "trend"]
+    },
+    {
+      "when": "2 group proportions (e.g. conversion rates), large counts",
+      "method": "two-proportion z-test",
+      "caveats": "small counts: Fisher exact on the 2x2 counts instead",
+      "tags": ["comparison", "share"]
+    },
+    {
+      "when": "normality check before choosing a test",
+      "method": "Shapiro-Wilk",
+      "caveats": "p-value may be inaccurate for n > 5000; confirm with a Q-Q plot",
+      "tags": ["distribution"]
+    }
+  ],
+  "chart_selection": [
+    {
+      "intent": "comparison",
+      "chart": "bar chart (horizontal when labels are long)",
+      "caveats": "value axis starts at zero; sort unless order is natural"
+    },
+    {
+      "intent": "comparison",
+      "chart": "grouped bar (2 series) or small multiples (3+)",
+      "caveats": "grouped bars get unreadable past ~2 series"
+    },
+    {
+      "intent": "trend",
+      "chart": "line chart over time",
+      "caveats": "keep the time axis continuous; never truncate it"
+    },
+    {
+      "intent": "trend",
+      "chart": "multi-line for several series",
+      "caveats": "cap at ~5 lines; label lines directly"
+    },
+    {
+      "intent": "distribution",
+      "chart": "histogram",
+      "caveats": "bin width changes the story; try several widths"
+    },
+    {
+      "intent": "distribution",
+      "chart": "box plot per group",
+      "caveats": "hides multimodality; annotate group sizes"
+    },
+    {
+      "intent": "share",
+      "chart": "bar of shares; pie only if <= 5 slices",
+      "caveats": "never a pie over 5 slices; avoid 3D and donut variants"
+    },
+    {
+      "intent": "share",
+      "chart": "100% stacked bar across a second dimension",
+      "caveats": "only the baseline segment compares easily; keep segment order fixed"
+    },
+    {
+      "intent": "relationship",
+      "chart": "scatter plot",
+      "caveats": "large n overplots: sample, add transparency, or hexbin"
+    },
+    {
+      "intent": "flow",
+      "chart": "funnel or ordered bar of stage counts",
+      "caveats": "preserve stage order; rates relative to the first stage"
+    }
+  ]
+}

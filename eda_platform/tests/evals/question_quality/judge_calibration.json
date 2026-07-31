@@ -1,0 +1,145 @@
+{
+  "_meta": {
+    "title": "Judge calibration set for question-quality rubric (M4 eval week / M6.1 T3)",
+    "created_at": "2026-07-05",
+    "rubric": "rubric.md in this directory; dimensions: answerability / business_value / specificity / data_support, each 1-5; expected_overall = arithmetic mean; reject if answerability<=2 or data_support<=2",
+    "context_datasets": "e-commerce golden set (ecommerce_orders/customers/products/marketing.csv) and chinese_sales_gbk.csv under eda_platform/tests/golden/data/; known facts: customers.customer_id duplicated (CU004), orders contains orphan CU999, no click/traffic data exists anywhere",
+    "sources": "items q01-q04 are verbatim template-route outputs from an offline run_auto_eda on the e-commerce golden set (2026-07-05); q05-q12 are handcrafted anchors",
+    "usage": "an LLM judge must reproduce expected_overall within +/-0.5 on >=80% of items and agree on every reject flag before it may score real candidates (rubric.md section 3)",
+    "human_review_status": "pending_human_review — 人工评分待用户执行;human_* 字段留空,由评审人填写"
+  },
+  "items": [
+    {
+      "id": "q01",
+      "origin": "template_route",
+      "question_en": "Which ecommerce_products.csv category groups drive the most amount from ecommerce_orders.csv?",
+      "expected_scores": {"answerability": 5, "business_value": 4, "specificity": 4, "data_support": 5},
+      "expected_overall": 4.5,
+      "expected_reject": false,
+      "rationale": "跨表聚合建立在已验证的高置信 join(orders.product_id->products.product_id, multiplier 1.0)上,一条 SQL 可答;品类贡献直接支撑品类策略;文案带表名略生硬但对象与口径明确。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q02",
+      "origin": "template_route",
+      "question_en": "Which region groups have the highest average spend in ecommerce_marketing.csv?",
+      "expected_scores": {"answerability": 5, "business_value": 3, "specificity": 4, "data_support": 5},
+      "expected_overall": 4.25,
+      "expected_reject": false,
+      "rationale": "单表分组均值,无质量红旗;监控型信息,单独看不直接改变预算决策;指标(平均花费)与分组列明确。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q03",
+      "origin": "template_route",
+      "question_en": "How is amount trending over order_date in ecommerce_orders.csv?",
+      "expected_scores": {"answerability": 4, "business_value": 3, "specificity": 3, "data_support": 4},
+      "expected_overall": 3.5,
+      "expected_reject": false,
+      "rationale": "可答但样本仅 8 单、跨两个月,趋势结论必须带小样本限定;'如何变化'未定义粒度(日/月)与指标口径(合计/均值)。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q04",
+      "origin": "template_route",
+      "question_en": "Which product_id groups have the highest average amount in ecommerce_orders.csv?",
+      "expected_scores": {"answerability": 5, "business_value": 2, "specificity": 4, "data_support": 4},
+      "expected_overall": 3.75,
+      "expected_reject": false,
+      "rationale": "可直接回答,但每个 product_id 的订单金额几乎就是单价(重复购买极少),平均金额榜近似价格榜,业务增量小;若换成 category 或叠加数量会更有价值。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q05",
+      "origin": "handcrafted_positive",
+      "question_en": "Which product category generated the highest order amount in February 2026, and how does it compare to January 2026?",
+      "expected_scores": {"answerability": 5, "business_value": 5, "specificity": 5, "data_support": 4},
+      "expected_overall": 4.75,
+      "expected_reject": false,
+      "rationale": "高分锚点:时间窗、对象(类别)、指标(订单金额)、对比口径全部明确;join 干净;直接支撑品类与备货决策;仅样本量小扣一档数据支撑。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q06",
+      "origin": "handcrafted_positive",
+      "question_en": "Which marketing channel is most cost-efficient, measured as spend per distinct customer in the same region?",
+      "expected_scores": {"answerability": 4, "business_value": 5, "specificity": 4, "data_support": 3},
+      "expected_overall": 4.0,
+      "expected_reject": false,
+      "rationale": "渠道预算取舍问题,价值高;可答但必须两侧先各自聚合再关联(region 是维度不是键,直接 join 会扇形放大),且 region 关联只是弱代理——数据支撑降档。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q07",
+      "origin": "handcrafted_negative_vague",
+      "question_en": "What interesting patterns are hidden in the data?",
+      "expected_scores": {"answerability": 1, "business_value": 2, "specificity": 1, "data_support": 3},
+      "expected_overall": 1.75,
+      "expected_reject": true,
+      "rationale": "低分锚点:完全开放式,无对象、无口径、无可判定答案;'有趣'不可操作。数据本身没问题,但问题不成立,按 D1<=2 硬性否决。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q08",
+      "origin": "handcrafted_negative_no_data",
+      "question_en": "What is the click-through rate of each marketing channel?",
+      "expected_scores": {"answerability": 1, "business_value": 4, "specificity": 4, "data_support": 1},
+      "expected_overall": 2.5,
+      "expected_reject": true,
+      "rationale": "问题本身具体且有业务价值,但四张表只有 spend,没有曝光/点击数据——现有数据完全无法回答;judge 不得臆造列。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q09",
+      "origin": "handcrafted_negative_trivial_pair",
+      "question_en": "What is the correlation between order amount in yuan and the same order amount in cents?",
+      "expected_scores": {"answerability": 5, "business_value": 1, "specificity": 4, "data_support": 4},
+      "expected_overall": 3.5,
+      "expected_reject": false,
+      "rationale": "构造性恒等(线性换算列,r=1 by construction)——M4 P0-b 修复的退化相关同型;技术上可算所以可回答性高,但业务价值 1 分:知道了等于没知道。校准点:judge 必须识别'可算但无意义'。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q10",
+      "origin": "handcrafted_negative_method_trap",
+      "question_en": "Joining orders directly to customers, what is the total order amount per region?",
+      "expected_scores": {"answerability": 2, "business_value": 3, "specificity": 4, "data_support": 2},
+      "expected_overall": 2.75,
+      "expected_reject": true,
+      "rationale": "方法论陷阱锚点:customers 里 CU004 重复,'直接连接'的前提会把 North 金额翻倍,且丢掉孤儿单 CU999 无说明;问题前提错误 => D1、D4 都到否决线。judge 应指出需先去重。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q11",
+      "origin": "handcrafted_negative_overbroad",
+      "question_en": "Analyze all relationships between all columns of all tables and give a complete report.",
+      "expected_scores": {"answerability": 2, "business_value": 2, "specificity": 1, "data_support": 3},
+      "expected_overall": 2.0,
+      "expected_reject": true,
+      "rationale": "低分锚点:一题打包无穷子问题,既不可在单次分析内完整回答,也没有任何决策指向;'完整报告'不是一个问题。",
+      "human_scores": null,
+      "human_notes": null
+    },
+    {
+      "id": "q12",
+      "origin": "handcrafted_positive_zh_dataset",
+      "question_en": "In the Chinese sales dataset, which region has the highest total sales, and does the online/offline channel mix differ across regions?",
+      "expected_scores": {"answerability": 4, "business_value": 4, "specificity": 4, "data_support": 3},
+      "expected_overall": 3.75,
+      "expected_reject": false,
+      "rationale": "双子问但同一口径可一次回答;chinese_sales_gbk 仅 5 行且订单数含缺失,结论须带样本限定;检验 judge 对非拉丁列名数据集的处理。",
+      "human_scores": null,
+      "human_notes": null
+    }
+  ]
+}

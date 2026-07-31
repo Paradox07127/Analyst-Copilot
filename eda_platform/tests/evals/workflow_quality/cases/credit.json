@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "case_version": "1.0.0",
+  "name": "credit",
+  "description": "Credit-card guardrail case: signed PCA and elapsed Time must not become HHI or calendar coverage.",
+  "input_files": ["creditcard.csv"],
+  "business_context": "Fraud-class payment amount analysis; PCA components are signed features and Time is elapsed seconds.",
+  "expected_dataset_count": 1,
+  "expected_answers": [
+    {
+      "question_pattern": "concentrated is Amount across Class.*HHI",
+      "required_output_patterns": ["HHI is 0\\.9952", "top share 0\\.9976"]
+    }
+  ],
+  "required_executive_summary_patterns": ["Amount across Class.*HHI"],
+  "forbidden_output_patterns": [
+    "V[0-9]+.*HHI",
+    "HHI.*V[0-9]+",
+    "Time.*(?:calendar|month|coverage)",
+    "(?:calendar|month|coverage).*Time",
+    "threshold.*(?:answered|equals|=)",
+    "\\bp(?:-value)?\\s*[=:]?\\s*0(?:\\D|$)"
+  ],
+  "max_tokens": 0,
+  "max_duration_seconds": 25.0
+}

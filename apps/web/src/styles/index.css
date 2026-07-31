@@ -1,0 +1,316 @@
+/* Latin-only subsets: product UI is English. Avoid shipping every script. */
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-sans/latin-700.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+@import "./design-tokens.css";
+@import "tailwindcss";
+
+/* Map runtime design tokens into Tailwind utilities (bg-surface, text-status-ok,
+ * border-rail-border, font-sans, rounded-base, ...). `inline` keeps utilities
+ * pointing at the live var so light/dark switching works without re-mapping. */
+@theme inline {
+  --color-*: initial;
+  --color-primary: var(--color-primary);
+  --color-bg: var(--color-bg);
+  --color-surface: var(--color-surface);
+  --color-text: var(--color-text);
+  --color-border: var(--color-border);
+  --color-link: var(--color-link);
+  --color-code-bg: var(--color-code-bg);
+  --color-code-text: var(--color-code-text);
+  --color-table-header-bg: var(--color-table-header-bg);
+  --color-table-border: var(--color-table-border);
+  --color-scrim: var(--color-scrim);
+  --color-scrim-strong: var(--color-scrim-strong);
+  --color-hairline: var(--color-hairline);
+  --color-track: var(--color-track);
+  --color-rail-bg: var(--color-rail-bg);
+  --color-rail-border: var(--color-rail-border);
+  --color-rail-hover: var(--color-rail-hover);
+  --color-status-critical: var(--color-status-critical);
+  --color-status-warn: var(--color-status-warn);
+  --color-status-ok: var(--color-status-ok);
+  --color-status-info: var(--color-status-info);
+  --color-status-llm: var(--color-status-llm);
+  --color-status-neutral: var(--color-status-neutral);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --radius-base: var(--radius-base);
+
+  --shadow-card: var(--shadow-card);
+  --shadow-panel: var(--shadow-panel);
+  --shadow-overlay: var(--shadow-overlay);
+}
+
+/* Base scales. Deliberately NOT `inline`: utilities must compile to
+ * `calc(var(--spacing) * n)` and `var(--text-sm)` so the runtime overrides in
+ * design-tokens.css still apply. `inline` would bake these values into every
+ * utility at build time and silently break [data-density="compact"]. */
+@theme {
+  /* The unit every p-*, gap-*, m-* and size utility multiplies (Tailwind's
+   * default is 0.25rem). Anthropic's guidance is "maintain generous padding"
+   * but publishes no numeric spacing scale, so the ladder stays Tailwind's and
+   * only its base unit is retuned. design-tokens.css drops this to 0.22rem for
+   * compact density — keep the two in step. */
+  --spacing: 0.275rem;
+
+  /* Headings land exactly on Anthropic's published heading tokens
+   * (font-heading-lg/xl/2xl/3xl = 20/24/28/36px at 1.25/1.25/1.1/1). Body sits
+   * one step below their text tokens because this app uses text-sm as its body
+   * (336 call sites) and text-xs as its caption (315), and matches their
+   * absolute leading rather than their ratio: 15px x 1.5 = 22.5px against
+   * their 16px x 1.4 = 22.4px. */
+  --text-xs: 0.8125rem; /* 13px — caption */
+  --text-xs--line-height: 1.5;
+  --text-sm: 0.9375rem; /* 15px — body */
+  --text-sm--line-height: 1.5;
+  --text-base: 1rem; /* 16px */
+  --text-base--line-height: 1.5;
+  --text-lg: 1.25rem; /* 20px */
+  --text-lg--line-height: 1.25;
+  --text-xl: 1.5rem; /* 24px */
+  --text-xl--line-height: 1.25;
+  --text-2xl: 1.75rem; /* 28px */
+  --text-2xl--line-height: 1.1;
+  --text-3xl: 2.25rem; /* 36px */
+  --text-3xl--line-height: 1;
+
+  /* Anthropic's border-radius-xs..xl ladder. --radius-base (8px, from
+   * brand config) already equals the radius their own example uses
+   * for cards and buttons, so it keeps its value; this only adds the steps
+   * above and below it for chips vs panels vs overlays. */
+  --radius-xs: 0.25rem; /* 4px */
+  --radius-sm: 0.375rem; /* 6px */
+  --radius-md: 0.5rem; /* 8px */
+  --radius-lg: 0.625rem; /* 10px */
+  --radius-xl: 0.75rem; /* 12px */
+
+  /* Reading column, matching the width ChatGPT's message column uses at its
+   * widest breakpoint (xl:max-w-[48rem]). ~70 characters at the body size,
+   * inside the 45-75 range Bringhurst recommends. */
+  --container-content: 48rem;
+  /* Data pages are not prose: a 9-dataset profile table inside 48rem wraps
+   * every row. They get their own ceiling, wide enough for ~10 numeric columns
+   * and still short of edge-to-edge on a 1512px laptop. */
+  --container-data: 84rem;
+
+  /* One ease-out curve only. Deceleration reads as physical; bounce and
+   * elastic read as decoration, and this is an instrument. */
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+
+  /* Motion ladder, named by purpose rather than milliseconds so a retune
+   * happens here instead of across 200 class strings. Before this the app used
+   * four ad-hoc durations (150/200/300/500) with no rule for picking one.
+   * No exit step yet: React unmounts synchronously, so nothing in the app can
+   * currently animate on the way out. */
+  --transition-duration-fast: 150ms; /* press, colour, hover */
+  --transition-duration-base: 200ms; /* disclosure, panel, marker slide */
+  --transition-duration-slow: 300ms; /* progress fill, arrival highlight */
+
+  /* Keyframes live at file scope below, not in here: Tailwind only emits
+   * @theme keyframes for animations it sees used, and `.skeleton` references
+   * `sweep` from plain CSS where that detection does not reach. */
+  --animate-breathe: breathe 2s var(--ease-out-quart) infinite;
+  --animate-enter: rise-in var(--transition-duration-slow) var(--ease-out-quart) both;
+  /* One token, not `animate-enter animate-land`: both utilities set the
+   * `animation` shorthand, so the second would silently replace the first. */
+  --animate-arrive:
+    rise-in var(--transition-duration-slow) var(--ease-out-quart) both,
+    land 1.6s var(--ease-out-quart) both;
+  /* For overlays that carry a positioning transform of their own — a 4px rise
+   * would clobber a `-translate-x-1/2` centring. */
+  --animate-fade: fade-in var(--transition-duration-base) var(--ease-out-quart) both;
+}
+
+/* `breathe` replaces Tailwind's `animate-pulse` on anything that means "a
+ * process is running": pulse rides its own cubic-bezier(0.4,0,0.6,1), so the
+ * only animation in the app was ignoring the app's only easing token. */
+@keyframes breathe {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Deliberately not `breathe`. A breathing element is working; a sweeping one is
+ * empty and waiting to be filled. Those were the same animation before. */
+@keyframes sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* The reduced-motion substitute for `rise-in`: same job, no movement. */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Decaying tint for a row that just arrived in an append-only log. Answers
+ * "what changed" without the user re-reading the list. */
+@keyframes land {
+  from {
+    background-color: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  }
+}
+
+/* Loading placeholder. The gradient carries the sweep, so it ships with the
+ * animation rather than as a utility pair repeated at each call site.
+ *
+ * The highlight is mixed toward --color-text rather than picked from another
+ * surface token, because no two surfaces are far enough apart to see: measured,
+ * surface-to-code-bg is 2/255 in light and 4/255 in dark, the same trap
+ * --color-rail-hover was added to escape (design-tokens.css). Mixing toward the
+ * text colour also self-corrects per theme — darker than the track in light,
+ * lighter in dark — where a fixed second hex would only work in one. */
+.skeleton {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-track) 25%,
+    color-mix(in srgb, var(--color-track) 88%, var(--color-text)) 50%,
+    var(--color-track) 75%
+  );
+  background-size: 200% 100%;
+  animation: sweep 1.4s linear infinite;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  min-height: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+body {
+  overflow: hidden;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+/* One app-wide focus ring rather than a `focus-visible:` variant on ~200 hand
+ * written control classes. Offset so it clears the control's own border on the
+ * tinted surfaces; the brand teal already clears 3:1 against both themes. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* Same reasoning as the focus ring above, and the same scale of problem: 170
+ * hand-written control class strings carry a `hover:` with no `transition`, so
+ * every one of them snapped.
+ *
+ * MUST stay inside `@layer base`. Unlayered — which is how the focus ring above
+ * is deliberately written — outranks every `@layer utilities` rule regardless of
+ * specificity, so this shorthand silently replaced the property list of every
+ * `transition`/`transition-transform` utility in the app and dropped `transform`
+ * from it. That broke the press-scale on Button and IconButton. In `base` it
+ * loses to any utility, which is the intent: a floor, not an override.
+ *
+ * Colour and opacity only. Anything that moves opts in at the call site, so this
+ * can never animate a layout property by accident. */
+@layer base {
+  :where(a, button, summary, label, input, select, textarea, [role="tab"]) {
+    transition-property: color, background-color, border-color, outline-color,
+      box-shadow, opacity, fill, stroke;
+    transition-duration: var(--transition-duration-fast);
+    transition-timing-function: var(--ease-out-quart);
+  }
+}
+
+/* Figures must line up when they stack: a metric tile column, a duration list,
+ * a numeric table. Applied by class so prose keeps proportional digits. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* Three exceptions the blanket rule above used to swallow. Movement is what
+   * triggers vestibular symptoms; a liveness indicator that only changes
+   * opacity or background position does not move anything, and freezing it
+   * costs a reduced-motion user the only signal a multi-minute agent run gives
+   * that it is still alive. Slowed rather than restored, per WCAG 2.3.3. */
+  .animate-breathe,
+  .skeleton {
+    animation-duration: 2.8s !important;
+    animation-iteration-count: infinite !important;
+  }
+
+  /* Progress that advances still has to be seen advancing. Marks the phase bar
+   * and the launcher ring, whose transitions carry a measured fraction. */
+  .motion-progress {
+    transition-duration: var(--transition-duration-slow) !important;
+  }
+
+  /* Entrances keep the crossfade and lose the 4px rise. */
+  .animate-enter,
+  .animate-arrive,
+  .animate-fade {
+    animation: fade-in var(--transition-duration-base) linear both !important;
+  }
+}
+
+@media (max-width: 639px) {
+  /* Long generated identifiers and form controls must shrink inside the
+   * single-column mobile workbench instead of widening the page. */
+  main,
+  main > *,
+  form,
+  fieldset,
+  input,
+  textarea,
+  select {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+/* Native file inputs render an unstyled OS button that reads as unfinished
+ * beside the token-styled controls around it. */
+input[type="file"]::file-selector-button {
+  margin-right: calc(var(--spacing) * 3);
+  padding: calc(var(--spacing) * 1.5) calc(var(--spacing) * 3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+input[type="file"]::file-selector-button:hover {
+  background-color: var(--color-bg);
+}

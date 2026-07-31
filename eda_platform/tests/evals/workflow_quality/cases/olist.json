@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "case_version": "1.0.0",
+  "name": "olist",
+  "description": "Brazilian e-commerce business-metric and report-coverage regression case.",
+  "input_files": [
+    "product_category_name_translation.csv",
+    "olist_sellers_dataset.csv",
+    "olist_order_reviews_dataset.csv",
+    "olist_geolocation_dataset.csv",
+    "olist_customers_dataset.csv",
+    "olist_orders_dataset.csv",
+    "olist_order_items_dataset.csv",
+    "olist_order_payments_dataset.csv",
+    "olist_products_dataset.csv"
+  ],
+  "business_context": "E-commerce operations: fulfillment, late delivery, GMV, order value, freight and payment mix.",
+  "expected_dataset_count": 9,
+  "expected_answers": [
+    {"question_pattern": "total GMV", "required_output_patterns": ["13591643\\.7"]},
+    {"question_pattern": "average order value", "required_output_patterns": ["137\\.7541"]},
+    {"question_pattern": "share of rows.*late", "required_output_patterns": ["8\\.1129%"]},
+    {"question_pattern": "fulfillment take", "required_output_patterns": ["12\\.4973 days"]},
+    {"question_pattern": "share of total value.*freight", "required_output_patterns": ["14\\.2134%"]},
+    {
+      "question_pattern": "concentrated is payment_value.*HHI",
+      "required_output_patterns": ["HHI is 0\\.6467", "top share 0\\.7834"]
+    },
+    {
+      "question_pattern": "payment_type groups.*average payment_value",
+      "required_output_patterns": ["credit_card.*163\\.3"]
+    },
+    {
+      "question_pattern": "freight_value trending",
+      "required_output_patterns": ["6\\.0125.*19\\.8396"]
+    }
+  ],
+  "required_executive_summary_patterns": ["fulfillment", "late", "GMV"],
+  "forbidden_output_patterns": [
+    "payment_sequential.*(?:ANOVA|p-value)",
+    "(?:seller|customer|geolocation)_zip_code_prefix.*(?:average|mean)",
+    "\\bp(?:-value)?\\s*[=:]?\\s*0(?:\\D|$)",
+    "\\[Low relevance\\]"
+  ],
+  "max_tokens": 0,
+  "max_duration_seconds": 35.0
+}

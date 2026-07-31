@@ -1,0 +1,7 @@
+campaign_id,region,channel,spend
+M01,East,email,500
+M02,East,social,800
+M03,West,email,300
+M04,North,social,400
+M05,South,email,250
+M06,East,search,650

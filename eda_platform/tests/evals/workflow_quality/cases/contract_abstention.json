@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "case_version": "4.0.0",
+  "name": "contract_abstention",
+  "description": "Structural, type, unit-scale, and postcondition failures must abstain through the real batch execution path.",
+  "input_files": ["contract_abstention.csv"],
+  "business_context": "Publish a metric only when the executed result satisfies its complete deterministic answer contract.",
+  "baseline_policy": {
+    "max_duration_mean_regression_ratio": 0.15,
+    "max_duration_p95_regression_ratio": 0.15,
+    "max_duration_mean_regression_seconds": 0.25,
+    "max_duration_p95_regression_seconds": 0.25
+  },
+  "probe_questions": [
+    {
+      "question_id": "q_eval_threshold_contract",
+      "question": "Which threshold minimizes false-positive and false-negative cost?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count FROM {{relation}}",
+      "answer_contract": {
+        "kind": "threshold",
+        "required_column_tokens": ["threshold"],
+        "abstention_code": "answer_schema_mismatch"
+      }
+    },
+    {
+      "question_id": "q_eval_empty_result",
+      "question": "What threshold is supported by the eligible rows?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT CAST(NULL AS DOUBLE) AS threshold FROM {{relation}} WHERE 1 = 0",
+      "answer_contract": {
+        "kind": "threshold",
+        "required_column_tokens": ["threshold"]
+      }
+    },
+    {
+      "question_id": "q_eval_missing_metric_output",
+      "question": "What is the gross merchandise value?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count FROM {{relation}}",
+      "answer_contract": {
+        "kind": "metric",
+        "metric_id": "gmv",
+        "expected_units": {"row_count": "count", "gmv_total": "currency"}
+      },
+      "produced_units": {"row_count": "count", "gmv_total": "currency"}
+    },
+    {
+      "question_id": "q_eval_non_finite_metric",
+      "question": "What is the typed gross merchandise value?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count, 'not-a-number' AS gmv_total FROM {{relation}}",
+      "answer_contract": {
+        "kind": "metric",
+        "metric_id": "gmv",
+        "expected_units": {"row_count": "count", "gmv_total": "currency"}
+      },
+      "produced_units": {"row_count": "count", "gmv_total": "currency"}
+    },
+    {
+      "question_id": "q_eval_unit_scale",
+      "question": "What concentration fraction is supported by the data?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count, 64.67 AS hhi, 78.34 AS top_share FROM {{relation}}",
+      "answer_contract": {
+        "kind": "metric",
+        "metric_id": "concentration_hhi",
+        "expected_units": {"row_count": "count", "hhi": "fraction", "top_share": "fraction"}
+      },
+      "produced_units": {"row_count": "count", "hhi": "fraction", "top_share": "fraction"}
+    },
+    {
+      "question_id": "q_eval_negative_duration",
+      "question": "What non-negative fulfillment duration is supported?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count, -2.0 AS avg_fulfillment_days, -1.0 AS median_fulfillment_days FROM {{relation}}",
+      "answer_contract": {
+        "kind": "metric",
+        "metric_id": "fulfillment_time",
+        "expected_units": {"row_count": "count", "avg_fulfillment_days": "days", "median_fulfillment_days": "days"}
+      },
+      "produced_units": {"row_count": "count", "avg_fulfillment_days": "days", "median_fulfillment_days": "days"}
+    },
+    {
+      "question_id": "q_eval_unit_metadata_mismatch",
+      "question": "What unit-verified concentration fraction is supported?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count, 0.6467 AS hhi, 0.7834 AS top_share FROM {{relation}}",
+      "answer_contract": {
+        "kind": "metric",
+        "metric_id": "concentration_hhi",
+        "expected_units": {"row_count": "count", "hhi": "fraction", "top_share": "fraction"}
+      },
+      "produced_units": {"row_count": "count", "hhi": "percent", "top_share": "percent"}
+    },
+    {
+      "question_id": "q_eval_seeded_currency",
+      "question": "What seeded-currency GMV is supported?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count, 100.0 AS gmv_total FROM {{relation}}",
+      "answer_contract": {
+        "kind": "metric",
+        "metric_id": "gmv",
+        "expected_units": {"row_count": "count", "gmv_total": "currency"}
+      },
+      "produced_units": {"row_count": "count", "gmv_total": "BRL"}
+    }
+  ],
+  "expected_dataset_count": 1,
+  "expected_answers": [
+    {
+      "question_pattern": "seeded-currency GMV",
+      "required_output_patterns": ["Total GMV over 10 rows is 100"]
+    }
+  ],
+  "expected_abstentions": [
+    {
+      "question_pattern": "Which threshold minimizes",
+      "allowed_codes": ["answer_schema_mismatch"]
+    },
+    {
+      "question_pattern": "threshold is supported by the eligible rows",
+      "allowed_codes": ["empty_query_result"]
+    },
+    {
+      "question_pattern": "gross merchandise value",
+      "allowed_codes": ["missing_metric_output"]
+    },
+    {
+      "question_pattern": "typed gross merchandise value",
+      "allowed_codes": ["non_finite_metric_output"]
+    },
+    {
+      "question_pattern": "concentration fraction",
+      "allowed_codes": ["hhi_out_of_range"]
+    },
+    {
+      "question_pattern": "non-negative fulfillment duration",
+      "allowed_codes": ["duration_out_of_range"]
+    },
+    {
+      "question_pattern": "unit-verified concentration fraction",
+      "allowed_codes": ["metric_unit_mismatch"]
+    }
+  ],
+  "required_executive_summary_patterns": [],
+  "forbidden_output_patterns": [
+    "threshold (?:is|equals) [-+]?\\d",
+    "recommended threshold",
+    "\\bp(?:-value)?\\s*[=:]?\\s*0(?:\\D|$)"
+  ],
+  "min_quality_dataset_coverage": 0.0,
+  "max_tokens": 0,
+  "max_duration_seconds": 2.0
+}

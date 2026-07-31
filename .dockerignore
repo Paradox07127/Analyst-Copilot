@@ -1,0 +1,14 @@
+# Context for docker/app/Dockerfile (built from the repo root).
+.git
+.venv
+.uv-cache
+.env
+**/.env
+**/__pycache__
+**/node_modules
+apps/web/dist
+eda_platform/workspace
+eda_agent_platform.egg-info
+datasets
+docs
+single_eda_agent Ver1.0

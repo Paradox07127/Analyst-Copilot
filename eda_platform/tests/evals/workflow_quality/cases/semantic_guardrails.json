@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case_version": "1.0.0",
+  "name": "semantic_guardrails",
+  "description": "Numeric postal codes must not escape the verified code role into automatic metric answers.",
+  "input_files": ["semantic_guardrails.csv"],
+  "business_context": "Audit regional customer coverage without treating postal codes as quantities.",
+  "expected_dataset_count": 1,
+  "expected_answers": [],
+  "expected_abstentions": [],
+  "required_executive_summary_patterns": [],
+  "forbidden_output_patterns": [
+    "zip_code_prefix.*(?:average|mean|HHI|p-value)",
+    "(?:average|mean|HHI|p-value).*zip_code_prefix",
+    "\\bp(?:-value)?\\s*[=:]?\\s*0(?:\\D|$)"
+  ],
+  "max_tokens": 0,
+  "max_duration_seconds": 10.0
+}

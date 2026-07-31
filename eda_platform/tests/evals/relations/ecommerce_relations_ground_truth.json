@@ -1,0 +1,99 @@
+{
+  "_meta": {
+    "title": "Human-annotated relationship ground truth for the e-commerce multi-table golden set",
+    "annotated_at": "2026-07-05",
+    "annotated_by": "M4 eval week (M6.1 T3); annotator: Claude agent, reviewed against raw CSV contents",
+    "datasets": [
+      "eda_platform/tests/golden/data/ecommerce_orders.csv (8 rows)",
+      "eda_platform/tests/golden/data/ecommerce_customers.csv (6 rows, customer_id duplicated: CU004 twice)",
+      "eda_platform/tests/golden/data/ecommerce_products.csv (4 rows, product_id unique)",
+      "eda_platform/tests/golden/data/ecommerce_marketing.csv (6 rows, campaign_id unique)"
+    ],
+    "direction_semantics": "left = referencing (fact/FK) side, right = referenced (dimension/PK) side; a prediction only counts as a true positive in this FK direction",
+    "annotation_basis": [
+      "Schema semantics: orders is the fact table; customer_id and product_id are foreign keys by naming and by role (each order references one customer and one product).",
+      "Data facts, hand-derived from the CSVs: orders.customer_id -> customers.customer_id: customers holds CU001-CU005 with CU004 duplicated (6 rows / 5 distinct), and orders contains CU999 absent from customers. Hence LEFT JOIN yields 9 rows for 8 orders (O1005 matches the CU004 pair) = multiplier 1.125; left orphan rate 1/8 = 0.125; cardinality many-to-many because both sides repeat keys. This is the deliberate join trap (M4 plan §7 W1, R17 golden design).",
+      "orders.product_id -> products.product_id: products.product_id is unique (4/4), every ordered product exists, so multiplier 1.0, orphan rates 0.0, cardinality many-to-one. This is the clean FK.",
+      "Negatives: region appears in customers and marketing but is a low-cardinality dimension attribute (4 distinct values over 6 rows on both sides), not a key: joining on it fans out. Reverse directions of the two true FKs point at a non-unique right side and must not be adopted as FKs. order_id/campaign_id/product_id cross pairs share an alnum-code shape but have zero value overlap."
+    ],
+    "expected_engine_readings": "expected_validation numbers below are exact, hand-computed from the CSV contents and asserted with a 1e-6 tolerance"
+  },
+  "true_relations": [
+    {
+      "left_dataset": "ecommerce_orders.csv",
+      "left_column": "customer_id",
+      "right_dataset": "ecommerce_customers.csv",
+      "right_column": "customer_id",
+      "expected_confidence_at_least": "medium",
+      "expected_auto_adopted": false,
+      "expected_validation": {
+        "join_row_multiplier": 1.125,
+        "orphan_rate_left": 0.125,
+        "orphan_rate_right": 0.0,
+        "cardinality": "many_to_many",
+        "warnings_required": true
+      },
+      "basis": "True FK with two seeded traps: duplicated CU004 on the right (inflates joins) and orphan CU999 on the left. Must be surfaced for HITL (medium), never auto-adopted."
+    },
+    {
+      "left_dataset": "ecommerce_orders.csv",
+      "left_column": "product_id",
+      "right_dataset": "ecommerce_products.csv",
+      "right_column": "product_id",
+      "expected_confidence_at_least": "high",
+      "expected_auto_adopted": false,
+      "expected_validation": {
+        "join_row_multiplier": 1.0,
+        "orphan_rate_left": 0.0,
+        "orphan_rate_right": 0.0,
+        "cardinality": "many_to_one",
+        "warnings_required": false
+      },
+      "basis": "Clean FK: full containment, unique right side, no orphans. Cleanly joinable, but under the reference-only relationship policy (PR #5 / decision-intelligence design: a join is a deliberate choice inside an approved analysis plan) no relationship auto-adopts — it is surfaced as a high-confidence reference, never merged automatically."
+    }
+  ],
+  "negative_relations": [
+    {
+      "left_dataset": "ecommerce_customers.csv",
+      "left_column": "region",
+      "right_dataset": "ecommerce_marketing.csv",
+      "right_column": "region",
+      "basis": "Shared low-cardinality dimension attribute; joining on it fans out (not a key)."
+    },
+    {
+      "left_dataset": "ecommerce_marketing.csv",
+      "left_column": "region",
+      "right_dataset": "ecommerce_customers.csv",
+      "right_column": "region",
+      "basis": "Same dimension pair in the other direction."
+    },
+    {
+      "left_dataset": "ecommerce_customers.csv",
+      "left_column": "customer_id",
+      "right_dataset": "ecommerce_orders.csv",
+      "right_column": "customer_id",
+      "basis": "Reverse of a true FK: right side (orders) repeats customer ids, so this direction is not a FK adoption target."
+    },
+    {
+      "left_dataset": "ecommerce_products.csv",
+      "left_column": "product_id",
+      "right_dataset": "ecommerce_orders.csv",
+      "right_column": "product_id",
+      "basis": "Reverse of the clean FK; right side is non-unique."
+    },
+    {
+      "left_dataset": "ecommerce_orders.csv",
+      "left_column": "order_id",
+      "right_dataset": "ecommerce_marketing.csv",
+      "right_column": "campaign_id",
+      "basis": "Format-similar alnum codes with zero value overlap; classic false-positive bait."
+    },
+    {
+      "left_dataset": "ecommerce_orders.csv",
+      "left_column": "order_id",
+      "right_dataset": "ecommerce_products.csv",
+      "right_column": "product_id",
+      "basis": "Key-shaped columns, zero overlap."
+    }
+  ]
+}

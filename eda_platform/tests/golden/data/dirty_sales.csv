@@ -1,0 +1,5 @@
+customer_id,signup_date,status,amount,mostly_missing,constant,mixed
+C001,2026-01-01,active,10,,same,100
+C002,not-a-date,pending,20,,same,unknown
+C003,2026-01-03,closed,30,,same,300
+C003,2026-01-03,closed,30,,same,300

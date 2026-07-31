@@ -1,0 +1,141 @@
+[
+  {
+    "seed_id": "group_value_comparison",
+    "name": "Group totals and averages",
+    "question": "How does {value_col} vary across {group_col} segments?",
+    "sql": "SELECT {group_col} AS group_value, COUNT(*) AS row_count, SUM({value_col}) AS total_value, AVG({value_col}) AS avg_value FROM {dataset} GROUP BY 1 ORDER BY total_value DESC",
+    "method": "aggregation",
+    "rationale": "Totals, averages and row counts per segment show where a measure concentrates and which groups behave differently.",
+    "params": [
+      {"name": "group_col", "role": "dimension", "description": "Categorical column to group by."},
+      {"name": "value_col", "role": "measure", "description": "Numeric column to aggregate."}
+    ]
+  },
+  {
+    "seed_id": "top_share_hhi",
+    "name": "Concentration (shares and HHI)",
+    "question": "How concentrated is {value_col} across {group_col} (top shares and HHI)?",
+    "sql": "WITH grouped AS (SELECT {group_col} AS group_value, SUM({value_col}) AS group_total FROM {dataset} WHERE {value_col} IS NOT NULL GROUP BY 1), shares AS (SELECT group_value, group_total, group_total / SUM(group_total) OVER () AS share FROM grouped) SELECT group_value, group_total, share, SUM(POWER(100.0 * share, 2)) OVER () AS hhi FROM shares ORDER BY group_total DESC LIMIT 25",
+    "method": "concentration",
+    "rationale": "Per-group shares plus the Herfindahl-Hirschman Index (sum of squared percentage shares) quantify how dependent the total is on a few groups. HHI definition: https://www.justice.gov/atr/herfindahl-hirschman-index",
+    "params": [
+      {"name": "group_col", "role": "dimension", "description": "Categorical column whose concentration is measured."},
+      {"name": "value_col", "role": "measure", "description": "Numeric column whose total is shared out."}
+    ]
+  },
+  {
+    "seed_id": "missingness_by_group",
+    "name": "Missing-value audit by segment",
+    "question": "Which {group_col} segments have the most missing {target_col} values?",
+    "sql": "SELECT {group_col} AS group_value, COUNT(*) AS row_count, COUNT(*) - COUNT({target_col}) AS missing_rows, 1.0 - COUNT({target_col}) * 1.0 / COUNT(*) AS missing_rate FROM {dataset} GROUP BY 1 ORDER BY missing_rate DESC, row_count DESC",
+    "method": "missingness_audit",
+    "rationale": "Missing data is rarely uniform; grouping the null rate by a segment column shows whether gaps cluster in specific slices (missing-value profiling as popularized by EDA report tools, e.g. https://github.com/ydataai/ydata-profiling).",
+    "params": [
+      {"name": "target_col", "role": "any", "description": "Column whose missing values are audited."},
+      {"name": "group_col", "role": "dimension", "description": "Segment column to break the null rate down by."}
+    ]
+  },
+  {
+    "seed_id": "duplicate_key_audit",
+    "name": "Duplicate key audit",
+    "question": "Are there duplicate {key_col} values that may inflate counts?",
+    "sql": "WITH counted AS (SELECT {key_col} AS key_value, COUNT(*) AS occurrence_count FROM {dataset} WHERE {key_col} IS NOT NULL GROUP BY 1) SELECT key_value, occurrence_count FROM counted WHERE occurrence_count > 1 ORDER BY occurrence_count DESC, key_value LIMIT 50",
+    "method": "duplicate_audit",
+    "rationale": "A key column that repeats silently inflates joins and aggregate counts; listing the repeated key values sizes the problem before any downstream analysis.",
+    "params": [
+      {"name": "key_col", "role": "identifier", "description": "Column expected to identify one row or entity."}
+    ]
+  },
+  {
+    "seed_id": "iqr_outlier_count",
+    "name": "IQR outlier count",
+    "question": "How many {value_col} values fall outside the 1.5 * IQR fences?",
+    "sql": "WITH bounds AS (SELECT quantile_cont({value_col}, 0.25) AS q1, quantile_cont({value_col}, 0.75) AS q3 FROM {dataset}) SELECT COUNT(*) AS outlier_rows, (SELECT COUNT({value_col}) FROM {dataset}) AS non_null_rows, MIN(bounds.q1 - 1.5 * (bounds.q3 - bounds.q1)) AS lower_fence, MIN(bounds.q3 + 1.5 * (bounds.q3 - bounds.q1)) AS upper_fence FROM {dataset}, bounds WHERE {value_col} < bounds.q1 - 1.5 * (bounds.q3 - bounds.q1) OR {value_col} > bounds.q3 + 1.5 * (bounds.q3 - bounds.q1)",
+    "method": "outlier_count",
+    "rationale": "Counts rows outside Tukey's fences (quartiles -/+ 1.5 * IQR), the classic robust screen for candidate outliers in exploratory data analysis.",
+    "params": [
+      {"name": "value_col", "role": "measure", "description": "Numeric column screened for outliers."}
+    ]
+  },
+  {
+    "seed_id": "monthly_trend",
+    "name": "Monthly trend",
+    "question": "How do {value_col} totals evolve month by month over {date_col}?",
+    "sql": "SELECT date_trunc('month', CAST({date_col} AS TIMESTAMP)) AS month_start, COUNT(*) AS row_count, SUM({value_col}) AS total_value, AVG({value_col}) AS avg_value FROM {dataset} WHERE {date_col} IS NOT NULL GROUP BY 1 ORDER BY 1",
+    "method": "time_aggregation",
+    "rationale": "Truncating to calendar months smooths daily noise and exposes trend and seasonality in a measure.",
+    "params": [
+      {"name": "date_col", "role": "timestamp", "description": "Date or datetime column to bucket by month."},
+      {"name": "value_col", "role": "measure", "description": "Numeric column aggregated per month."}
+    ]
+  },
+  {
+    "seed_id": "category_distribution",
+    "name": "Category distribution",
+    "question": "How are rows distributed across {category_col} categories?",
+    "sql": "SELECT {category_col} AS category_value, COUNT(*) AS row_count, COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS share FROM {dataset} GROUP BY 1 ORDER BY row_count DESC LIMIT 30",
+    "method": "distribution",
+    "rationale": "Category frequencies with shares reveal dominant and rare classes before any deeper segmentation.",
+    "params": [
+      {"name": "category_col", "role": "dimension", "description": "Categorical column to tabulate."}
+    ]
+  },
+  {
+    "seed_id": "numeric_quantile_summary",
+    "name": "Numeric quantile summary",
+    "question": "What is the distribution profile of {value_col} (quantiles, mean, spread)?",
+    "sql": "SELECT COUNT({value_col}) AS non_null_rows, MIN({value_col}) AS min_value, quantile_cont({value_col}, 0.05) AS p05, quantile_cont({value_col}, 0.25) AS p25, quantile_cont({value_col}, 0.50) AS median_value, quantile_cont({value_col}, 0.75) AS p75, quantile_cont({value_col}, 0.95) AS p95, MAX({value_col}) AS max_value, AVG({value_col}) AS mean_value, STDDEV_SAMP({value_col}) AS stddev_value FROM {dataset}",
+    "method": "quantile_summary",
+    "rationale": "Quantiles plus mean and standard deviation summarize location, spread and skew of a numeric column in one row, without plotting.",
+    "params": [
+      {"name": "value_col", "role": "measure", "description": "Numeric column to profile."}
+    ]
+  },
+  {
+    "seed_id": "pareto_cumulative_share",
+    "name": "Pareto cumulative share",
+    "question": "Which {group_col} groups account for the bulk of {value_col}?",
+    "sql": "WITH grouped AS (SELECT {group_col} AS group_value, SUM({value_col}) AS group_total FROM {dataset} WHERE {value_col} IS NOT NULL GROUP BY 1) SELECT group_value, group_total, SUM(group_total) OVER (ORDER BY group_total DESC, group_value ROWS UNBOUNDED PRECEDING) AS running_total, SUM(group_total) OVER (ORDER BY group_total DESC, group_value ROWS UNBOUNDED PRECEDING) / SUM(group_total) OVER () AS cumulative_share FROM grouped ORDER BY group_total DESC, group_value LIMIT 50",
+    "method": "pareto",
+    "rationale": "Ranking groups by contribution with a cumulative share shows whether a few groups drive most of the total (Pareto / 80-20 screening).",
+    "params": [
+      {"name": "group_col", "role": "dimension", "description": "Categorical column ranked by contribution."},
+      {"name": "value_col", "role": "measure", "description": "Numeric column contributed to the total."}
+    ]
+  },
+  {
+    "seed_id": "month_over_month_change",
+    "name": "Month-over-month change",
+    "question": "How does monthly {value_col} change month over month along {date_col}?",
+    "sql": "WITH monthly AS (SELECT date_trunc('month', CAST({date_col} AS TIMESTAMP)) AS month_start, SUM({value_col}) AS total_value FROM {dataset} WHERE {date_col} IS NOT NULL GROUP BY 1) SELECT month_start, total_value, total_value - LAG(total_value) OVER (ORDER BY month_start) AS absolute_change, (total_value - LAG(total_value) OVER (ORDER BY month_start)) / NULLIF(LAG(total_value) OVER (ORDER BY month_start), 0) AS relative_change FROM monthly ORDER BY month_start",
+    "method": "time_delta",
+    "rationale": "Month-over-month absolute and relative deltas expose acceleration, slowdown and one-off spikes that a plain trend line hides.",
+    "params": [
+      {"name": "date_col", "role": "timestamp", "description": "Date or datetime column defining the monthly series."},
+      {"name": "value_col", "role": "measure", "description": "Numeric column summed per month."}
+    ]
+  },
+  {
+    "seed_id": "two_dimension_crosstab",
+    "name": "Two-dimension cross tabulation",
+    "question": "How does the {category_col} mix differ across {group_col} segments?",
+    "sql": "SELECT {group_col} AS group_value, {category_col} AS category_value, COUNT(*) AS row_count, COUNT(*) * 1.0 / SUM(COUNT(*)) OVER (PARTITION BY {group_col}) AS share_within_group FROM {dataset} GROUP BY 1, 2 ORDER BY 1, 3 DESC LIMIT 100",
+    "method": "crosstab",
+    "rationale": "A two-way count table with within-group shares shows how a categorical mix shifts across segments.",
+    "params": [
+      {"name": "group_col", "role": "dimension", "description": "Outer segment column."},
+      {"name": "category_col", "role": "dimension", "description": "Inner category column whose mix is compared."}
+    ]
+  },
+  {
+    "seed_id": "distinct_imbalance_audit",
+    "name": "Cardinality and imbalance audit",
+    "question": "Is {target_col} nearly constant or dominated by a single value?",
+    "sql": "WITH freq AS (SELECT {target_col} AS observed_value, COUNT(*) AS occurrence_count FROM {dataset} WHERE {target_col} IS NOT NULL GROUP BY 1) SELECT COUNT(*) AS distinct_values, SUM(occurrence_count) AS non_null_rows, MAX(occurrence_count) * 1.0 / SUM(occurrence_count) AS top_value_share FROM freq",
+    "method": "cardinality_audit",
+    "rationale": "Distinct-value count and the top value's share flag near-constant or heavily imbalanced columns (alert categories popularized by profiling tools, e.g. https://github.com/ydataai/ydata-profiling).",
+    "params": [
+      {"name": "target_col", "role": "any", "description": "Column audited for cardinality and imbalance."}
+    ]
+  }
+]

@@ -1,0 +1,188 @@
+/*
+ * Design tokens for the workbench (brand palette + surface system).
+ * Teal-ink brand + amber agentic accent on tinted warm neutrals.
+ * Theme resolution: system preference is the default signal
+ * (prefers-color-scheme), explicit [data-theme] always wins.
+ */
+
+:root {
+  /* Core surfaces (light) */
+  --color-primary: #115e59; /* primaryColor: buttons, links, active */
+  --color-bg: #fbfaf8; /* backgroundColor: warm off-white */
+  --color-surface: #f3f1ec; /* secondaryBackgroundColor: cards, code, panels */
+  --color-text: #1c1b19; /* textColor: warm near-black */
+  --color-border: #e5e1d8; /* borderColor */
+  --color-link: #115e59; /* linkColor */
+  --color-code-bg: #f1eee7; /* codeBackgroundColor */
+  --color-code-text: #1c1b19; /* codeTextColor */
+  --color-table-header-bg: #f3f1ec; /* dataframeHeaderBackgroundColor */
+  --color-table-border: #e5e1d8; /* dataframeBorderColor */
+  /* Backdrops for modal and navigation overlays. Kept as named colors so
+   * theme/high-contrast policy can change them without touching consumers. */
+  --color-scrim: rgb(0 0 0 / 0.4);
+  --color-scrim-strong: rgb(0 0 0 / 0.5);
+
+  /* Sidebar / navigation rail — a touch cooler than the page */
+  --color-rail-bg: #f5f3ee; /* theme.sidebar.backgroundColor */
+  --color-rail-border: #e5e1d8; /* theme.sidebar.borderColor */
+  /* Row hover inside the rail. The existing surfaces cannot serve: measured
+   * against --color-rail-bg, --color-surface is 2/255 in light and 4/255 in
+   * dark, and --color-code-bg is 0/255 in dark. That is why every session row
+   * used to need its own border to be visible at all. These sit 10-14/255 from
+   * the rail, so a fill-only row reads without one. */
+  --color-rail-hover: #ebe8e0;
+
+  /* Semantic status palette */
+  --color-status-critical: #b4232a; /* redColor */
+  --color-status-warn: #b45309; /* orangeColor: warn / agentic-amber */
+  --color-status-ok: #1a7f37; /* greenColor */
+  --color-status-info: #115e59; /* blueColor: info = brand teal */
+  --color-status-llm: #8250df; /* violetColor: llm-origin marker */
+  --color-status-neutral: #6b6459; /* grayColor: warm gray */
+
+  /* Chart categorical ramp (chartCategoricalColors, brand-led) */
+  --chart-1: #115e59;
+  --chart-2: #b45309;
+  --chart-3: #8250df;
+  --chart-4: #1a7f37;
+  --chart-5: #b4232a;
+  --chart-6: #6b6459;
+  --chart-7: #0e7490;
+
+  /* Type & shape */
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --radius-base: 0.5rem; /* baseRadius */
+
+  /* Elevation. Light values are Anthropic's published shadow-hairline / -sm /
+   * -lg (claude.com MCP Apps "Style variables"), which happen to be Tailwind's
+   * own defaults. Dark mode cannot reuse them: a 5%-alpha black shadow is
+   * invisible against the #1a1917 page, so the dark blocks raise alpha and
+   * blur instead. Theme-dependent, hence runtime vars rather than @theme. */
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-panel:
+    0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-overlay:
+    0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+
+  /* Hairline for rules *inside* a bordered container — table row separators,
+   * chart gridlines. --color-border at full strength reads as a second frame
+   * when it repeats every 32px down a 200-row grid. */
+  --color-hairline: #eceae4;
+  /* Unfilled track behind a progress bar or stage connector. */
+  --color-track: #e9e6de;
+
+  color-scheme: light;
+}
+
+/* Dark tokens — warm near-black surfaces (never pure #000), teal lifted for
+ * contrast. Duplicated in two blocks because a media query and an attribute
+ * selector cannot share one rule. Keep both blocks identical. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-primary: #2fa79b;
+    --color-bg: #1a1917;
+    --color-surface: #242220;
+    --color-text: #ece7de;
+    --color-border: #38352f;
+    --color-link: #5cc0b6;
+    --color-code-bg: #201e1b;
+    --color-code-text: #ece7de;
+    --color-table-header-bg: #242220;
+    --color-table-border: #38352f;
+
+    --color-rail-bg: #201e1b;
+    --color-rail-border: #38352f;
+    --color-rail-hover: #2c2926;
+
+    --color-status-critical: #e5675c;
+    --color-status-warn: #d89a54;
+    --color-status-ok: #57b972;
+    --color-status-info: #5cc0b6;
+    --color-status-llm: #b08be0;
+    --color-status-neutral: #9a9187;
+
+    --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+    --shadow-panel:
+      0 2px 6px -1px rgb(0 0 0 / 0.5), 0 1px 3px -1px rgb(0 0 0 / 0.4);
+    --shadow-overlay:
+      0 12px 24px -6px rgb(0 0 0 / 0.6), 0 6px 10px -6px rgb(0 0 0 / 0.5);
+
+    --color-hairline: #2e2b27;
+    --color-track: #322f2a;
+
+    /* The categorical ramp had no dark values, so charts drew the light ramp
+     * on the near-black page: measured 2.32:1 for chart-1 and 2.69:1 for
+     * chart-5, under the 3:1 WCAG minimum for non-text graphics. These are the
+     * dark status hues already validated above (plus a lifted cyan), so the
+     * ramp keeps its hue identity; all seven measure >=4.8:1 on both the page
+     * and the card surface. Carbon's data-viz guidance is the precedent for
+     * shipping per-theme hexes rather than re-tinting one ramp. */
+    --chart-1: #2fa79b;
+    --chart-2: #d89a54;
+    --chart-3: #b08be0;
+    --chart-4: #57b972;
+    --chart-5: #e5675c;
+    --chart-6: #9a9187;
+    --chart-7: #4bb8d4;
+
+    color-scheme: dark;
+  }
+}
+
+/* Density (Settings → Appearance). Tailwind v4 derives every padding, gap and
+ * margin utility from the single `--spacing` theme variable; overriding it
+ * here — unlayered, so it beats Tailwind's own `@layer theme` rule regardless
+ * of source order — tightens paddings and gaps app-wide without touching
+ * individual component classes, the same intent as compact's COMPACT_CSS in
+ * styles.py:124-142. The 80% ratio approximates the shrink measured from that
+ * file's own comfortable/compact pairs (padding-top 3.5->3rem, padding-bottom
+ * 2->1.2rem, metric value/label font 1.5->1.25rem and 0.8->0.75rem - average
+ * ~0.81). Tracks the comfortable unit in index.css: 0.275 * 0.8 = 0.22. */
+:root[data-density="compact"] {
+  --spacing: 0.22rem;
+}
+
+:root[data-theme="dark"] {
+  --color-primary: #2fa79b;
+  --color-bg: #1a1917;
+  --color-surface: #242220;
+  --color-text: #ece7de;
+  --color-border: #38352f;
+  --color-link: #5cc0b6;
+  --color-code-bg: #201e1b;
+  --color-code-text: #ece7de;
+  --color-table-header-bg: #242220;
+  --color-table-border: #38352f;
+
+  --color-rail-bg: #201e1b;
+  --color-rail-border: #38352f;
+  --color-rail-hover: #2c2926;
+
+  --color-status-critical: #e5675c;
+  --color-status-warn: #d89a54;
+  --color-status-ok: #57b972;
+  --color-status-llm: #b08be0;
+  --color-status-info: #5cc0b6;
+  --color-status-neutral: #9a9187;
+
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --shadow-panel:
+    0 2px 6px -1px rgb(0 0 0 / 0.5), 0 1px 3px -1px rgb(0 0 0 / 0.4);
+  --shadow-overlay:
+    0 12px 24px -6px rgb(0 0 0 / 0.6), 0 6px 10px -6px rgb(0 0 0 / 0.5);
+
+  --color-hairline: #2e2b27;
+  --color-track: #322f2a;
+
+  --chart-1: #2fa79b;
+  --chart-2: #d89a54;
+  --chart-3: #b08be0;
+  --chart-4: #57b972;
+  --chart-5: #e5675c;
+  --chart-6: #9a9187;
+  --chart-7: #4bb8d4;
+
+  color-scheme: dark;
+}

@@ -1,0 +1,82 @@
+/* React Flow themed via platform design tokens — no hardcoded colors.
+ * Variable names come from @xyflow/react/dist/style.css. */
+
+.relationships-flow.react-flow {
+  --xy-background-color: var(--color-bg);
+  --xy-background-pattern-color: var(--color-border);
+  --xy-node-background-color: var(--color-surface);
+  --xy-node-color: var(--color-text);
+  --xy-node-border: 1px solid var(--color-border);
+  --xy-node-border-radius: var(--radius-base);
+  --xy-node-boxshadow-hover: 0 0 0 1px var(--color-primary);
+  --xy-node-boxshadow-selected: 0 0 0 2px var(--color-primary);
+  --xy-edge-stroke: var(--color-status-neutral);
+  --xy-edge-stroke-selected: var(--color-primary);
+  --xy-edge-label-background-color: var(--color-surface);
+  --xy-edge-label-color: var(--color-text);
+  --xy-handle-background-color: var(--color-primary);
+  --xy-handle-border-color: var(--color-bg);
+  --xy-connectionline-stroke: var(--color-primary);
+  --xy-minimap-background-color: var(--color-surface);
+  --xy-minimap-node-background-color: var(--color-border);
+  --xy-minimap-node-stroke-color: transparent;
+  --xy-minimap-mask-background-color: color-mix(in srgb, var(--color-bg) 60%, transparent);
+  --xy-minimap-mask-stroke-color: var(--color-border);
+  --xy-controls-button-background-color: var(--color-surface);
+  --xy-controls-button-background-color-hover: var(--color-code-bg);
+  --xy-controls-button-color: var(--color-text);
+  --xy-controls-button-color-hover: var(--color-text);
+  --xy-controls-button-border-color: var(--color-border);
+  --xy-controls-box-shadow: none;
+  --xy-attribution-background-color: color-mix(in srgb, var(--color-bg) 80%, transparent);
+  --xy-selection-background-color: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  --xy-selection-border: 1px dotted var(--color-primary);
+
+  font-family: var(--font-sans);
+}
+
+/* A table with no candidate in the current filter still has to be on the
+ * canvas — dropping it would make the filter look like it changed the data. */
+.relationships-flow .react-flow__node.rel-node-muted {
+  opacity: 0.4;
+}
+
+.relationships-flow .react-flow__node {
+  padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
+  font-size: var(--text-xs);
+}
+
+.relationships-flow .react-flow__edge-textbg {
+  fill: var(--color-surface);
+}
+
+/* The session shell can make this page substantially narrower than the
+ * viewport. Let the workbench respond to its own available width: the review
+ * queue leads on a narrow panel, while the evidence canvas leads once both
+ * columns have enough room. */
+.relationship-workbench {
+  container-type: inline-size;
+}
+
+.relationship-workbench-layout {
+  grid-template-areas:
+    "review"
+    "graph";
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.relationship-review {
+  grid-area: review;
+}
+
+.relationship-graph-pane {
+  grid-area: graph;
+  min-height: 28rem;
+}
+
+@container (min-width: 58rem) {
+  .relationship-workbench-layout {
+    grid-template-areas: "graph review";
+    grid-template-columns: minmax(0, 1fr) minmax(20rem, 23rem);
+  }
+}

@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "description": "M4 eval-week NL2SQL golden set (M6.1 T3). It contains 20 English questions over the repository golden datasets in eda_platform/tests/golden/data/. Each golden_sql is the reference answer, written against the same DuckDB catalog the chat path exposes (table name = CSV filename without extension, via tools.sql_runner.build_catalog). Scoring follows the Spider/BIRD execution-accuracy paradigm: candidate SQL and golden SQL are both executed read-only and their result sets compared with row-order- and column-order-insensitivity, float tolerance, and NULL consistency.",
+  "dataset_dir": "eda_platform/tests/golden/data",
+  "cases": [
+    {
+      "id": "nl2sql_001",
+      "language": "en",
+      "category": "single_table_aggregate",
+      "datasets": ["ecommerce_orders"],
+      "question": "What is the total order amount across all orders?",
+      "golden_sql": "select sum(amount) as total_amount from ecommerce_orders",
+      "notes": "Baseline single-value aggregate. Expected value 2481.0."
+    },
+    {
+      "id": "nl2sql_002",
+      "language": "en",
+      "category": "join_aggregate",
+      "datasets": ["ecommerce_orders", "ecommerce_products"],
+      "question": "What is the total order amount by product category? Show the highest first.",
+      "golden_sql": "select p.category, sum(o.amount) as total_amount from ecommerce_orders as o join ecommerce_products as p on o.product_id = p.product_id group by p.category order by total_amount desc",
+      "notes": "Clean N:1 join (orders.product_id -> products.product_id, verified multiplier 1.0)."
+    },
+    {
+      "id": "nl2sql_003",
+      "language": "en",
+      "category": "top_n",
+      "datasets": ["ecommerce_orders"],
+      "question": "Which single product_id has the highest total order amount? Return the product_id and its total amount.",
+      "golden_sql": "select product_id, sum(amount) as total_amount from ecommerce_orders group by product_id order by total_amount desc limit 1",
+      "notes": "Top-1 ranking; P03 with 1998.0."
+    },
+    {
+      "id": "nl2sql_004",
+      "language": "en",
+      "category": "count_distinct",
+      "datasets": ["ecommerce_orders"],
+      "question": "How many distinct customers appear in the orders table?",
+      "golden_sql": "select count(distinct customer_id) as customer_count from ecommerce_orders",
+      "notes": "Distinct-count; includes orphan CU999 because the question scopes only the orders table. Expected 6."
+    },
+    {
+      "id": "nl2sql_005",
+      "language": "en",
+      "category": "date_filter",
+      "datasets": ["ecommerce_orders"],
+      "question": "How many orders were placed in February 2026?",
+      "golden_sql": "select count(*) as order_count from ecommerce_orders where order_date >= '2026-02-01' and order_date < '2026-03-01'",
+      "notes": "Date-range filter on ISO date strings. Expected 4. Equivalent DATE-cast SQL also passes (same result set)."
+    },
+    {
+      "id": "nl2sql_006",
+      "language": "en",
+      "category": "join_trap_dedup",
+      "datasets": ["ecommerce_orders", "ecommerce_customers"],
+      "question": "What is the total order amount by customer region? The customers table contains duplicated customer rows, so deduplicate customers by customer_id before joining, and exclude orders whose customer does not exist in the customers table.",
+      "golden_sql": "select c.region, sum(o.amount) as total_amount from ecommerce_orders as o join (select distinct customer_id, region from ecommerce_customers) as c on o.customer_id = c.customer_id group by c.region order by c.region",
+      "notes": "Join-trap case: CU004 is duplicated in customers (M:N trap, verified join multiplier 1.125). A naive join double-counts O1005 (North becomes 111.0 instead of 55.5) and must fail the equivalence check."
+    },
+    {
+      "id": "nl2sql_007",
+      "language": "en",
+      "category": "anti_join_orphan",
+      "datasets": ["ecommerce_orders", "ecommerce_customers"],
+      "question": "How many orders reference a customer_id that does not exist in the customers table?",
+      "golden_sql": "select count(*) as orphan_orders from ecommerce_orders as o where not exists (select 1 from ecommerce_customers as c where c.customer_id = o.customer_id)",
+      "notes": "Orphan-FK probe (CU999). Expected 1."
+    },
+    {
+      "id": "nl2sql_008",
+      "language": "en",
+      "category": "single_table_aggregate",
+      "datasets": ["ecommerce_orders"],
+      "question": "What is the average order amount across all orders?",
+      "golden_sql": "select avg(amount) as avg_amount from ecommerce_orders",
+      "notes": "Float aggregate; expected 310.125 (exercises the float-tolerance comparator)."
+    },
+    {
+      "id": "nl2sql_009",
+      "language": "en",
+      "category": "group_by",
+      "datasets": ["ecommerce_marketing"],
+      "question": "What is the total marketing spend per channel?",
+      "golden_sql": "select channel, sum(spend) as total_spend from ecommerce_marketing group by channel",
+      "notes": "Simple categorical group-by: social 1200, email 1050, search 650."
+    },
+    {
+      "id": "nl2sql_010",
+      "language": "en",
+      "category": "group_by_time",
+      "datasets": ["time_series_sales"],
+      "question": "What is the total amount per day in the time series sales data, ordered by date?",
+      "golden_sql": "select order_date, sum(amount) as total_amount from time_series_sales group by order_date order by order_date",
+      "notes": "Daily bucket over a tiny time series (3 days)."
+    },
+    {
+      "id": "nl2sql_011",
+      "language": "en",
+      "category": "single_table_count",
+      "datasets": ["ecommerce_orders"],
+      "question": "How many orders are in the orders table?",
+      "golden_sql": "select count(*) as order_count from ecommerce_orders",
+      "notes": "Baseline count; expected result: 8."
+    },
+    {
+      "id": "nl2sql_012",
+      "language": "en",
+      "category": "group_by",
+      "datasets": ["ecommerce_orders"],
+      "question": "What is the total order amount for each customer, ordered from highest to lowest?",
+      "golden_sql": "select customer_id, sum(amount) as total_amount from ecommerce_orders group by customer_id order by total_amount desc",
+      "notes": "Grouped aggregation. The comparator is row-order insensitive; ordering only improves readability."
+    },
+    {
+      "id": "nl2sql_013",
+      "language": "en",
+      "category": "join_aggregate",
+      "datasets": ["ecommerce_orders", "ecommerce_products"],
+      "question": "How many orders are associated with each product category?",
+      "golden_sql": "select p.category, count(*) as order_count from ecommerce_orders as o join ecommerce_products as p on o.product_id = p.product_id group by p.category",
+      "notes": "Cross-table many-to-one count: Accessories 5, Electronics 2, Stationery 1."
+    },
+    {
+      "id": "nl2sql_014",
+      "language": "en",
+      "category": "filter_projection",
+      "datasets": ["ecommerce_orders"],
+      "question": "List the order ID and amount for orders greater than 100.",
+      "golden_sql": "select order_id, amount from ecommerce_orders where amount > 100",
+      "notes": "Filter plus projection; five result rows."
+    },
+    {
+      "id": "nl2sql_015",
+      "language": "en",
+      "category": "chinese_identifiers",
+      "datasets": ["chinese_sales_gbk"],
+      "question": "Aggregate sales by region and return the region and total sales.",
+      "golden_sql": "select \"地区\", sum(\"销售额\") as \"销售额合计\" from chinese_sales_gbk group by \"地区\"",
+      "notes": "GBK dataset with non-ASCII column identifiers, which require quoting. Expected regional totals are 193000, 58000, 99000, and 41000."
+    },
+    {
+      "id": "nl2sql_016",
+      "language": "en",
+      "category": "null_handling",
+      "datasets": ["chinese_sales_gbk"],
+      "question": "What is the average order count for each channel, ignoring missing order counts?",
+      "golden_sql": "select \"渠道\", avg(\"订单数\") as \"平均订单数\" from chinese_sales_gbk group by \"渠道\"",
+      "notes": "NULL semantics: AVG skips NULL values. Expected channel averages are 204 and 175."
+    },
+    {
+      "id": "nl2sql_017",
+      "language": "en",
+      "category": "count_distinct_dedup",
+      "datasets": ["dirty_sales"],
+      "question": "How many distinct customers remain in dirty_sales after deduplication?",
+      "golden_sql": "select count(distinct customer_id) as customer_count from dirty_sales",
+      "notes": "Dirty dataset with a full-row duplicate for C003; expected result: 3."
+    },
+    {
+      "id": "nl2sql_018",
+      "language": "en",
+      "category": "fan_trap_two_aggregates",
+      "datasets": ["ecommerce_marketing", "ecommerce_customers"],
+      "question": "For each region, return total marketing spend and the distinct customer count; use zero for regions without customers.",
+      "golden_sql": "select r.region, r.total_spend, coalesce(c.customer_count, 0) as customer_count from (select region, sum(spend) as total_spend from ecommerce_marketing group by region) as r left join (select region, count(distinct customer_id) as customer_count from ecommerce_customers group by region) as c on r.region = c.region order by r.region",
+      "notes": "Fan trap: aggregate each side before joining. A direct join multiplies spend by customer count, so it is not equivalent."
+    },
+    {
+      "id": "nl2sql_019",
+      "language": "en",
+      "category": "month_bucket",
+      "datasets": ["ecommerce_orders"],
+      "question": "Aggregate order amount by month and return the month in YYYY-MM format.",
+      "golden_sql": "select substr(order_date, 1, 7) as month, sum(amount) as total_amount from ecommerce_orders group by month order by month",
+      "notes": "Monthly bucketing with a fixed output format. Expected totals: 2026-01 = 1294.5 and 2026-02 = 1186.5."
+    },
+    {
+      "id": "nl2sql_020",
+      "language": "en",
+      "category": "top_n_chinese",
+      "datasets": ["chinese_sales_gbk"],
+      "question": "Which region has the highest total sales? Return only the region name.",
+      "golden_sql": "select \"地区\" from chinese_sales_gbk group by \"地区\" order by sum(\"销售额\") desc limit 1",
+      "notes": "Top-one query over a dataset with non-ASCII identifiers."
+    }
+  ]
+}

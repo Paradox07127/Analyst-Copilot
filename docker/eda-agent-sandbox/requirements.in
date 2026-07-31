@@ -1,0 +1,7 @@
+# Deliberately limited to the import roots allowed by core/sandbox.py.
+duckdb==1.5.4
+matplotlib==3.10.8
+numpy==2.5.0
+pandas==3.0.3
+scikit-learn==1.9.0
+scipy==1.18.0

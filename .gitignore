@@ -1,0 +1,75 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv/
+.uv-cache/
+.claude/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.superpowers/
+__pycache__/
+*.py[cod]
+
+# Runtime output
+/eda_platform/workspace/
+/eda_platform/workspace-*/
+eda_platform/.eda-run-*.lock
+/.sandbox-preflight/
+*.duckdb
+*.duckdb.wal
+.coverage
+htmlcov/
+/*.log
+/apps/web/.logs/
+
+# Local test sandboxes and caches
+/.tmp/
+/tmp/
+/.pytest-tmp-*/
+/pytest-cache-files-*/
+
+/datasets/
+
+
+# Legacy generated artifacts retained only as read-only historical reference
+single_eda_agent Ver1.0/**/__pycache__/
+single_eda_agent Ver1.0/**/.DS_Store
+
+# Dummy workspace some UI tests point at; never commit
+unused/
+
+# Playwright CLI debug dumps (console/page snapshots); never commit
+.playwright-cli/
+
+# Playwright writes this at the repo root when run from apps/web.
+test-results/
+
+# Screenshot/evidence dumps from review runs; never commit.
+/output/
+
+# JavaScript toolchain output (applies to every frontend workspace).
+node_modules/
+dist/
+coverage/
+playwright-report/
+.vite/
+
+# Per-machine workspace fence: the .identity file holds a local st_dev:st_ino
+# pair, so committing it would make another checkout claim the wrong workspace.
+eda_platform/.eda-workspace-*.identity
+eda_platform/.eda-workspace-*.lock
+
+# Workspace backups: the workspace itself is ignored above, but a zip beside
+# it is not, and it is ~280MB.
+eda_platform/*.zip
+
+# Local-only material excluded from the public clean-history repository.
+/docs/
+/CHANGELOG.md
+/CLAUDE.md
+/.impeccable.md
+/eda_platform/tests/fixtures/scoreboard_corpus/
+/apps/web/e2e/06-visual-regression.spec.ts-snapshots/
