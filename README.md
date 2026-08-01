@@ -222,7 +222,7 @@ replays) are hidden from that list but remain reachable by direct link.
 | Artifacts | `…/sessions/:id/artifacts` | Browse the typed artifacts behind every number. |
 | Chat | `…/sessions/:id/chat` | Constrained read-only questions; analysis plans require approval before they run. |
 | Board | `…/sessions/:id/board` | Organise leads as cards; drag with the mouse or move them with the keyboard. |
-| Compare | `/projects/:projectId/compare` | Put two runs of the same project side by side. `…/sessions/:id/compare` redirects here with the run as `?left=`. |
+| Compare | `/projects/:projectId/compare` | Compare Overview, Questions, Analysis, Findings, Report, Artifacts, and Execution for two runs of the same project. Each semantic scope loads lazily from `/api/v1/compare/{scope}`; `…/sessions/:id/compare` redirects here with the run as `?left=`. |
 | Skills | `…/sessions/:id/skills` | Browse saved skills and seed templates, and replay one against this run. |
 
 Pre-cleaning profiles, deep-analysis tables, and ML model cards are currently

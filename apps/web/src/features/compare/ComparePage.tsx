@@ -9,15 +9,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type FocusEvent,
-  type PointerEvent,
 } from "react";
-import { Link, useParams, useSearchParams } from "react-router";
-import {
-  Panel,
-  PanelGroup,
-  PanelResizeHandle,
-} from "react-resizable-panels";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import type {
   CompareArtifactDelta,
   CompareIntegerValue,
@@ -29,21 +22,18 @@ import type {
   CompareTextRow,
   SessionForkStarted,
   SessionSummary,
+  CompareScopeName,
 } from "../../api/client";
 import {
   useCompare,
   useDatasets,
   useForkSession,
-  useSessionDetail,
   useSessions,
 } from "../../api/hooks";
 import { useJobEvents } from "../../api/job-events";
 import { useJobActivity } from "../../app/job-activity";
 import { sessionSectionPath } from "../../app/paths";
-import {
-  useWorkspaceFocus,
-  type WorkspacePane,
-} from "../../app/workspace-focus";
+import { splitWorkspacePath } from "../../app/workspace-split";
 import {
   EmptyState,
   ErrorState,
@@ -64,14 +54,25 @@ import {
   writeBaseline,
 } from "./baseline-storage";
 import {
-  COMPARE_SCOPES,
-  SPLIT_SECTIONS,
   readCompareRouteState,
   swapCompareRouteState,
   writeCompareRouteState,
   type CompareRouteState,
-  type SplitSection,
 } from "./compare-route-state";
+import { ScopeComparison } from "./ScopeComparison";
+
+/* Keep unfinished semantic scopes out of the primary navigation. Previously
+ * every planned scope was clickable even though all but Overview rendered the
+ * same hard-coded "endpoint is ready" sentence and made no data request. */
+const AVAILABLE_COMPARE_SCOPES = [
+  "overview",
+  "questions",
+  "analysis",
+  "findings",
+  "report",
+  "artifacts",
+  "execution",
+] as const;
 
 function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
@@ -760,244 +761,9 @@ function ForkPanel({
   );
 }
 
-const SECTION_LABELS: Record<SplitSection, string> = {
-  overview: "Overview",
-  questions: "Questions",
-  "deep-analysis": "Deep analysis",
-  findings: "Findings",
-  report: "Report",
-  artifacts: "Artifacts",
-  trace: "Trace & cost",
-  chat: "Chat",
-};
-
-function SplitPane({
-  pane,
-  projectId,
-  sessionId,
-  section,
-  active,
-  onFocus,
-  onSectionChange,
-  paneRef,
-}: {
-  pane: WorkspacePane;
-  projectId: string;
-  sessionId: string;
-  section: SplitSection;
-  active: boolean;
-  onFocus: () => void;
-  onSectionChange: (section: SplitSection) => void;
-  paneRef: React.RefObject<HTMLElement | null>;
-}) {
-  const run = useSessionDetail(sessionId);
-  const focus = (
-    event: PointerEvent<HTMLElement> | FocusEvent<HTMLElement>,
-  ) => {
-    if (event.currentTarget.contains(event.target as Node)) onFocus();
-  };
-
-  return (
-    <section
-      ref={paneRef}
-      tabIndex={-1}
-      aria-label={`${pane === "left" ? "Left" : "Right"} session pane`}
-      onPointerDown={focus}
-      onFocusCapture={focus}
-      className={`flex h-full min-h-0 min-w-0 flex-col border-2 ${
-        active ? "border-primary" : "border-transparent"
-      }`}
-    >
-      <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-3 py-2">
-        <span
-          className={`rounded-base border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
-            active
-              ? "border-primary text-primary"
-              : "border-border text-status-neutral"
-          }`}
-        >
-          {active ? "Active" : pane}
-        </span>
-        <label className="ml-auto flex items-center gap-1.5 text-xs text-status-neutral">
-          Section
-          <select
-            aria-label={`${pane === "left" ? "Left" : "Right"} section`}
-            value={section}
-            onChange={(event) =>
-              onSectionChange(event.target.value as SplitSection)
-            }
-            className="rounded-base border border-border bg-bg px-2 py-1 text-sm text-text"
-          >
-            {SPLIT_SECTIONS.map((value) => (
-              <option key={value} value={value}>
-                {SECTION_LABELS[value]}
-              </option>
-            ))}
-          </select>
-        </label>
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        {!sessionId ? (
-          <EmptyState
-            title="Choose a session"
-            description={`Select the ${pane} session above to use this pane.`}
-          />
-        ) : run.isPending ? (
-          <LoadingSkeleton
-            lines={4}
-            label={`Loading ${pane} session workspace`}
-          />
-        ) : run.isError ? (
-          <ErrorState error={run.error} onRetry={() => run.refetch()} />
-        ) : (
-          <div className="flex flex-col gap-4">
-            <div>
-              <p className="text-xs font-semibold tracking-wide text-status-neutral uppercase">
-                {SECTION_LABELS[section]}
-              </p>
-              <h2 className="mt-1 text-lg font-semibold">
-                {run.data.title?.trim() || run.data.session_id}
-              </h2>
-              <p className="mt-1 font-mono text-xs text-status-neutral">
-                {run.data.session_id}
-              </p>
-            </div>
-            <Card tone="quiet" className="grid grid-cols-2 gap-3 p-3 text-sm">
-              <div>
-                <p className="text-xs text-status-neutral">Status</p>
-                <p className="font-medium">{run.data.status}</p>
-              </div>
-              <div>
-                <p className="text-xs text-status-neutral">Latest report</p>
-                <p className="font-medium">
-                  {run.data.report_status ??
-                    (run.data.status === "failed" ? "Unavailable" : "Not generated")}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-status-neutral">Artifacts</p>
-                <p className="font-medium">
-                  {run.data.artifact_count ?? "Unavailable"}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-status-neutral">Datasets</p>
-                <p className="font-medium">
-                  {(run.data.dataset_names ?? []).length}
-                </p>
-              </div>
-            </Card>
-            <p className="text-sm text-status-neutral">
-              This pane keeps its own section and scroll state. Open the full
-              session page for editing and detailed controls.
-            </p>
-            <Link
-              to={sessionSectionPath(
-                projectId,
-                sessionId,
-                section === "overview" ? "data-map" : section,
-              )}
-              className="self-start rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:border-primary hover:text-primary"
-            >
-              Open full {SECTION_LABELS[section]}
-            </Link>
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function SplitWorkspace({
-  state,
-  projectId,
-  activePane,
-  onFocusPane,
-  onSectionChange,
-}: {
-  state: CompareRouteState;
-  projectId: string;
-  activePane: WorkspacePane;
-  onFocusPane: (pane: WorkspacePane) => void;
-  onSectionChange: (pane: WorkspacePane, section: SplitSection) => void;
-}) {
-  const leftRef = useRef<HTMLElement>(null);
-  const rightRef = useRef<HTMLElement>(null);
-  const [narrow, setNarrow] = useState(
-    () => window.matchMedia("(max-width: 767px)").matches,
-  );
-
-  useEffect(() => {
-    const query = window.matchMedia("(max-width: 767px)");
-    const update = () => setNarrow(query.matches);
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-
-  const focusPane = (pane: WorkspacePane) => {
-    onFocusPane(pane);
-    (pane === "left" ? leftRef.current : rightRef.current)?.focus();
-  };
-
-  const pane = (side: WorkspacePane) => (
-    <SplitPane
-      pane={side}
-      projectId={projectId}
-      sessionId={side === "left" ? state.left : state.right}
-      section={side === "left" ? state.leftSection : state.rightSection}
-      active={activePane === side}
-      onFocus={() => onFocusPane(side)}
-      onSectionChange={(section) => onSectionChange(side, section)}
-      paneRef={side === "left" ? leftRef : rightRef}
-    />
-  );
-
-  return (
-    <div className="flex min-h-[36rem] flex-col gap-2">
-      <div className="flex justify-end gap-2">
-        <button
-          type="button"
-          onClick={() => focusPane("left")}
-          className="rounded-base border border-border px-2 py-1 text-xs hover:border-primary"
-        >
-          Focus left pane
-        </button>
-        <button
-          type="button"
-          onClick={() => focusPane("right")}
-          className="rounded-base border border-border px-2 py-1 text-xs hover:border-primary"
-        >
-          Focus right pane
-        </button>
-      </div>
-
-      {!narrow ? (
-      <div className="min-h-0 flex-1">
-        <PanelGroup direction="horizontal" className="min-h-0">
-          <Panel defaultSize={50} minSize={25}>
-            {pane("left")}
-          </Panel>
-          <PanelResizeHandle
-            aria-label="Resize split panes"
-            className="w-1 bg-border transition-colors hover:bg-primary"
-          />
-          <Panel defaultSize={50} minSize={25}>
-            {pane("right")}
-          </Panel>
-        </PanelGroup>
-      </div>
-      ) : (
-      <div className="min-h-0 flex-1">
-        {pane(activePane)}
-      </div>
-      )}
-    </div>
-  );
-}
-
 export function Component() {
   const { projectId = "" } = useParams();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const state = useMemo(
     () => readCompareRouteState(searchParams),
@@ -1008,7 +774,6 @@ export function Component() {
     state.mode === "compare" ? state.left : "",
     state.mode === "compare" ? state.right : "",
   );
-  const workspace = useWorkspaceFocus();
   const [pinnedBaseline, setPinnedBaseline] = useState(() =>
     readBaseline(projectId),
   );
@@ -1045,6 +810,28 @@ export function Component() {
     setPinnedBaseline(readBaseline(projectId));
     setBaselineNotice("");
   }, [projectId]);
+
+  /* Old shared links used Compare's embedded `mode=split`. Preserve those
+   * links by upgrading them into the shell-level two-window route. */
+  useEffect(() => {
+    if (state.mode !== "split" || !state.left || !state.right) return;
+    navigate(
+      splitWorkspacePath(
+        sessionSectionPath(
+          projectId,
+          state.left,
+          state.leftSection === "overview" ? "data-map" : state.leftSection,
+        ),
+        sessionSectionPath(
+          projectId,
+          state.right,
+          state.rightSection === "overview" ? "data-map" : state.rightSection,
+        ),
+        "left",
+      ),
+      { replace: true },
+    );
+  }, [navigate, projectId, state]);
 
   useEffect(() => {
     if (state.left || !runs.isSuccess || allRuns.length === 0) return;
@@ -1084,56 +871,6 @@ export function Component() {
     updateState,
   ]);
 
-  const changeSection = useCallback(
-    (pane: WorkspacePane, section: string) => {
-      if (!SPLIT_SECTIONS.includes(section as SplitSection)) return;
-      updateState(
-        pane === "left"
-          ? { leftSection: section as SplitSection }
-          : { rightSection: section as SplitSection },
-      );
-    },
-    [updateState],
-  );
-
-  const leftContext = useMemo(
-    () => ({
-      projectId,
-      sessionId: state.left,
-      section: state.mode === "split" ? state.leftSection : state.scope,
-      onSectionChange: (section: string) => changeSection("left", section),
-    }),
-    [
-      changeSection,
-      projectId,
-      state.left,
-      state.leftSection,
-      state.mode,
-      state.scope,
-    ],
-  );
-  const rightContext = useMemo(
-    () => ({
-      projectId,
-      sessionId: state.right,
-      section: state.mode === "split" ? state.rightSection : state.scope,
-      onSectionChange: (section: string) => changeSection("right", section),
-    }),
-    [
-      changeSection,
-      projectId,
-      state.mode,
-      state.right,
-      state.rightSection,
-      state.scope,
-    ],
-  );
-
-  useEffect(() => {
-    workspace.configure(state.mode, leftContext, rightContext);
-  }, [leftContext, rightContext, state.mode, workspace.configure]);
-  useEffect(() => () => workspace.reset(), [workspace.reset]);
-
   const selectLeft = useCallback(
     (left: string) => {
       updateState((current) => ({
@@ -1166,7 +903,6 @@ export function Component() {
   };
 
   const swap = () => {
-    workspace.focusPane(workspace.activePane === "left" ? "right" : "left");
     updateState(swapCompareRouteState);
   };
 
@@ -1177,12 +913,20 @@ export function Component() {
     (run) => run.session_id !== state.left,
   );
 
+  if (state.mode === "split" && state.left && state.right) {
+    return (
+      <div role="status" className="p-6 text-sm text-status-neutral">
+        Opening the full split workspace…
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-4 sm:p-6">
       <SectionHeader
         level={1}
         title="Compare"
-        description="Compare generated results or place two sessions side by side. Create variant keeps the original session untouched."
+        description="Compare generated results between two sessions. Create variant keeps the original session untouched."
       />
 
       {baselineNotice && (
@@ -1220,27 +964,6 @@ export function Component() {
             />
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <div
-              role="group"
-              aria-label="Workspace mode"
-              className="inline-flex rounded-base border border-border p-0.5"
-            >
-              {(["compare", "split"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  aria-pressed={state.mode === mode}
-                  onClick={() => updateState({ mode })}
-                  className={`rounded-sm px-2.5 py-1 text-sm capitalize ${
-                    state.mode === mode
-                      ? "bg-primary text-bg"
-                      : "text-status-neutral hover:text-text"
-                  }`}
-                >
-                  {mode}
-                </button>
-              ))}
-            </div>
             <button
               type="button"
               onClick={togglePin}
@@ -1264,13 +987,12 @@ export function Component() {
         </Card>
       )}
 
-      {state.mode === "compare" ? (
-        <>
+      <>
           <nav
             aria-label="Compare scopes"
             className="flex min-w-0 flex-wrap gap-1 border-b border-border pb-2"
           >
-            {COMPARE_SCOPES.map((scope) => (
+            {AVAILABLE_COMPARE_SCOPES.map((scope) => (
               <button
                 key={scope}
                 type="button"
@@ -1319,25 +1041,20 @@ export function Component() {
           ) : state.scope === "overview" ? (
             <Comparison compare={compare} />
           ) : (
-            <Card tone="quiet" className="p-4">
-              <h2 className="text-sm font-semibold capitalize">{state.scope}</h2>
-              <p className="mt-1 text-sm text-status-neutral">
-                The {state.scope} comparison workspace is ready for its typed
-                scope endpoint. Overview remains available while that data loads
-                independently.
-              </p>
-            </Card>
+            <ScopeComparison
+              scope={state.scope as CompareScopeName}
+              leftSessionId={state.left}
+              rightSessionId={state.right}
+              leftLabel={
+                compare.data ? runLabel(compare.data.left) : state.left
+              }
+              rightLabel={
+                compare.data ? runLabel(compare.data.right) : state.right
+              }
+              filter={state.filter}
+            />
           )}
-        </>
-      ) : (
-        <SplitWorkspace
-          state={state}
-          projectId={projectId}
-          activePane={workspace.activePane}
-          onFocusPane={workspace.focusPane}
-          onSectionChange={(pane, section) => changeSection(pane, section)}
-        />
-      )}
+      </>
     </div>
   );
 }

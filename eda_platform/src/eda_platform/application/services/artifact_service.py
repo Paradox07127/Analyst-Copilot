@@ -8,15 +8,24 @@ import base64
 import json
 from pathlib import Path
 
-from eda_platform.application.dto import ArtifactDetail, ArtifactSummary, Page
-from eda_platform.application.services.session_service import InvalidCursorError, SessionNotFoundError
+from eda_platform.application.dto import (
+    AgentHandoffDetail,
+    ArtifactDetail,
+    ArtifactEvidenceRef,
+    ArtifactSummary,
+    Page,
+)
+from eda_platform.application.services.session_service import (
+    InvalidCursorError,
+    SessionNotFoundError,
+)
 from eda_platform.application.workspace_paths import (
     relativize_warnings,
     relativize_workspace_paths,
 )
 from eda_platform.core.ids import INTERNAL_SESSION_MARKER
 from eda_platform.core.store import ArtifactStore
-from eda_platform.schemas.artifacts import Artifact
+from eda_platform.schemas.artifacts import Artifact, ArtifactType
 
 DEFAULT_ARTIFACT_LIMIT = 50
 MAX_ARTIFACT_LIMIT = 100
@@ -37,6 +46,22 @@ class ArtifactTooLargeError(ArtifactServiceError):
     def __init__(self, artifact_id: str) -> None:
         super().__init__(f"Artifact too large to serve: {artifact_id}")
         self.artifact_id = artifact_id
+
+
+class AgentHandoffNotReadyError(ArtifactServiceError):
+    pass
+
+
+class AgentHandoffNotFoundError(ArtifactServiceError):
+    pass
+
+
+class AgentHandoffTerminalError(ArtifactServiceError):
+    pass
+
+
+class AgentHandoffUnavailableError(ArtifactServiceError):
+    pass
 
 
 class ArtifactService:
@@ -64,7 +89,9 @@ class ArtifactService:
         has_more = len(rows) > limit
         rows = rows[:limit]
         next_cursor = (
-            _encode_cursor(rows[-1]["rowid"], artifact_type, session_id) if has_more and rows else None
+            _encode_cursor(rows[-1]["rowid"], artifact_type, session_id)
+            if has_more and rows
+            else None
         )
         return Page[ArtifactSummary](
             items=[
@@ -95,13 +122,16 @@ class ArtifactService:
         except OSError:
             raise ArtifactNotFoundError(artifact_id) from None
         try:
-            size = path.stat().st_size
-        except OSError:
-            raise ArtifactNotFoundError(artifact_id) from None
-        if size > MAX_ARTIFACT_PAYLOAD_BYTES:
-            raise ArtifactTooLargeError(artifact_id)
-        try:
-            artifact = Artifact.model_validate_json(path.read_text(encoding="utf-8"))
+            # One bounded read enforces the cap on the bytes actually parsed.
+            # A stat-then-read sequence could allocate an enlarged file if it
+            # changed between the two operations.
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_ARTIFACT_PAYLOAD_BYTES + 1)
+            if len(raw) > MAX_ARTIFACT_PAYLOAD_BYTES:
+                raise ArtifactTooLargeError(artifact_id)
+            artifact = Artifact.model_validate_json(raw)
+        except ArtifactTooLargeError:
+            raise
         except (OSError, ValueError):
             raise ArtifactNotFoundError(artifact_id) from None
         # Identity check: the payload on disk must be the artifact the index
@@ -110,9 +140,14 @@ class ArtifactService:
             artifact.id != artifact_id
             or artifact.session_id != str(row["session_id"])
             or artifact.project_id != str(row["project_id"])
+            or artifact.type.value != str(row["artifact_type"])
         ):
             raise ArtifactNotFoundError(artifact_id)
         root = self._store.root
+        evidence_payload = relativize_workspace_paths(
+            {"items": [reference.model_dump(mode="json") for reference in artifact.evidence]},
+            root,
+        )["items"]
         return ArtifactDetail(
             artifact_id=artifact.id,
             type=artifact.type.value,
@@ -121,7 +156,55 @@ class ArtifactService:
             created_at=artifact.created_at,
             payload=relativize_workspace_paths(artifact.payload, root),
             warnings=relativize_warnings(list(artifact.warnings), root),
+            parents=list(artifact.parents),
+            evidence=[
+                ArtifactEvidenceRef.model_validate(reference) for reference in evidence_payload
+            ],
+            env_digest=artifact.env_digest,
+            code_ref=artifact.code_ref,
+            plain_language=artifact.plain_language,
         )
+
+    def get_agent_handoff(self, session_id: str) -> AgentHandoffDetail:
+        project_id = self._project_for_run(session_id)
+        status = self._store.get_session_status(session_id)
+        if status in {"failed", "cancelled"}:
+            raise AgentHandoffTerminalError(
+                f"Final Agent handoff is unavailable for {status} session {session_id}."
+            )
+        if status != "completed":
+            raise AgentHandoffNotReadyError(
+                f"Final Agent handoff is not published for session {session_id}."
+            )
+        active_job = self._store.find_active_job_for_lane(session_id)
+        if active_job is not None:
+            raise AgentHandoffNotReadyError(
+                "Final Agent handoff is not published while "
+                f"{active_job['kind']} job {active_job['job_id']} is updating "
+                f"session {session_id}."
+            )
+        row = self._store.latest_artifact_index_row(
+            project_id, session_id, ArtifactType.AGENT_HANDOFF.value
+        )
+        if row is None:
+            raise AgentHandoffNotFoundError(
+                f"Final Agent handoff was not found for completed session {session_id}."
+            )
+        artifact_id = str(row["artifact_id"])
+        try:
+            detail = self.get_artifact(session_id, artifact_id)
+        except ArtifactTooLargeError:
+            raise
+        except ArtifactNotFoundError as exc:
+            raise AgentHandoffUnavailableError(
+                f"Final Agent handoff is unreadable for session {session_id}."
+            ) from exc
+        try:
+            return AgentHandoffDetail.model_validate(detail.model_dump(mode="json"))
+        except ValueError as exc:
+            raise AgentHandoffUnavailableError(
+                f"Final Agent handoff failed contract validation for session {session_id}."
+            ) from exc
 
     def _project_for_run(self, session_id: str) -> str:
         if INTERNAL_SESSION_MARKER in session_id:

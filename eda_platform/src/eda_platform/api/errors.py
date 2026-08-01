@@ -18,6 +18,10 @@ from eda_platform.application.services.approval_service import (
     ApprovalNotFoundError,
 )
 from eda_platform.application.services.artifact_service import (
+    AgentHandoffNotFoundError,
+    AgentHandoffNotReadyError,
+    AgentHandoffTerminalError,
+    AgentHandoffUnavailableError,
     ArtifactNotFoundError,
     ArtifactTooLargeError,
 )
@@ -102,6 +106,18 @@ from eda_platform.application.services.report_generation_service import (
     ReportRunBusyError,
 )
 from eda_platform.application.services.report_service import ReportTooLargeError
+from eda_platform.application.services.semantic_service import (
+    SemanticJoinNotConfirmableError,
+    SemanticJoinNotFoundError,
+    SemanticJoinStateError,
+    SemanticProposalConflictError,
+    SemanticProposalNotFoundError,
+    SemanticSeedsInvalidError,
+    SemanticSeedsOutOfBandError,
+    SemanticStateError,
+    SemanticValidationError,
+    SemanticVersionConflictError,
+)
 from eda_platform.application.services.session_fork_service import (
     SessionForkBusyError,
     SessionForkNotForkableError,
@@ -117,18 +133,6 @@ from eda_platform.application.services.session_service import (
     SessionDeleteBlockedError,
     SessionDeleteRetryableError,
     SessionNotFoundError,
-)
-from eda_platform.application.services.semantic_service import (
-    SemanticJoinNotConfirmableError,
-    SemanticJoinNotFoundError,
-    SemanticJoinStateError,
-    SemanticProposalConflictError,
-    SemanticProposalNotFoundError,
-    SemanticSeedsInvalidError,
-    SemanticSeedsOutOfBandError,
-    SemanticStateError,
-    SemanticValidationError,
-    SemanticVersionConflictError,
 )
 from eda_platform.application.services.settings_service import (
     SettingsValidationError,
@@ -216,9 +220,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "session_busy", str(exc))
 
     @app.exception_handler(SessionDeleteRetryableError)
-    def _run_delete_retryable(
-        request: Request, exc: SessionDeleteRetryableError
-    ) -> JSONResponse:
+    def _run_delete_retryable(request: Request, exc: SessionDeleteRetryableError) -> JSONResponse:
         return error_response(
             503,
             "session_delete_retryable",
@@ -227,9 +229,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(SessionDeleteBlockedError)
-    def _run_delete_blocked(
-        request: Request, exc: SessionDeleteBlockedError
-    ) -> JSONResponse:
+    def _run_delete_blocked(request: Request, exc: SessionDeleteBlockedError) -> JSONResponse:
         return error_response(409, "session_delete_blocked", str(exc))
 
     @app.exception_handler(SettingsValidationError)
@@ -256,6 +256,29 @@ def register_error_handlers(app: FastAPI) -> None:
     def _artifact_not_found(request: Request, exc: ArtifactNotFoundError) -> JSONResponse:
         return error_response(404, "artifact_not_found", str(exc))
 
+    @app.exception_handler(AgentHandoffNotReadyError)
+    def _agent_handoff_not_ready(request: Request, exc: AgentHandoffNotReadyError) -> JSONResponse:
+        return error_response(
+            409,
+            "agent_handoff_not_ready",
+            str(exc),
+            headers={"Retry-After": "2"},
+        )
+
+    @app.exception_handler(AgentHandoffNotFoundError)
+    def _agent_handoff_not_found(request: Request, exc: AgentHandoffNotFoundError) -> JSONResponse:
+        return error_response(404, "agent_handoff_not_found", str(exc))
+
+    @app.exception_handler(AgentHandoffTerminalError)
+    def _agent_handoff_terminal(request: Request, exc: AgentHandoffTerminalError) -> JSONResponse:
+        return error_response(409, "agent_handoff_terminal", str(exc))
+
+    @app.exception_handler(AgentHandoffUnavailableError)
+    def _agent_handoff_unavailable(
+        request: Request, exc: AgentHandoffUnavailableError
+    ) -> JSONResponse:
+        return error_response(503, "agent_handoff_unavailable", str(exc))
+
     @app.exception_handler(ArtifactTooLargeError)
     def _artifact_too_large(request: Request, exc: ArtifactTooLargeError) -> JSONResponse:
         return error_response(413, "artifact_too_large", str(exc))
@@ -281,9 +304,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(422, "job_invalid", str(exc))
 
     @app.exception_handler(JobIdempotencyMismatchError)
-    def _idempotency_key_reused(
-        request: Request, exc: JobIdempotencyMismatchError
-    ) -> JSONResponse:
+    def _idempotency_key_reused(request: Request, exc: JobIdempotencyMismatchError) -> JSONResponse:
         return error_response(422, "idempotency_key_reused", str(exc))
 
     @app.exception_handler(JobConflictError)
@@ -291,9 +312,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "job_conflict", str(exc))
 
     @app.exception_handler(JobResultNotReadyError)
-    def _job_result_not_ready(
-        request: Request, exc: JobResultNotReadyError
-    ) -> JSONResponse:
+    def _job_result_not_ready(request: Request, exc: JobResultNotReadyError) -> JSONResponse:
         return error_response(
             409,
             "job_result_not_ready",
@@ -321,9 +340,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(413, "upload_too_large", str(exc))
 
     @app.exception_handler(UploadProjectByteQuotaError)
-    def _upload_project_bytes(
-        request: Request, exc: UploadProjectByteQuotaError
-    ) -> JSONResponse:
+    def _upload_project_bytes(request: Request, exc: UploadProjectByteQuotaError) -> JSONResponse:
         return error_response(413, "upload_project_byte_quota", str(exc))
 
     @app.exception_handler(UploadFileQuotaError)
@@ -331,9 +348,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(429, "upload_file_quota", str(exc))
 
     @app.exception_handler(UploadConcurrentQuotaError)
-    def _upload_concurrent_quota(
-        request: Request, exc: UploadConcurrentQuotaError
-    ) -> JSONResponse:
+    def _upload_concurrent_quota(request: Request, exc: UploadConcurrentQuotaError) -> JSONResponse:
         return error_response(
             429,
             "upload_concurrent_quota",
@@ -362,9 +377,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "cleaning_refused", str(exc))
 
     @app.exception_handler(CleaningSourceChangedError)
-    def _cleaning_source_changed(
-        request: Request, exc: CleaningSourceChangedError
-    ) -> JSONResponse:
+    def _cleaning_source_changed(request: Request, exc: CleaningSourceChangedError) -> JSONResponse:
         return error_response(409, "cleaning_source_changed", str(exc))
 
     @app.exception_handler(QuestionNotFoundError)
@@ -372,15 +385,11 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(404, "question_not_found", str(exc))
 
     @app.exception_handler(QuestionNotExecutableError)
-    def _question_not_executable(
-        request: Request, exc: QuestionNotExecutableError
-    ) -> JSONResponse:
+    def _question_not_executable(request: Request, exc: QuestionNotExecutableError) -> JSONResponse:
         return error_response(409, "question_not_executable", str(exc))
 
     @app.exception_handler(QuestionSourceChangedError)
-    def _question_source_changed(
-        request: Request, exc: QuestionSourceChangedError
-    ) -> JSONResponse:
+    def _question_source_changed(request: Request, exc: QuestionSourceChangedError) -> JSONResponse:
         return error_response(409, "question_source_changed", str(exc))
 
     @app.exception_handler(QuestionRunBusyError)
@@ -392,9 +401,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(422, "question_invalid", str(exc))
 
     @app.exception_handler(InvestigationNotFoundError)
-    def _investigation_not_found(
-        request: Request, exc: InvestigationNotFoundError
-    ) -> JSONResponse:
+    def _investigation_not_found(request: Request, exc: InvestigationNotFoundError) -> JSONResponse:
         return error_response(404, "investigation_not_found", str(exc))
 
     @app.exception_handler(InvestigationNotDecidableError)
@@ -416,9 +423,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "investigation_source_changed", str(exc))
 
     @app.exception_handler(InvestigationRunBusyError)
-    def _investigation_run_busy(
-        request: Request, exc: InvestigationRunBusyError
-    ) -> JSONResponse:
+    def _investigation_run_busy(request: Request, exc: InvestigationRunBusyError) -> JSONResponse:
         return error_response(409, "investigation_session_busy", str(exc))
 
     @app.exception_handler(MacroLoopNotAuthorizedError)
@@ -428,9 +433,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "macro_loop_not_authorized", str(exc))
 
     @app.exception_handler(InvestigationValidationError)
-    def _investigation_invalid(
-        request: Request, exc: InvestigationValidationError
-    ) -> JSONResponse:
+    def _investigation_invalid(request: Request, exc: InvestigationValidationError) -> JSONResponse:
         return error_response(422, "investigation_invalid", str(exc))
 
     @app.exception_handler(PromotionFindingNotFoundError)
@@ -458,9 +461,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "report_session_busy", str(exc))
 
     @app.exception_handler(ReportNotGeneratableError)
-    def _report_not_generatable(
-        request: Request, exc: ReportNotGeneratableError
-    ) -> JSONResponse:
+    def _report_not_generatable(request: Request, exc: ReportNotGeneratableError) -> JSONResponse:
         return error_response(409, "report_not_generatable", str(exc))
 
     @app.exception_handler(ReportTooLargeError)
@@ -556,9 +557,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "version_conflict", str(exc))
 
     @app.exception_handler(SemanticSeedsOutOfBandError)
-    def _semantic_out_of_band(
-        request: Request, exc: SemanticSeedsOutOfBandError
-    ) -> JSONResponse:
+    def _semantic_out_of_band(request: Request, exc: SemanticSeedsOutOfBandError) -> JSONResponse:
         return error_response(409, "version_conflict", str(exc))
 
     @app.exception_handler(SemanticStateError)
@@ -567,9 +566,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(500, "semantic_state_corrupt", str(exc))
 
     @app.exception_handler(SemanticJoinNotFoundError)
-    def _semantic_join_not_found(
-        request: Request, exc: SemanticJoinNotFoundError
-    ) -> JSONResponse:
+    def _semantic_join_not_found(request: Request, exc: SemanticJoinNotFoundError) -> JSONResponse:
         return error_response(404, "join_not_found", str(exc))
 
     @app.exception_handler(SemanticJoinStateError)
@@ -599,9 +596,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(422, "semantic_invalid", str(exc))
 
     @app.exception_handler(SemanticSeedsInvalidError)
-    def _semantic_seeds_invalid(
-        request: Request, exc: SemanticSeedsInvalidError
-    ) -> JSONResponse:
+    def _semantic_seeds_invalid(request: Request, exc: SemanticSeedsInvalidError) -> JSONResponse:
         return error_response(422, "seeds_invalid", str(exc))
 
     @app.exception_handler(DecisionStoryBusyError)
@@ -621,15 +616,11 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(404, "decision_story_draft_not_found", str(exc))
 
     @app.exception_handler(DecisionReportMissingError)
-    def _decision_report_missing(
-        request: Request, exc: DecisionReportMissingError
-    ) -> JSONResponse:
+    def _decision_report_missing(request: Request, exc: DecisionReportMissingError) -> JSONResponse:
         return error_response(404, "decision_report_missing", str(exc))
 
     @app.exception_handler(DecisionReportCorruptError)
-    def _decision_report_corrupt(
-        request: Request, exc: DecisionReportCorruptError
-    ) -> JSONResponse:
+    def _decision_report_corrupt(request: Request, exc: DecisionReportCorruptError) -> JSONResponse:
         logger.error("Corrupt stored decision report: %s", exc)
         return error_response(500, "decision_report_corrupt", str(exc))
 
@@ -667,9 +658,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(409, "chat_busy", str(exc))
 
     @app.exception_handler(ChatMessageNotFoundError)
-    def _chat_message_not_found(
-        request: Request, exc: ChatMessageNotFoundError
-    ) -> JSONResponse:
+    def _chat_message_not_found(request: Request, exc: ChatMessageNotFoundError) -> JSONResponse:
         return error_response(404, "chat_message_not_found", str(exc))
 
     @app.exception_handler(BoardValidationError)
@@ -677,9 +666,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(422, "board_invalid", str(exc))
 
     @app.exception_handler(BoardVersionConflictError)
-    def _board_version_conflict(
-        request: Request, exc: BoardVersionConflictError
-    ) -> JSONResponse:
+    def _board_version_conflict(request: Request, exc: BoardVersionConflictError) -> JSONResponse:
         return error_response(409, "version_conflict", str(exc))
 
     @app.exception_handler(BoardStateError)
@@ -688,9 +675,7 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(500, "board_state_corrupt", str(exc))
 
     @app.exception_handler(ReportNotExportableError)
-    def _report_not_exportable(
-        request: Request, exc: ReportNotExportableError
-    ) -> JSONResponse:
+    def _report_not_exportable(request: Request, exc: ReportNotExportableError) -> JSONResponse:
         return error_response(404, "report_not_exportable", str(exc))
 
     @app.exception_handler(ReportExportUnavailableError)
@@ -701,21 +686,15 @@ def register_error_handlers(app: FastAPI) -> None:
         return error_response(503, "report_export_unavailable", str(exc))
 
     @app.exception_handler(SupportDocNotFoundError)
-    def _support_doc_not_found(
-        request: Request, exc: SupportDocNotFoundError
-    ) -> JSONResponse:
+    def _support_doc_not_found(request: Request, exc: SupportDocNotFoundError) -> JSONResponse:
         return error_response(404, "support_doc_not_found", str(exc))
 
     @app.exception_handler(SupportDocValidationError)
-    def _support_doc_invalid(
-        request: Request, exc: SupportDocValidationError
-    ) -> JSONResponse:
+    def _support_doc_invalid(request: Request, exc: SupportDocValidationError) -> JSONResponse:
         return error_response(422, "support_doc_invalid", str(exc))
 
     @app.exception_handler(SupportDocTooLargeError)
-    def _support_doc_too_large(
-        request: Request, exc: SupportDocTooLargeError
-    ) -> JSONResponse:
+    def _support_doc_too_large(request: Request, exc: SupportDocTooLargeError) -> JSONResponse:
         return error_response(413, "support_doc_too_large", str(exc))
 
     @app.exception_handler(TrustedPathError)

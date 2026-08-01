@@ -135,23 +135,24 @@ describe("Routing", () => {
     expect(screen.getByText("sales#2026")).toBeInTheDocument();
   });
 
-  it("redirects the legacy session compare URL to the canonical workspace", async () => {
+  it("upgrades a legacy session split URL to the shell-level workspace", async () => {
     const { router } = renderAppWithRouterAt(
       "/projects/p1/sessions/r1/compare?right=r2&mode=split&leftSection=questions&rightSection=report",
     );
 
-    expect(
-      await screen.findByRole("heading", { name: "Compare", level: 1 }),
-    ).toBeInTheDocument();
     await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/projects/p1/compare"),
+      expect(router.state.location.pathname).toBe("/split"),
     );
+    expect(
+      await screen.findByRole("region", { name: "Left workspace pane" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Right workspace pane" }),
+    ).toBeInTheDocument();
     const params = new URLSearchParams(router.state.location.search);
-    expect(params.get("left")).toBe("r1");
-    expect(params.get("right")).toBe("r2");
-    expect(params.get("mode")).toBe("split");
-    expect(params.get("leftSection")).toBe("questions");
-    expect(params.get("rightSection")).toBe("report");
+    expect(params.get("left")).toBe("/projects/p1/sessions/r1/questions");
+    expect(params.get("right")).toBe("/projects/p1/sessions/r2/report");
+    expect(params.get("active")).toBe("left");
   });
 
   it("navigates between run sections via the grouped top navigation", async () => {

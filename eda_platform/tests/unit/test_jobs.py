@@ -78,9 +78,7 @@ class _RecordingBackend:
 
 
 def test_job_crud_and_status_timestamps(store: ArtifactStore) -> None:
-    job = store.create_job(
-        job_id="job_1", session_id="run_1", project_id="demo", kind="auto_eda"
-    )
+    job = store.create_job(job_id="job_1", session_id="run_1", project_id="demo", kind="auto_eda")
     assert job["status"] == "queued"
     assert job["cancel_requested"] is False
     assert job["created_at"]
@@ -123,7 +121,11 @@ def test_idempotency_key_lookup_and_uniqueness(store: ArtifactStore) -> None:
     assert store.find_by_idempotency_key("k2") is None
     with pytest.raises(sqlite3.IntegrityError):
         store.create_job(
-            job_id="job_2", session_id="run_1", project_id="demo", kind="auto_eda", idempotency_key="k1"
+            job_id="job_2",
+            session_id="run_1",
+            project_id="demo",
+            kind="auto_eda",
+            idempotency_key="k1",
         )
     # NULL idempotency keys never collide; active lane identity remains
     # independent and therefore uses distinct runs here.
@@ -167,9 +169,9 @@ def test_driver_cancel_mid_run_keeps_artifacts(store: ArtifactStore) -> None:
     csv_path = _seed_csv(store.root)
     checks = {"count": 0}
 
-    def cancel_after_two() -> bool:
+    def cancel_after_preflight() -> bool:
         checks["count"] += 1
-        return checks["count"] > 2
+        return checks["count"] > 3
 
     with pytest.raises(SessionCancelled):
         run_auto_eda(
@@ -178,9 +180,9 @@ def test_driver_cancel_mid_run_keeps_artifacts(store: ArtifactStore) -> None:
             project_id="demo",
             session_id="run_mid_cancel",
             generate_report=False,
-            cancel_check=cancel_after_two,
+            cancel_check=cancel_after_preflight,
         )
-    # Steps that finished before the cancel boundary keep their artifacts.
+    # The completed resource preflight remains even when ingest is cancelled.
     artifacts, _warnings = store.list_artifacts_safe(project_id="demo", session_id="run_mid_cancel")
     assert len(artifacts) >= 1
 
@@ -234,9 +236,7 @@ def test_service_rejects_bad_dataset_refs(store: ArtifactStore) -> None:
     with pytest.raises(JobValidationError):
         service.create_job("run_1", kind="auto_eda", project_id="demo", datasets=[])
     with pytest.raises(JobValidationError):
-        service.create_job(
-            "run_1", kind="auto_eda", project_id="demo", datasets=["../outside.csv"]
-        )
+        service.create_job("run_1", kind="auto_eda", project_id="demo", datasets=["../outside.csv"])
 
 
 def test_service_cancel_emits_trace_event_and_is_terminal_noop(store: ArtifactStore) -> None:
@@ -348,9 +348,7 @@ def test_idempotency_key_same_run_kind_but_different_body_is_rejected(
         idempotency_key="key-content",
     )
 
-    with pytest.raises(
-        JobIdempotencyMismatchError, match="different canonical request"
-    ):
+    with pytest.raises(JobIdempotencyMismatchError, match="different canonical request"):
         service.create_job(
             "run_1",
             kind="auto_eda",
@@ -852,9 +850,7 @@ def test_events_after_uses_persisted_job_correlation_across_restart(
         job_id=first.job_id,
         job_generation=1,
     )
-    _trace(
-        store, "run_restart", "job.completed", first.job_id, job_id=first.job_id
-    )
+    _trace(store, "run_restart", "job.completed", first.job_id, job_id=first.job_id)
     store.mark_job_status(first.job_id, "completed")
     second = service.create_job(
         "run_restart", kind="auto_eda", project_id="demo", datasets=["seed/orders.csv"]
@@ -868,9 +864,7 @@ def test_events_after_uses_persisted_job_correlation_across_restart(
         job_generation=1,
     )
     _trace(store, "run_restart", "legacy_unowned", "ambiguous_legacy_event")
-    _trace(
-        store, "run_restart", "job.completed", second.job_id, job_id=second.job_id
-    )
+    _trace(store, "run_restart", "job.completed", second.job_id, job_id=second.job_id)
     store.mark_job_status(second.job_id, "completed")
 
     restarted = JobService(ArtifactStore(store.root), _RecordingBackend())
@@ -917,9 +911,7 @@ def test_events_after_pagination_ignores_unrelated_job_rows(
             job_id=second.job_id,
         )
 
-    monkeypatch.setattr(
-        "eda_platform.application.services.job_service.EVENTS_PAGE_LIMIT", 2
-    )
+    monkeypatch.setattr("eda_platform.application.services.job_service.EVENTS_PAGE_LIMIT", 2)
     page = service.events_after(first.job_id, 0)
 
     assert [(event.type, event.name) for event in page.events] == [
@@ -984,8 +976,9 @@ def test_trace_job_scope_rejects_explicit_cross_job_mislabel(
     store: ArtifactStore,
 ) -> None:
     store.start_session("demo", "run_trace_conflict")
-    with trace_job_scope("job_owner", 2), pytest.raises(
-        ValueError, match="conflicts with the active job scope"
+    with (
+        trace_job_scope("job_owner", 2),
+        pytest.raises(ValueError, match="conflicts with the active job scope"),
     ):
         _trace(
             store,
@@ -995,9 +988,7 @@ def test_trace_job_scope_rejects_explicit_cross_job_mislabel(
             job_id="job_sibling",
             job_generation=2,
         )
-    assert store.list_trace_events(
-        project_id="demo", session_id="run_trace_conflict"
-    ) == []
+    assert store.list_trace_events(project_id="demo", session_id="run_trace_conflict") == []
 
 
 # Review F4: orphaned rows are failed at startup, live workers are untouched.

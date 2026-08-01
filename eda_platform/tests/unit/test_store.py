@@ -234,6 +234,7 @@ def test_init_db_migrates_legacy_single_pk_artifacts_table(tmp_path) -> None:
         count = conn.execute("select count(*) from artifacts").fetchone()[0]
     assert pk_cols == {"artifact_id": 1, "project_id": 2, "session_id": 3}
     assert "idx_artifacts_run_type" in indexes
+    assert "idx_artifacts_run_order" in indexes
     assert count == 1  # legacy data survived the rebuild
     assert reopened.get_artifact("prof_shared01").project_id == "proj_a"
 
@@ -243,3 +244,22 @@ def test_init_db_migrates_legacy_single_pk_artifacts_table(tmp_path) -> None:
     reopened.save_artifact(_partition_artifact("proj_b", "run_b", 2))
     assert len(reopened.list_artifacts(project_id="proj_a", session_id="run_a")) == 1
     assert len(reopened.list_artifacts(project_id="proj_b", session_id="run_b")) == 1
+
+
+def test_unfiltered_artifact_pagination_uses_run_order_index(tmp_path) -> None:
+    store = ArtifactStore(tmp_path)
+
+    with sqlite3.connect(store.db_path) as conn:
+        plan = conn.execute(
+            """
+            explain query plan
+            select rowid, artifact_id, artifact_type, path from artifacts
+            where project_id = ? and session_id = ?
+            order by rowid limit ?
+            """,
+            ("project_demo", "run_demo", 51),
+        ).fetchall()
+
+    descriptions = [str(row[3]) for row in plan]
+    assert any("idx_artifacts_run_order" in description for description in descriptions)
+    assert all("TEMP B-TREE" not in description for description in descriptions)

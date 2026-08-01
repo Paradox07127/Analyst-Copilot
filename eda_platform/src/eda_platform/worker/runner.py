@@ -16,6 +16,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast, get_args
 
 from eda_platform.application.ports import TERMINAL_JOB_STATUSES
@@ -189,9 +190,7 @@ def run_job(
         heartbeat.__exit__(None, None, None)
 
 
-def _run_started_at(
-    store: ArtifactStore, project_id: str, session_id: str
-) -> datetime | None:
+def _run_started_at(store: ArtifactStore, project_id: str, session_id: str) -> datetime | None:
     raw = store.earliest_trace_started_at(project_id=project_id, session_id=session_id)
     return None if raw is None else datetime.fromisoformat(raw)
 
@@ -259,7 +258,10 @@ def _run_auto_eda_job(
 ) -> None:
     # Local import: keep the module importable (and the spawn bootstrap cheap)
     # without pulling the full driver stack until a job actually sessions.
+    from eda_platform.core.process_metrics import process_peak_rss
     from eda_platform.drivers.auto_eda import run_auto_eda
+    from eda_platform.schemas.resource_metrics import EdaResourcePolicy
+    from eda_platform.tools.resource_preflight import preflight_csv_resources
 
     _checkpoint(cancel_check)
     file_paths = [store.root / str(rel) for rel in params.get("dataset_paths", [])]
@@ -267,6 +269,38 @@ def _run_auto_eda_job(
     # ingested datasets, the originals ride along as raw_file_paths so the
     # lineage keeps both, and the recipes become CleaningRecipe artifacts.
     preclean = _preclean_options(params)
+    requested_workers = int(params.get("dataset_workers", 1))
+    policy = EdaResourcePolicy.model_validate(params.get("resource_policy") or {})
+    baseline_rss = process_peak_rss()
+    preprocessing_started = perf_counter()
+    resource_preflight = preflight_csv_resources(
+        file_paths,
+        requested_dataset_workers=requested_workers,
+        baseline_peak_rss_bytes=baseline_rss.bytes or 0,
+        policy=policy,
+        precleaning_enabled=preclean is not None,
+        cancel_check=(None if cancel_check is None else lambda: _checkpoint(cancel_check)),
+    )
+    if resource_preflight.status != "accepted":
+        run_auto_eda(
+            file_paths,
+            workspace=workspace,
+            project_id=str(job["project_id"]),
+            session_id=str(job["session_id"]),
+            business_context=str(params.get("business_context", "")),
+            llm=_build_llm(params),
+            payload_policy=_payload_policy(params),
+            ml_target_column=params.get("ml_target_column"),
+            ml_time_column=params.get("ml_time_column"),
+            generate_report=bool(params.get("generate_report", True)),
+            dataset_workers=requested_workers,
+            resource_policy=policy,
+            resource_preflight=resource_preflight,
+            preprocessing_duration_seconds=perf_counter() - preprocessing_started,
+            baseline_peak_rss=baseline_rss,
+            cancel_check=cancel_check,
+        )
+        return
     ingest_paths = file_paths
     created_paths: list[Path] = []
     recipes = None
@@ -303,6 +337,11 @@ def _run_auto_eda_job(
             precleaning=recipes,
             raw_file_paths=file_paths if recipes is not None else None,
             generate_report=bool(params.get("generate_report", True)),
+            dataset_workers=requested_workers,
+            resource_policy=policy,
+            resource_preflight=resource_preflight,
+            preprocessing_duration_seconds=perf_counter() - preprocessing_started,
+            baseline_peak_rss=baseline_rss,
             cancel_check=cancel_check,
         )
         _checkpoint(cancel_check)
@@ -358,9 +397,7 @@ def _run_question_exec_job(
         session_id=str(job["session_id"]),
         generate_report=bool(params.get("generate_report", False)),
         code_backend=(
-            None
-            if params.get("llm") == "offline"
-            else _safe_question_code_backend(store, job)
+            None if params.get("llm") == "offline" else _safe_question_code_backend(store, job)
         ),
         cancel_check=cancel_check,
     )
@@ -1167,9 +1204,7 @@ def _unscored_user_card(question: str, artifacts: list[Any]) -> Any:
             deterministic_score=0.0,
         ),
         feasibility=feasibility,
-        candidate_methods=(
-            [feasibility.method_id] if feasibility.method_id is not None else []
-        ),
+        candidate_methods=([feasibility.method_id] if feasibility.method_id is not None else []),
         priority_rationale=(
             "Drafted from your own question without a model, so it carries no "
             "deterministic score yet. Fill in the review fields before planning it."
@@ -1224,8 +1259,7 @@ def _run_investigation_plan_job(
             "source_session_id": source_session_id,
             "plan_session_id": planned.session_id,
             "plan_count": sum(
-                artifact.type is ArtifactType.INVESTIGATION_PLAN
-                for artifact in planned.artifacts
+                artifact.type is ArtifactType.INVESTIGATION_PLAN for artifact in planned.artifacts
             ),
         },
     )

@@ -16,6 +16,8 @@ import type {
   ChatMessageAccepted,
   ChatMessagePage,
   CompareView,
+  CompareScopeName,
+  CompareScopeView,
   FindingsView,
   SemanticView,
   RelationshipGraphView,
@@ -791,6 +793,74 @@ export function compareView(left: string, right: string): CompareView {
       right_path: [right, left],
       warnings: [],
     },
+  };
+}
+
+export function compareScopeView(
+  scope: CompareScopeName,
+  left: string,
+  right: string,
+  differencesOnly = false,
+): CompareScopeView {
+  const side = (
+    sessionId: string,
+    title: string,
+    value: string,
+  ) => ({
+    record_id: `${sessionId}:${scope}:shared`,
+    title,
+    kind: `${scope} record`,
+    status: "ready",
+    summary: `${scope} summary for ${title}`,
+    source_session_id: sessionId,
+    artifact_id: `${scope}_${sessionId}`,
+    tags: [scope],
+    evidence_ids: [],
+    fields: [
+      { key: "value", label: "Value", value, value_kind: "text" as const },
+    ],
+  });
+  const changed = {
+    match_key: `${scope}:changed`,
+    matcher_version: "fixture-v1",
+    reason: "same deterministic scope identity",
+    confidence: "high" as const,
+    match_status: "strong" as const,
+    change: "changed" as const,
+    left: side(left, `Baseline ${scope}`, "before"),
+    right: side(right, `Variant ${scope}`, "after"),
+    changed_fields: ["value"],
+    warnings: [],
+  };
+  const same = {
+    match_key: `${scope}:same`,
+    matcher_version: "fixture-v1",
+    reason: "same deterministic scope identity",
+    confidence: "high" as const,
+    match_status: "strong" as const,
+    change: "same" as const,
+    left: {
+      ...side(left, `Shared ${scope}`, "same"),
+      record_id: `${left}:${scope}:same`,
+    },
+    right: {
+      ...side(right, `Shared ${scope}`, "same"),
+      record_id: `${right}:${scope}:same`,
+    },
+    changed_fields: [],
+    warnings: [],
+  };
+  return {
+    project_id: "p1",
+    scope,
+    left: compareView(left, right).left,
+    right: compareView(left, right).right,
+    left_state: { state: "value", reason: null },
+    right_state: { state: "value", reason: null },
+    counts: { added: 0, removed: 0, changed: 1, same: 1, unavailable: 0 },
+    items: differencesOnly ? [changed] : [changed, same],
+    next_cursor: null,
+    warnings: [],
   };
 }
 
@@ -2354,6 +2424,18 @@ export const defaultHandlers = [
       compareView(
         url.searchParams.get("left") ?? "r1",
         url.searchParams.get("right") ?? "r2",
+      ),
+    );
+  }),
+
+  http.get("/api/v1/compare/:scope", ({ params, request }) => {
+    const url = new URL(request.url);
+    return HttpResponse.json(
+      compareScopeView(
+        String(params["scope"]) as CompareScopeName,
+        url.searchParams.get("left") ?? "r1",
+        url.searchParams.get("right") ?? "r2",
+        url.searchParams.get("filter") === "differences",
       ),
     );
   }),

@@ -87,7 +87,7 @@ def test_summarize_run_aggregates_llm_tool_tokens_and_steps(tmp_path: Path) -> N
 
     metrics = summarize_session(store, _PROJECT, _RUN)
 
-    assert metrics.schema_version == 5
+    assert metrics.schema_version == 6
     assert metrics.session_id == _RUN
     assert metrics.cost_estimate_status in {
         "complete_estimate",
@@ -424,7 +424,7 @@ def test_persist_run_metrics_saves_run_metrics_artifact(tmp_path: Path) -> None:
     artifact = store.get_artifact(artifact_id)
     assert artifact.type is ArtifactType.SESSION_METRICS
     payload = SessionMetrics.model_validate(artifact.payload)
-    assert payload.schema_version == 5
+    assert payload.schema_version == 6
     assert payload.session_id == _RUN
     assert payload.llm_calls == 1
     assert payload.total_tokens == 7

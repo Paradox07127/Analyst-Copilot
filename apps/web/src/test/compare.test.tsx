@@ -1,15 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import type { SessionDetail, SessionPage } from "../api/client";
+import type {
+  CompareScopeName,
+  SessionDetail,
+  SessionPage,
+} from "../api/client";
 import { server } from "./msw/server";
 import { renderAppAt, renderAppWithRouterAt } from "./render";
-import { compareView } from "./msw/handlers";
+import { compareScopeView, compareView } from "./msw/handlers";
 
 const PAGE_PATH = "/projects/p1/compare?left=r1";
 
-function twoRuns() {
+function twoRuns(cleanedTitle = "Cleaned run") {
   return http.get("/api/v1/projects/:projectId/sessions", ({ params }) =>
     HttpResponse.json({
       items: [
@@ -28,7 +32,7 @@ function twoRuns() {
         {
           session_id: "r2",
           project_id: String(params["projectId"]),
-          title: "Cleaned run",
+          title: cleanedTitle,
           status: "complete",
           created_at: "2026-07-22T10:00:00Z",
           updated_at: "2026-07-22T10:00:00Z",
@@ -45,6 +49,49 @@ function twoRuns() {
 
 function metricRow(label: string): HTMLElement {
   return screen.getByRole("row", { name: new RegExp(`^${label}`) });
+}
+
+const fallbackRect = Element.prototype.getBoundingClientRect;
+
+/* The drop targets mount only after activation. Give them geometry at mount,
+ * before dnd-kit performs its first measurement; all other elements retain
+ * the shared test environment's rect behaviour. */
+beforeAll(() => {
+  Element.prototype.getBoundingClientRect = function getBoundingClientRect(
+    this: Element,
+  ): DOMRect {
+    const side = this.getAttribute("data-split-drop-side");
+    if (!side) return fallbackRect.call(this);
+    const left = side === "left" ? 100 : 500;
+    return {
+      x: left,
+      y: 0,
+      left,
+      top: 0,
+      width: 320,
+      height: 640,
+      right: left + 320,
+      bottom: 640,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+});
+
+afterAll(() => {
+  Element.prototype.getBoundingClientRect = fallbackRect;
+});
+
+async function beginSessionDrag(dragged: HTMLElement) {
+  fireEvent.mouseDown(dragged, { button: 0, clientX: 10, clientY: 10 });
+  fireEvent.mouseMove(document, { buttons: 1, clientX: 20, clientY: 20 });
+  await screen.findByTestId("session-drag-preview");
+  const left = screen.getByRole("button", {
+    name: new RegExp("^Drop .+ in left pane$"),
+  });
+  const right = screen.getByRole("button", {
+    name: new RegExp("^Drop .+ in right pane$"),
+  });
+  return { left, right };
 }
 
 describe("Compare page", () => {
@@ -98,6 +145,69 @@ describe("Compare page", () => {
 
     expect(screen.getByText("In both sessions")).toBeInTheDocument();
     expect(screen.getByText("extra.csv")).toBeInTheDocument();
+  });
+
+  it("loads typed scope APIs, renders server matches, and filters differences", async () => {
+    const requested: Array<{ scope: string; filter: string | null }> = [];
+    server.use(
+      twoRuns(),
+      http.get("/api/v1/compare/:scope", ({ params, request }) => {
+        const url = new URL(request.url);
+        const scope = String(params["scope"]) as CompareScopeName;
+        requested.push({ scope, filter: url.searchParams.get("filter") });
+        return HttpResponse.json(
+          compareScopeView(
+            scope,
+            url.searchParams.get("left") ?? "r1",
+            url.searchParams.get("right") ?? "r2",
+            url.searchParams.get("filter") === "differences",
+          ),
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt(`${PAGE_PATH}&right=r2&scope=questions`);
+
+    await screen.findByRole("heading", { name: "Questions comparison" });
+    expect(requested).toContainEqual({ scope: "questions", filter: "all" });
+    expect(screen.getByText("1 changed")).toBeInTheDocument();
+    expect(screen.getByText("1 same")).toBeInTheDocument();
+    expect(screen.getByText("before")).toBeInTheDocument();
+    expect(screen.getByText("after")).toBeInTheDocument();
+    expect(screen.getAllByText("value").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("checkbox", { name: "Only differences" }));
+    await waitFor(() =>
+      expect(requested).toContainEqual({
+        scope: "questions",
+        filter: "differences",
+      }),
+    );
+    expect(screen.queryByText("Shared questions")).not.toBeInTheDocument();
+  });
+
+  it("opens every semantic comparison scope through its typed endpoint", async () => {
+    server.use(twoRuns());
+    const user = userEvent.setup();
+    renderAppAt(`${PAGE_PATH}&right=r2`);
+    await screen.findByRole("heading", { name: "Compare" });
+
+    const scopes = [
+      "questions",
+      "analysis",
+      "findings",
+      "report",
+      "artifacts",
+      "execution",
+    ];
+    for (const scope of scopes) {
+      await user.click(screen.getByRole("button", { name: scope }));
+      await screen.findByRole("heading", {
+        name: new RegExp(`^${scope} comparison$`, "i"),
+      });
+      expect(screen.getByText(`Baseline ${scope}`)).toBeInTheDocument();
+      expect(screen.getByText(`Variant ${scope}`)).toBeInTheDocument();
+    }
   });
 
   it("labels failed-side gaps unavailable instead of rendering a false zero", async () => {
@@ -305,7 +415,7 @@ describe("Compare page", () => {
     });
   });
 
-  it("keeps split sections independent and Inspector follows the active pane", async () => {
+  it("upgrades legacy embedded split links into two full workspace panes", async () => {
     let compareRequests = 0;
     server.use(
       twoRuns(),
@@ -339,26 +449,25 @@ describe("Compare page", () => {
     );
 
     const leftPane = await screen.findByRole("region", {
-      name: "Left session pane",
+      name: "Left workspace pane",
     });
     const rightPane = screen.getByRole("region", {
-      name: "Right session pane",
+      name: "Right workspace pane",
     });
-    expect(within(leftPane).getByRole("combobox", { name: "Left section" })).toHaveValue(
-      "questions",
-    );
+    expect(router.state.location.pathname).toBe("/split");
     expect(
-      within(rightPane).getByRole("combobox", { name: "Right section" }),
-    ).toHaveValue("report");
+      await within(leftPane).findByRole("heading", { name: "Questions" }),
+    ).toBeInTheDocument();
+    expect(
+      await within(rightPane).findByRole("heading", { name: "Report" }),
+    ).toBeInTheDocument();
 
-    await user.selectOptions(
-      within(leftPane).getByRole("combobox", { name: "Left section" }),
-      "artifacts",
-    );
+    await user.click(within(leftPane).getByRole("button", { name: "Trust & trace" }));
+    await user.click(within(leftPane).getByRole("link", { name: "Artifacts" }));
     await waitFor(() => {
       const params = new URLSearchParams(router.state.location.search);
-      expect(params.get("leftSection")).toBe("artifacts");
-      expect(params.get("rightSection")).toBe("report");
+      expect(params.get("left")).toBe("/projects/p1/sessions/r1/artifacts");
+      expect(params.get("right")).toBe("/projects/p1/sessions/r2/report");
     });
 
     fireEvent.pointerDown(rightPane);
@@ -369,4 +478,111 @@ describe("Compare page", () => {
     expect(within(inspector).getAllByText("Report").length).toBeGreaterThan(0);
     expect(compareRequests).toBe(0);
   });
+
+  it("drags a rail session onto a highlighted side and opens two routed windows", async () => {
+    server.use(twoRuns());
+    const { router } = renderAppWithRouterAt(
+      "/projects/p1/sessions/r1/data-map",
+    );
+
+    const rail = await screen.findByRole("complementary", { name: "Sessions" });
+    const dragged = await within(rail).findByRole("link", {
+      name: "Cleaned run",
+    });
+    expect(dragged.draggable).toBe(false);
+    expect(dragged).toHaveClass("cursor-default");
+    expect(dragged).not.toHaveClass("cursor-grab", "cursor-grabbing");
+    const { left: leftTarget, right: rightTarget } =
+      await beginSessionDrag(dragged);
+    expect(dragged).toHaveClass("cursor-grabbing");
+    expect(screen.getByLabelText("Choose split side")).toHaveClass(
+      "cursor-grabbing",
+    );
+    expect(leftTarget).toHaveClass("border-transparent");
+    expect(rightTarget).toHaveClass("border-transparent");
+    fireEvent.mouseMove(document, {
+      buttons: 1,
+      clientX: 550,
+      clientY: 100,
+    });
+    await waitFor(() =>
+      expect(rightTarget).toHaveClass(
+        "border-dashed",
+        "border-primary",
+        "bg-primary/20",
+        "backdrop-blur-[2px]",
+      ),
+    );
+    expect(leftTarget).toHaveClass("border-transparent");
+    expect(within(leftTarget).queryByText(/Drop in left pane/)).toBeNull();
+    fireEvent.mouseUp(document, { clientX: 550, clientY: 100 });
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/split"));
+    const params = new URLSearchParams(router.state.location.search);
+    expect(params.get("left")).toBe("/projects/p1/sessions/r1/data-map");
+    expect(params.get("right")).toBe("/projects/p1/sessions/r2/data-map");
+    expect(params.get("active")).toBe("right");
+    expect(
+      await screen.findByRole("region", { name: "Left workspace pane" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Right workspace pane" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("separator", { name: "Resize workspace panes" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens an empty companion pane when splitting directly from Home", async () => {
+    server.use(twoRuns());
+    const { router } = renderAppWithRouterAt("/projects");
+    const rail = await screen.findByRole("complementary", { name: "Sessions" });
+    const dragged = await within(rail).findByRole("link", {
+      name: "Cleaned run",
+    });
+    const { left: leftTarget } = await beginSessionDrag(dragged);
+    fireEvent.mouseMove(document, {
+      buttons: 1,
+      clientX: 150,
+      clientY: 100,
+    });
+    await waitFor(() => expect(leftTarget).toHaveClass("border-dashed"));
+    fireEvent.mouseUp(document, { clientX: 150, clientY: 100 });
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/split"));
+    const params = new URLSearchParams(router.state.location.search);
+    expect(params.get("left")).toBe("/projects/p1/sessions/r2/data-map");
+    expect(params.get("right")).toBe("/workspace/empty");
+    const rightPane = await screen.findByRole("region", {
+      name: "Right workspace pane",
+    });
+    expect(
+      within(rightPane).getByRole("heading", { name: "Empty workspace pane" }),
+    ).toBeInTheDocument();
+  });
+
+  it("uses a bounded portal preview for long session content and cancels cleanly", async () => {
+    const longTitle = `Quarterly cohort analysis ${"with a very long title ".repeat(20)}`;
+    server.use(twoRuns(longTitle));
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    const rail = await screen.findByRole("complementary", { name: "Sessions" });
+    const dragged = (
+      await within(rail).findAllByRole("link", {
+        name: /Quarterly cohort analysis/,
+      })
+    )[0]!;
+
+    await beginSessionDrag(dragged);
+    const preview = screen.getByTestId("session-drag-preview");
+    expect(preview).toHaveClass("w-[224px]", "overflow-hidden");
+    expect(preview.querySelector(".transition-transform")).toBeNull();
+    expect(preview).not.toHaveTextContent("sample, extra");
+
+    fireEvent.keyDown(document, { key: "Escape", code: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("session-drag-preview")).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByLabelText("Choose split side")).not.toBeInTheDocument();
+  });
+
 });

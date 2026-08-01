@@ -590,6 +590,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/agent-handoff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Agent Handoff */
+        get: operations["get_agent_handoff_api_v1_sessions__session_id__agent_handoff_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/artifacts/{artifact_id}": {
         parameters: {
             query?: never;
@@ -1028,6 +1045,23 @@ export interface paths {
         };
         /** Compare Runs */
         get: operations["compare_runs_api_v1_compare_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/compare/{scope}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Compare Scope */
+        get: operations["compare_scope_api_v1_compare__scope__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1824,6 +1858,122 @@ export interface components {
             /** Workspace Label */
             workspace_label: string;
         };
+        /** AgentDataset */
+        AgentDataset: {
+            /** Dataset Id */
+            dataset_id: string;
+            /** Raw Dataset Id */
+            raw_dataset_id?: string | null;
+            /** Name */
+            name: string;
+            /** Content Hash */
+            content_hash?: string | null;
+            /** Rows */
+            rows: number;
+            /** Columns */
+            columns: number;
+            /** Grain */
+            grain?: string | null;
+            /** Semantic Type Counts */
+            semantic_type_counts?: {
+                [key: string]: number;
+            };
+            /** Primary Key Candidates */
+            primary_key_candidates?: string[];
+            /** Composite Key Candidates */
+            composite_key_candidates?: string[][];
+            /** Pii Columns */
+            pii_columns?: {
+                [key: string]: "email" | "phone" | "name" | "id" | "unknown";
+            };
+            /** Pii Column Count */
+            pii_column_count: number;
+            /** Pii Columns Omitted */
+            pii_columns_omitted: number;
+            quality: components["schemas"]["DatasetQualitySummary"];
+            readiness: components["schemas"]["DatasetReadiness"];
+            /** Artifact Ids */
+            artifact_ids?: {
+                [key: string]: string | string[];
+            };
+            /** Artifact Omitted Counts */
+            artifact_omitted_counts?: {
+                [key: string]: number;
+            };
+        };
+        /** AgentHandoffDetail */
+        AgentHandoffDetail: {
+            /** Artifact Id */
+            artifact_id: string;
+            /**
+             * Type
+             * @default AgentHandoff
+             * @constant
+             */
+            type: "AgentHandoff";
+            /** Project Id */
+            project_id: string;
+            /** Session Id */
+            session_id: string;
+            /** Created At */
+            created_at?: string | null;
+            payload: components["schemas"]["AgentHandoffV3"];
+            /** Warnings */
+            warnings?: string[];
+            /** Parents */
+            parents?: string[];
+            /** Evidence */
+            evidence?: components["schemas"]["ArtifactEvidenceRef"][];
+            /** Env Digest */
+            env_digest?: string | null;
+            /** Code Ref */
+            code_ref?: string | null;
+            /** Plain Language */
+            plain_language?: string | null;
+        };
+        /**
+         * AgentHandoffV3
+         * @description Final session manifest. Large evidence remains lazy artifact references.
+         */
+        AgentHandoffV3: {
+            /**
+             * Contract Version
+             * @default 3.0
+             * @constant
+             */
+            contract_version: "3.0";
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            run: components["schemas"]["HandoffRun"];
+            readiness: components["schemas"]["AgentReadiness"];
+            capabilities: components["schemas"]["HandoffCapabilities"];
+            /** Datasets */
+            datasets?: components["schemas"]["AgentDataset"][];
+            /** Artifact Catalog */
+            artifact_catalog?: components["schemas"]["ArtifactCatalogEntry"][];
+            /** Question Results */
+            question_results?: components["schemas"]["HandoffQuestionResult"][];
+            report: components["schemas"]["HandoffReport"];
+            /** Next Actions */
+            next_actions?: components["schemas"]["HandoffNextAction"][];
+            context_policy: components["schemas"]["HandoffContextPolicy"];
+        };
+        /** AgentReadiness */
+        AgentReadiness: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "limited" | "blocked";
+            /** Reasons */
+            reasons?: string[];
+            quality_gate: components["schemas"]["HandoffGate"];
+            report_gate: components["schemas"]["HandoffGate"];
+            cross_dataset_relationships: components["schemas"]["RelationshipReadiness"];
+        };
         /**
          * AnalysisTableView
          * @description One AnalysisTable artifact reshaped for display — rows verbatim.
@@ -1886,6 +2036,56 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** ArtifactCatalogEntry */
+        ArtifactCatalogEntry: {
+            /** Artifact Id */
+            artifact_id: string;
+            type: components["schemas"]["ArtifactType"];
+            /** Origin Session Id */
+            origin_session_id: string;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "ingest" | "profile" | "quality" | "exploration" | "statistics" | "semantic" | "question_planning" | "question_execution" | "reporting" | "observability";
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "gate" | "summary" | "evidence" | "visual" | "plan" | "result" | "presentation" | "metric";
+            /** Dataset Id */
+            dataset_id?: string | null;
+            /** Title */
+            title?: string | null;
+            /**
+             * Priority
+             * @enum {string}
+             */
+            priority: "critical" | "high" | "normal" | "on_demand";
+            /** Required */
+            required: boolean;
+            /** Fetch */
+            fetch: string;
+            /** Content Sha256 */
+            content_sha256: string;
+            /** Content Bytes */
+            content_bytes: number;
+            /** Estimated Tokens */
+            estimated_tokens: number;
+            /** Parent Count */
+            parent_count: number;
+            /** Parents */
+            parents?: string[];
+            /** Evidence Count */
+            evidence_count: number;
+            /** Warning Count */
+            warning_count: number;
+            /**
+             * Sensitivity
+             * @enum {string}
+             */
+            sensitivity: "public" | "internal" | "sensitive" | "pii_restricted";
+        };
         /** ArtifactDetail */
         ArtifactDetail: {
             /** Artifact Id */
@@ -1904,6 +2104,40 @@ export interface components {
             };
             /** Warnings */
             warnings?: string[];
+            /** Parents */
+            parents?: string[];
+            /** Evidence */
+            evidence?: components["schemas"]["ArtifactEvidenceRef"][];
+            /** Env Digest */
+            env_digest?: string | null;
+            /** Code Ref */
+            code_ref?: string | null;
+            /** Plain Language */
+            plain_language?: string | null;
+        };
+        /** ArtifactEvidenceRef */
+        ArtifactEvidenceRef: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "sql" | "code" | "stat" | "table" | "chart" | "profile_field" | "artifact";
+            /** Artifact Id */
+            artifact_id?: string | null;
+            /** Locator */
+            locator: string;
+            /** Value */
+            value?: string | number | null;
+            /**
+             * Unit
+             * @default raw
+             * @enum {string}
+             */
+            unit: "raw" | "percent" | "currency";
+            /** Unit Label */
+            unit_label?: string | null;
+            /** Unit Reference */
+            unit_reference?: string | null;
         };
         /**
          * ArtifactSummary
@@ -1918,6 +2152,65 @@ export interface components {
             type: string;
             /** Created At */
             created_at?: string | null;
+        };
+        /**
+         * ArtifactType
+         * @enum {string}
+         */
+        ArtifactType: "DatasetProfile" | "RawDatasetProfile" | "QualityIssueSet" | "QualityContextSet" | "ChartSpec" | "RawChartSpec" | "RawDataPreview" | "MarkdownReport" | "ReportBundle" | "ReportAudit" | "HtmlReport" | "SqlResult" | "CodeExecutionResult" | "PiiReport" | "ChatTurnPlan" | "Table" | "SessionSummary" | "RelationshipCandidateSet" | "RelationshipValidationSet" | "ErDiagram" | "ValueMap" | "QuestionCandidateSet" | "InvestigationPlan" | "InvestigationApproval" | "ValidatedFinding" | "InvestigationRecord" | "SynthesisBrief" | "DecisionReport" | "DeepInvestigationResult" | "DecisionCoverage" | "QuestionExecutionResult" | "CleaningRecipe" | "CleaningPreview" | "StatTestResult" | "ModelCard" | "AnomalyScreenResult" | "SessionMetrics" | "ResourcePreflight" | "ColumnRoleSet" | "EvidenceInterleaveTranscript" | "FollowUpProposalSet" | "LoopLedger" | "EdaHandoff" | "AgentHandoff";
+        /**
+         * AutoEdaResourceUsage
+         * @description Nested SessionMetrics v6 payload; defaults keep legacy runs readable.
+         */
+        AutoEdaResourceUsage: {
+            /**
+             * Measurement Status
+             * @default unavailable
+             * @enum {string}
+             */
+            measurement_status: "verified" | "partial" | "unavailable";
+            /**
+             * Wall Duration Seconds
+             * @default 0
+             */
+            wall_duration_seconds: number;
+            /**
+             * Preprocessing Duration Seconds
+             * @default 0
+             */
+            preprocessing_duration_seconds: number;
+            /**
+             * Ingest Duration Seconds
+             * @default 0
+             */
+            ingest_duration_seconds: number;
+            /**
+             * Processing Mode
+             * @default unknown
+             * @enum {string}
+             */
+            processing_mode: "exact_in_memory" | "metadata_only" | "unknown";
+            /**
+             * Preflight Status
+             * @default unavailable
+             * @enum {string}
+             */
+            preflight_status: "accepted" | "limited" | "rejected" | "unavailable";
+            /**
+             * Requested Dataset Workers
+             * @default 1
+             */
+            requested_dataset_workers: number;
+            /**
+             * Effective Dataset Workers
+             * @default 0
+             */
+            effective_dataset_workers: number;
+            /** Worker Adjustment Reason */
+            worker_adjustment_reason?: string | null;
+            inputs?: components["schemas"]["EdaInputMetrics"];
+            memory?: components["schemas"]["EdaMemoryMetrics"];
+            artifacts?: components["schemas"]["EdaArtifactMetrics"];
         };
         /** BoardCard */
         BoardCard: {
@@ -2659,6 +2952,146 @@ export interface components {
             source_session_id: components["schemas"]["CompareValue_str_"];
             prompt_template_version: components["schemas"]["CompareValue_str_"];
         };
+        /** CompareScopeCounts */
+        CompareScopeCounts: {
+            /**
+             * Added
+             * @default 0
+             */
+            added: number;
+            /**
+             * Removed
+             * @default 0
+             */
+            removed: number;
+            /**
+             * Changed
+             * @default 0
+             */
+            changed: number;
+            /**
+             * Same
+             * @default 0
+             */
+            same: number;
+            /**
+             * Unavailable
+             * @default 0
+             */
+            unavailable: number;
+        };
+        /**
+         * CompareScopeField
+         * @description One bounded, display-ready property of a scope record.
+         *
+         *     Scope APIs deliberately do not return arbitrary artifact payloads. Complex
+         *     values are summarized by the application service into text/list/code
+         *     fields, while comparison itself uses a private canonical representation.
+         */
+        CompareScopeField: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
+            /**
+             * Value Kind
+             * @default text
+             * @enum {string}
+             */
+            value_kind: "text" | "number" | "status" | "list" | "code";
+        };
+        /** CompareScopeItem */
+        CompareScopeItem: {
+            /** Match Key */
+            match_key: string;
+            /** Matcher Version */
+            matcher_version: string;
+            /** Reason */
+            reason: string;
+            /**
+             * Confidence
+             * @enum {string}
+             */
+            confidence: "exact" | "high" | "medium" | "none";
+            /**
+             * Match Status
+             * @enum {string}
+             */
+            match_status: "exact" | "strong" | "probable" | "unmatched";
+            /**
+             * Change
+             * @enum {string}
+             */
+            change: "added" | "removed" | "changed" | "same" | "unavailable";
+            left?: components["schemas"]["CompareScopeRecord"] | null;
+            right?: components["schemas"]["CompareScopeRecord"] | null;
+            /** Changed Fields */
+            changed_fields?: string[];
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** CompareScopeRecord */
+        CompareScopeRecord: {
+            /** Record Id */
+            record_id: string;
+            /** Title */
+            title: string;
+            /** Kind */
+            kind: string;
+            /** Status */
+            status?: string | null;
+            /**
+             * Summary
+             * @default
+             */
+            summary: string;
+            /** Source Session Id */
+            source_session_id: string;
+            /** Artifact Id */
+            artifact_id?: string | null;
+            /** Tags */
+            tags?: string[];
+            /** Evidence Ids */
+            evidence_ids?: string[];
+            /** Fields */
+            fields?: components["schemas"]["CompareScopeField"][];
+        };
+        /** CompareScopeSideState */
+        CompareScopeSideState: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "value" | "missing" | "unavailable";
+            /** Reason */
+            reason?: string | null;
+        };
+        /**
+         * CompareScopeView
+         * @description Shared envelope for every lazily loaded semantic comparison scope.
+         */
+        CompareScopeView: {
+            /** Project Id */
+            project_id: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "questions" | "analysis" | "findings" | "report" | "artifacts" | "execution";
+            left: components["schemas"]["CompareSessionSide"];
+            right: components["schemas"]["CompareSessionSide"];
+            left_state: components["schemas"]["CompareScopeSideState"];
+            right_state: components["schemas"]["CompareScopeSideState"];
+            counts: components["schemas"]["CompareScopeCounts"];
+            /** Items */
+            items?: components["schemas"]["CompareScopeItem"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+            /** Warnings */
+            warnings?: string[];
+        };
         /**
          * CompareSessionSide
          * @description Index-level identity of one side of a comparison.
@@ -2974,6 +3407,27 @@ export interface components {
             };
             /** Fields */
             fields?: components["schemas"]["FieldProfileRow"][];
+        };
+        /** DatasetQualitySummary */
+        DatasetQualitySummary: {
+            /** Critical */
+            critical: number;
+            /** Warn */
+            warn: number;
+            /** Info */
+            info: number;
+            /** Material Codes */
+            material_codes?: string[];
+        };
+        /** DatasetReadiness */
+        DatasetReadiness: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "limited" | "blocked";
+            /** Reasons */
+            reasons?: string[];
         };
         /** DatasetSchema */
         DatasetSchema: {
@@ -3384,6 +3838,123 @@ export interface components {
             /** Count */
             count: number;
         };
+        /** EdaArtifactMetrics */
+        EdaArtifactMetrics: {
+            /**
+             * Artifact Count
+             * @default 0
+             */
+            artifact_count: number;
+            /**
+             * Storage Bytes Excluding Session Metrics
+             * @default 0
+             */
+            storage_bytes_excluding_session_metrics: number;
+            /**
+             * Canonical Json Bytes Excluding Session Metrics
+             * @default 0
+             */
+            canonical_json_bytes_excluding_session_metrics: number;
+            /**
+             * Agent Handoff Payload Bytes
+             * @default 0
+             */
+            agent_handoff_payload_bytes: number;
+            /**
+             * Default Context Bytes
+             * @default 0
+             */
+            default_context_bytes: number;
+            /**
+             * Default Context Estimated Tokens
+             * @default 0
+             */
+            default_context_estimated_tokens: number;
+        };
+        /**
+         * EdaDataFootprint
+         * @description Aggregate shape and memory footprint for analysis or raw-lineage frames.
+         */
+        EdaDataFootprint: {
+            /**
+             * Dataset Count
+             * @default 0
+             */
+            dataset_count: number;
+            /**
+             * File Bytes
+             * @default 0
+             */
+            file_bytes: number;
+            /**
+             * Rows
+             * @default 0
+             */
+            rows: number;
+            /**
+             * Columns
+             * @default 0
+             */
+            columns: number;
+            /**
+             * Max Rows
+             * @default 0
+             */
+            max_rows: number;
+            /**
+             * Max Columns
+             * @default 0
+             */
+            max_columns: number;
+            /**
+             * Frame Deep Bytes
+             * @default 0
+             */
+            frame_deep_bytes: number;
+            /**
+             * Measurement
+             * @default unavailable
+             * @enum {string}
+             */
+            measurement: "exact" | "estimated" | "unavailable";
+        };
+        /** EdaInputMetrics */
+        EdaInputMetrics: {
+            analysis?: components["schemas"]["EdaDataFootprint"];
+            raw_lineage?: components["schemas"]["EdaDataFootprint"];
+            /**
+             * Unique File Bytes
+             * @default 0
+             */
+            unique_file_bytes: number;
+        };
+        /** EdaMemoryMetrics */
+        EdaMemoryMetrics: {
+            /** Baseline Peak Rss Bytes */
+            baseline_peak_rss_bytes?: number | null;
+            /** Peak Rss Bytes */
+            peak_rss_bytes?: number | null;
+            /** Peak Rss Delta Bytes */
+            peak_rss_delta_bytes?: number | null;
+            /**
+             * Peak Rss Method
+             * @default unavailable
+             * @enum {string}
+             */
+            peak_rss_method: "getrusage_ru_maxrss" | "get_process_memory_info_peak_working_set" | "unavailable";
+            /**
+             * Working Set Budget Bytes
+             * @default 0
+             */
+            working_set_budget_bytes: number;
+            /**
+             * Estimated Working Set Bytes
+             * @default 0
+             */
+            estimated_working_set_bytes: number;
+            /** Verified Working Set Bytes */
+            verified_working_set_bytes?: number | null;
+        };
         /** EntityNoteView */
         EntityNoteView: {
             /** Name */
@@ -3523,6 +4094,214 @@ export interface components {
             records?: components["schemas"]["InvestigationLogEntry"][];
             /** Warnings */
             warnings?: string[];
+        };
+        /** HandoffCapabilities */
+        HandoffCapabilities: {
+            /**
+             * Cleaning
+             * @enum {string}
+             */
+            cleaning: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Profiling
+             * @enum {string}
+             */
+            profiling: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Quality
+             * @enum {string}
+             */
+            quality: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Visualization
+             * @enum {string}
+             */
+            visualization: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Statistics
+             * @enum {string}
+             */
+            statistics: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Modeling
+             * @enum {string}
+             */
+            modeling: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Relationships
+             * @enum {string}
+             */
+            relationships: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Questions
+             * @enum {string}
+             */
+            questions: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Report
+             * @enum {string}
+             */
+            report: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+            /**
+             * Metrics
+             * @enum {string}
+             */
+            metrics: "available" | "deferred" | "not_run" | "not_applicable" | "failed";
+        };
+        /** HandoffContextPolicy */
+        HandoffContextPolicy: {
+            /** Default Artifact Ids */
+            default_artifact_ids?: string[];
+            /** On Demand Types */
+            on_demand_types?: components["schemas"]["ArtifactType"][];
+            /** Excluded By Default Types */
+            excluded_by_default_types?: components["schemas"]["ArtifactType"][];
+            /** Max Initial Bytes */
+            max_initial_bytes: number;
+            /** Max Initial Estimated Tokens */
+            max_initial_estimated_tokens: number;
+            /** Cataloged Artifact Count */
+            cataloged_artifact_count: number;
+            /** Default Artifact Count */
+            default_artifact_count: number;
+            /** Omitted Artifact Count */
+            omitted_artifact_count: number;
+            /** Included Question Result Count */
+            included_question_result_count: number;
+            /** Omitted Question Result Count */
+            omitted_question_result_count: number;
+            /** Default Artifact Bytes */
+            default_artifact_bytes: number;
+            /** Default Artifact Estimated Tokens */
+            default_artifact_estimated_tokens: number;
+            /** Serialized Bytes */
+            serialized_bytes: number;
+            /** Estimated Tokens */
+            estimated_tokens: number;
+            /** Initial Context Bytes */
+            initial_context_bytes: number;
+            /** Initial Context Estimated Tokens */
+            initial_context_estimated_tokens: number;
+        };
+        /** HandoffGate */
+        HandoffGate: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pass" | "warn" | "fail" | "not_run";
+            /** Reasons */
+            reasons?: string[];
+            /** Artifact Id */
+            artifact_id?: string | null;
+        };
+        /** HandoffNextAction */
+        HandoffNextAction: {
+            /** Action */
+            action: string;
+            /**
+             * Priority
+             * @enum {string}
+             */
+            priority: "critical" | "high" | "normal" | "low";
+            /** Blocking */
+            blocking: boolean;
+            /** Reason */
+            reason?: string | null;
+            /** Endpoint */
+            endpoint?: string | null;
+        };
+        /** HandoffQuestionResult */
+        HandoffQuestionResult: {
+            /** Question Id */
+            question_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "answered" | "abstained" | "failed" | "awaiting_approval";
+            /** Execution Artifact Id */
+            execution_artifact_id: string;
+            /** Sql Artifact Id */
+            sql_artifact_id?: string | null;
+            /** Chart Artifact Id */
+            chart_artifact_id?: string | null;
+            /** Finding Count */
+            finding_count: number;
+            /** Limitation Count */
+            limitation_count: number;
+            /**
+             * Exploratory
+             * @default false
+             */
+            exploratory: boolean;
+        };
+        /** HandoffReport */
+        HandoffReport: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "limited" | "failed" | "not_generated";
+            /** Audit Artifact Id */
+            audit_artifact_id?: string | null;
+            /** Bundle Artifact Id */
+            bundle_artifact_id?: string | null;
+            /** Markdown Artifact Id */
+            markdown_artifact_id?: string | null;
+            /** Html Artifact Id */
+            html_artifact_id?: string | null;
+        };
+        /** HandoffRun */
+        HandoffRun: {
+            /** Project Id */
+            project_id: string;
+            /** Session Id */
+            session_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "completed" | "completed_with_limits";
+            /** Producer Version */
+            producer_version: string;
+            /** Execution Fingerprint */
+            execution_fingerprint: string;
+            /** Input Hashes */
+            input_hashes?: {
+                [key: string]: string;
+            };
+            /** Pipeline Artifact Count */
+            pipeline_artifact_count: number;
+            /** Persisted Source Artifact Count */
+            persisted_source_artifact_count: number;
+            /** Referenced External Artifact Count */
+            referenced_external_artifact_count: number;
+            /** Artifact Count */
+            artifact_count: number;
+            /** Artifact Counts */
+            artifact_counts?: {
+                [key: string]: number;
+            };
+            /** Source Inventory Count */
+            source_inventory_count: number;
+            /** Source Inventory Digest */
+            source_inventory_digest: string;
+            /** External Inventory Digest */
+            external_inventory_digest: string;
+            /** Lineage Candidate Parent Count */
+            lineage_candidate_parent_count: number;
+            /** Lineage Parent Count */
+            lineage_parent_count: number;
+            /**
+             * Lineage Parents Truncated
+             * @default false
+             */
+            lineage_parents_truncated: boolean;
+            /** Started At */
+            started_at?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
         };
         /** HealthStatusView */
         HealthStatusView: {
@@ -3888,6 +4667,18 @@ export interface components {
              * @default true
              */
             generate_report: boolean;
+            /**
+             * Dataset Workers
+             * @default 1
+             * @enum {integer}
+             */
+            dataset_workers: 1 | 2;
+            /**
+             * Resource Limit Action
+             * @default limited
+             * @enum {string}
+             */
+            resource_limit_action: "limited" | "reject";
             /**
              * Llm
              * @default env
@@ -5266,6 +6057,20 @@ export interface components {
              */
             source_available: boolean;
         };
+        /** RelationshipReadiness */
+        RelationshipReadiness: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_applicable" | "deferred" | "materialized" | "validated" | "rejected";
+            /** Cross Table Claims Allowed */
+            cross_table_claims_allowed: boolean;
+            /** Action */
+            action?: string | null;
+            /** Artifact Ids */
+            artifact_ids?: string[];
+        };
         /**
          * RelationshipValidateRequest
          * @description No candidate content on purpose: validation runs what the approval froze.
@@ -5664,7 +6469,7 @@ export interface components {
         SessionMetricsView: {
             /**
              * Schema Version
-             * @default 5
+             * @default 6
              */
             schema_version: number;
             /** Session Id */
@@ -5798,6 +6603,7 @@ export interface components {
              * @default 0
              */
             duration_seconds: number;
+            resource_usage?: components["schemas"]["AutoEdaResourceUsage"];
             /**
              * Event Count
              * @default 0
@@ -9688,6 +10494,102 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_agent_handoff_api_v1_sessions__session_id__agent_handoff_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentHandoffDetail"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    /** @description Seconds before retrying while the session is still running; absent for terminal failed or cancelled sessions. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
         };
     };
     get_artifact_api_v1_sessions__session_id__artifacts__artifact_id__get: {
@@ -9749,6 +10651,15 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11492,6 +12403,61 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CompareView"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    compare_scope_api_v1_compare__scope__get: {
+        parameters: {
+            query: {
+                left: string;
+                right: string;
+                filter?: "all" | "differences";
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                scope: "questions" | "analysis" | "findings" | "report" | "artifacts" | "execution";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompareScopeView"];
                 };
             };
             /** @description Not Found */

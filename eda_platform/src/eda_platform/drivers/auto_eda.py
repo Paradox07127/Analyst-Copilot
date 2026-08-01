@@ -5,8 +5,10 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from math import ceil
 from pathlib import Path
 from shutil import copy2
+from time import perf_counter
 from typing import Any, ClassVar, Literal
 
 import pandas as pd
@@ -34,6 +36,8 @@ from eda_platform.core.llm import (
 from eda_platform.core.llm_ledger import meter_llm_client, restore_run_budget_state
 from eda_platform.core.meaning_proposals import MeaningProposal
 from eda_platform.core.methods import MethodGateContext, evaluate_feasibility
+from eda_platform.core.process_metrics import PeakRssMeasurement, process_peak_rss
+from eda_platform.core.provenance import env_digest
 from eda_platform.core.query import DuckDBQueryEngine
 from eda_platform.core.semantic import (
     JoinWhitelist,
@@ -45,7 +49,10 @@ from eda_platform.core.semantic_resources import (
     SemanticSeedsRepository,
     load_semantic_seeds_safe,
 )
-from eda_platform.core.session_metrics import persist_run_metrics
+from eda_platform.core.session_metrics import (
+    create_run_metrics_artifact,
+    persist_run_metrics,
+)
 from eda_platform.core.skills_store import catalog_block
 from eda_platform.core.store import ArtifactStore
 from eda_platform.core.support_docs import extract_support_snippets, load_support_docs
@@ -62,6 +69,12 @@ from eda_platform.schemas.relations import (
     RelationshipValidation,
     RelationshipValidationSet,
 )
+from eda_platform.schemas.resource_metrics import (
+    EdaDataFootprint,
+    EdaDatasetEstimate,
+    EdaResourcePolicy,
+    EdaResourcePreflight,
+)
 from eda_platform.schemas.sessions import (
     SessionManifest,
     TraceEvent,
@@ -70,6 +83,7 @@ from eda_platform.schemas.sessions import (
 )
 from eda_platform.schemas.stats import StatTestType, StatWarning
 from eda_platform.schemas.value_discovery import ValueMap
+from eda_platform.tools.agent_handoff import create_agent_handoff_artifact
 from eda_platform.tools.analysis import create_analysis_tables
 from eda_platform.tools.chart_specs import (
     create_association_chart_specs,
@@ -96,6 +110,10 @@ from eda_platform.tools.relationship_discovery import (
     eager_validation_candidates,
     propose_join_candidates,
     validate_relationships,
+)
+from eda_platform.tools.resource_preflight import (
+    EdaResourceLimitError,
+    preflight_csv_resources,
 )
 from eda_platform.tools.stat_tests import (
     create_anova_boxplot_artifact,
@@ -256,6 +274,7 @@ def discover_relationships_on_demand(
             role_set = ColumnRoleSet.model_validate(artifact.payload)
             role_sets[role_set.dataset] = role_set
     project_dir = store.project_dir(result.project_id)
+
     def _record(event: TraceEvent) -> None:
         store.append_trace(result.project_id, event)
 
@@ -1425,6 +1444,8 @@ class ExportAgenticReportStep:
         ArtifactType.MARKDOWN_REPORT,
         ArtifactType.HTML_REPORT,
         ArtifactType.EVIDENCE_INTERLEAVE_TRANSCRIPT,
+        ArtifactType.SESSION_METRICS,
+        ArtifactType.AGENT_HANDOFF,
     )
 
     def __init__(
@@ -1585,9 +1606,7 @@ def _masked_loaded_dataset(
     for column, label in labels.items():
         if column in frame.columns:
             frame[column] = frame[column].map(
-                lambda value, pii_label=label: (
-                    value if pd.isna(value) else f"[PII:{pii_label}]"
-                )
+                lambda value, pii_label=label: value if pd.isna(value) else f"[PII:{pii_label}]"
             )
     return LoadedDataset(record=loaded.record, frame=frame)
 
@@ -1628,14 +1647,21 @@ def run_auto_eda(
     relationship_discovery: Literal["on_demand", "eager"] = "on_demand",
     generate_report: bool = True,
     dataset_workers: int = 1,
+    resource_policy: EdaResourcePolicy | None = None,
+    resource_preflight: EdaResourcePreflight | None = None,
+    preprocessing_duration_seconds: float = 0.0,
+    baseline_peak_rss: PeakRssMeasurement | None = None,
     budget_policy: SessionBudgetPolicy | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> AutoEDAResult:
     if dataset_workers not in {1, 2}:
         raise ValueError("dataset_workers must be 1 or 2")
+    driver_started = perf_counter()
+    baseline_rss = baseline_peak_rss or process_peak_rss()
     workspace_path = resolve_workspace_path(workspace)
     store = ArtifactStore(workspace_path)
     actual_session_id = session_id or _generate_session_id(file_paths)
+    previous_manifest = store.read_manifest(project_id, actual_session_id)
     effective_budget_policy = budget_policy or SessionBudgetPolicy()
     restored_budget = restore_run_budget_state(
         effective_budget_policy,
@@ -1652,16 +1678,97 @@ def run_auto_eda(
     )
     # Ledger first: every downstream LLM call is metered at this one seam, so a
     # call site that forgets its own llm_call event still shows up in the spend.
+    base_llm = llm or OfflineLLMClient()
     llm = meter_llm_client(
-        llm or OfflineLLMClient(),
+        base_llm,
         session_id=actual_session_id,
         emit=ctx.emit_trace,
         budget=ctx.session_budget,
         session_dir=store.session_dir(project_id, actual_session_id),
     )
 
+    run_started_at = datetime.now(UTC)
+    preliminary_manifest = SessionManifest(
+        session_id=actual_session_id,
+        project_id=project_id,
+        input_hashes={},
+        code_version=_current_code_version(),
+        model_versions=manifest_model_versions(llm),
+        title=build_run_title([Path(path).name for path in file_paths]) or None,
+    )
+    store.write_manifest(preliminary_manifest)
+    cooperative_cancel = (
+        None
+        if cancel_check is None
+        else lambda: raise_if_cancelled(cancel_check, operation="resource preflight")
+    )
+    effective_resource_policy = resource_policy or (
+        resource_preflight.policy if resource_preflight is not None else EdaResourcePolicy()
+    )
+    preflight = resource_preflight or preflight_csv_resources(
+        file_paths,
+        requested_dataset_workers=dataset_workers,
+        baseline_peak_rss_bytes=baseline_rss.bytes or 0,
+        policy=effective_resource_policy,
+        precleaning_enabled=raw_file_paths is not None,
+        cancel_check=cooperative_cancel,
+    )
+    if preflight.requested_dataset_workers != dataset_workers:
+        raise ValueError("resource_preflight requested workers do not match dataset_workers")
+    preflight_artifact = _resource_preflight_artifact(
+        preflight, project_id=project_id, session_id=actual_session_id
+    )
+    store.save_artifact(preflight_artifact)
+    ctx.execution_fingerprint = stable_hash(
+        {
+            "execution_schema_version": 2,
+            "resource_preflight": preflight.model_dump(mode="json"),
+            "code_version": preliminary_manifest.code_version,
+            "payload_policy": payload_policy,
+            "business_context": business_context,
+        },
+        length=32,
+    )
+    if preflight.status == "rejected":
+        _emit_auto_eda_resource_trace(
+            ctx,
+            driver_started=driver_started,
+            baseline_rss=baseline_rss,
+            preprocessing_duration_seconds=preprocessing_duration_seconds,
+        )
+        store.mark_session_status(project_id, actual_session_id, "failed")
+        raise EdaResourceLimitError(preflight)
+    if preflight.status == "limited":
+        _emit_auto_eda_resource_trace(
+            ctx,
+            driver_started=driver_started,
+            baseline_rss=baseline_rss,
+            preprocessing_duration_seconds=preprocessing_duration_seconds,
+        )
+        final_artifacts = _finalize_agent_artifacts(
+            store,
+            project_id=project_id,
+            session_id=actual_session_id,
+            manifest=preliminary_manifest,
+            execution_fingerprint=ctx.execution_fingerprint,
+            emit_trace=ctx.emit_trace,
+        )
+        store.mark_session_status(project_id, actual_session_id, "completed")
+        return AutoEDAResult(
+            project_id=project_id,
+            session_id=actual_session_id,
+            business_context=business_context,
+            artifacts=final_artifacts,
+            report_markdown="",
+            workspace=workspace_path,
+            loaded_datasets=[],
+        )
+
+    ingest_started = perf_counter()
     loaded_datasets = [
-        _copy_and_load_upload(Path(file_path), workspace_path, project_id)
+        _copy_and_load_upload(
+            Path(file_path), workspace_path, project_id, cancel_check=cancel_check
+        )
         for file_path in file_paths
     ]
     raw_loaded_datasets: list[LoadedDataset] = []
@@ -1673,21 +1780,98 @@ def run_auto_eda(
                 f"got {len(raw_paths)} raw path(s) for {len(loaded_datasets)} dataset(s)."
             )
         raw_loaded_datasets = [
-            _copy_and_load_upload(Path(file_path), workspace_path, project_id)
+            _copy_and_load_upload(
+                Path(file_path), workspace_path, project_id, cancel_check=cancel_check
+            )
             for file_path in raw_paths
         ]
-    recipes = _align_precleaning(precleaning, len(loaded_datasets))
+    analysis_frame_bytes = [
+        int(loaded.frame.memory_usage(index=True, deep=True).sum()) for loaded in loaded_datasets
+    ]
+    raw_frame_bytes = [
+        int(loaded.frame.memory_usage(index=True, deep=True).sum())
+        for loaded in raw_loaded_datasets
+    ]
+    preflight = _verify_resource_preflight(
+        preflight,
+        loaded_datasets,
+        raw_loaded_datasets,
+        analysis_frame_bytes=analysis_frame_bytes,
+        raw_frame_bytes=raw_frame_bytes,
+    )
     manifest = SessionManifest(
         session_id=actual_session_id,
         project_id=project_id,
         input_hashes={loaded.record.name: loaded.record.content_hash for loaded in loaded_datasets},
         code_version=_current_code_version(),
         model_versions=manifest_model_versions(llm),
-        # Deterministic title up front so even a run that later fails shows a
-        # human-friendly name in the session list; the LLM may upgrade it below.
         title=build_run_title([loaded.record.name for loaded in loaded_datasets]) or None,
     )
+    if previous_manifest is not None and previous_manifest.input_hashes != manifest.input_hashes:
+        store.reset_session_outputs(project_id=project_id, session_id=actual_session_id)
+        ctx.session_budget = restore_run_budget_state(effective_budget_policy, [])
+        llm = meter_llm_client(
+            base_llm,
+            session_id=actual_session_id,
+            emit=ctx.emit_trace,
+            budget=ctx.session_budget,
+            session_dir=store.session_dir(project_id, actual_session_id),
+        )
+    store.save_artifact(
+        _resource_preflight_artifact(preflight, project_id=project_id, session_id=actual_session_id)
+    )
     store.write_manifest(manifest)
+    ctx.emit_trace(
+        TraceEvent(
+            session_id=actual_session_id,
+            event_type="eda_inputs_loaded",
+            name="load_inputs",
+            started_at=run_started_at,
+            finished_at=datetime.now(UTC),
+            summary={
+                "ingest_duration_seconds": round(perf_counter() - ingest_started, 6),
+                "analysis": _resource_footprint(loaded_datasets, analysis_frame_bytes).model_dump(
+                    mode="json"
+                ),
+                "raw_lineage": _resource_footprint(raw_loaded_datasets, raw_frame_bytes).model_dump(
+                    mode="json"
+                ),
+                "unique_file_bytes": _unique_loaded_file_bytes(
+                    [*loaded_datasets, *raw_loaded_datasets]
+                ),
+            },
+        )
+    )
+    if preflight.status != "accepted":
+        _emit_auto_eda_resource_trace(
+            ctx,
+            driver_started=driver_started,
+            baseline_rss=baseline_rss,
+            preprocessing_duration_seconds=preprocessing_duration_seconds,
+        )
+        if preflight.status == "rejected":
+            store.mark_session_status(project_id, actual_session_id, "failed")
+            raise EdaResourceLimitError(preflight)
+        final_artifacts = _finalize_agent_artifacts(
+            store,
+            project_id=project_id,
+            session_id=actual_session_id,
+            manifest=manifest,
+            execution_fingerprint=ctx.execution_fingerprint,
+            emit_trace=ctx.emit_trace,
+        )
+        store.mark_session_status(project_id, actual_session_id, "completed")
+        return AutoEDAResult(
+            project_id=project_id,
+            session_id=actual_session_id,
+            business_context=business_context,
+            artifacts=final_artifacts,
+            report_markdown="",
+            workspace=workspace_path,
+            loaded_datasets=[],
+        )
+    effective_dataset_workers = preflight.effective_dataset_workers
+    recipes = _align_precleaning(precleaning, len(loaded_datasets))
     ctx.execution_fingerprint = stable_hash(
         {
             "execution_schema_version": 1,
@@ -1724,7 +1908,9 @@ def run_auto_eda(
             ],
             "relationship_discovery": relationship_discovery,
             "generate_report": generate_report,
-            "dataset_workers": dataset_workers,
+            "requested_dataset_workers": dataset_workers,
+            "effective_dataset_workers": effective_dataset_workers,
+            "resource_policy": preflight.policy.model_dump(mode="json"),
         },
         length=32,
     )
@@ -1755,7 +1941,7 @@ def run_auto_eda(
             for loaded, parent_ids in zip(loaded_datasets, profile_parent_ids, strict=True)
         ],
         ctx,
-        max_workers=dataset_workers,
+        max_workers=effective_dataset_workers,
     )
     profile_artifacts = [
         artifact
@@ -1767,7 +1953,7 @@ def run_auto_eda(
     quality_result = run_pipeline(
         [ScanQualityStep(artifact_id) for artifact_id in profile_ids],
         ctx,
-        max_workers=dataset_workers,
+        max_workers=effective_dataset_workers,
     )
     quality_ids = [artifact.id for artifact in quality_result.artifacts]
     quality_context_result = run_pipeline(
@@ -1778,7 +1964,7 @@ def run_auto_eda(
             )
         ],
         ctx,
-        max_workers=dataset_workers,
+        max_workers=effective_dataset_workers,
     )
     quality_context_ids = [artifact.id for artifact in quality_context_result.artifacts]
     chart_result = run_pipeline(
@@ -1787,7 +1973,7 @@ def run_auto_eda(
             for loaded, artifact_id in zip(loaded_datasets, profile_ids, strict=True)
         ],
         ctx,
-        max_workers=dataset_workers,
+        max_workers=effective_dataset_workers,
     )
     analysis_result = run_pipeline(
         [
@@ -1795,16 +1981,14 @@ def run_auto_eda(
             for loaded, artifact_id in zip(loaded_datasets, profile_ids, strict=True)
         ],
         ctx,
-        max_workers=dataset_workers,
+        max_workers=effective_dataset_workers,
     )
     # W-2 revised: a Bonferroni family is a set of tests serving one inferential
     # question. Auto-EDA runs at most one test per dataset, and tests on
     # unrelated datasets are not a family, so no cross-dataset adjustment is
     # applied; every auto result instead carries an explicit
     # exploratory_auto_selection warning.
-    profiles = [
-        DatasetProfile.model_validate(artifact.payload) for artifact in profile_artifacts
-    ]
+    profiles = [DatasetProfile.model_validate(artifact.payload) for artifact in profile_artifacts]
     stat_specs = [
         _select_stat_test(loaded, profile)
         for loaded, profile in zip(loaded_datasets, profiles, strict=True)
@@ -1988,23 +2172,6 @@ def run_auto_eda(
         if generate_report
         else None
     )
-    all_artifacts = [
-        *raw_artifacts,
-        *cleaning_recipe_result.artifacts,
-        *profile_result.artifacts,
-        *quality_result.artifacts,
-        *quality_context_result.artifacts,
-        *chart_result.artifacts,
-        *analysis_result.artifacts,
-        *stat_result.artifacts,
-        *model_artifacts,
-        *relationship_artifacts,
-        *value_map_result.artifacts,
-        *question_result.artifacts,
-        *question_execution_result.artifacts,
-        handoff_artifact,
-        *(report_result.artifacts if report_result is not None else []),
-    ]
     report_markdown = ""
     if report_result is not None:
         report_artifact = next(
@@ -2049,18 +2216,31 @@ def run_auto_eda(
         manifest = manifest.model_copy(update={"title": llm_title})
         store.write_manifest(manifest)
 
-    store.mark_session_status(project_id, actual_session_id, "completed")
+    _emit_auto_eda_resource_trace(
+        ctx,
+        driver_started=driver_started,
+        baseline_rss=baseline_rss,
+        preprocessing_duration_seconds=preprocessing_duration_seconds,
+    )
 
-    # Persist the run's observability rollup. Purely
-    # derived from what the run already recorded; a metrics failure must never
-    # fail a run that otherwise completed.
-    _persist_run_metrics_best_effort(store, project_id, actual_session_id)
+    # The final AgentHandoff is a publication contract, not observability-only
+    # metadata. Persist it (and refresh metrics around it) before the completed
+    # status becomes the API publication barrier.
+    final_artifacts = _finalize_agent_artifacts(
+        store,
+        project_id=project_id,
+        session_id=actual_session_id,
+        manifest=manifest,
+        execution_fingerprint=ctx.execution_fingerprint,
+        emit_trace=ctx.emit_trace,
+    )
+    store.mark_session_status(project_id, actual_session_id, "completed")
 
     return AutoEDAResult(
         project_id=project_id,
         session_id=actual_session_id,
         business_context=business_context,
-        artifacts=all_artifacts,
+        artifacts=final_artifacts,
         report_markdown=report_markdown,
         workspace=workspace_path,
         loaded_datasets=loaded_datasets,
@@ -2174,8 +2354,125 @@ def generate_report_on_demand(
             "report/report.html",
             str(html_artifact.payload["html"]),
         )
-    _persist_run_metrics_best_effort(store, result.project_id, result.session_id)
-    return replace(result, artifacts=[*source_artifacts, *generated], report_markdown=markdown)
+    manifest = store.read_manifest(result.project_id, result.session_id)
+    if manifest is None:
+        raise ValueError("Cannot finalize agent handoff without a session manifest.")
+    final_artifacts = _finalize_agent_artifacts(
+        store,
+        project_id=result.project_id,
+        session_id=result.session_id,
+        manifest=manifest,
+        execution_fingerprint=None,
+        referenced_external_artifacts=[
+            artifact for artifact in source_artifacts if artifact.session_id != result.session_id
+        ],
+    )
+    return replace(result, artifacts=final_artifacts, report_markdown=markdown)
+
+
+def _finalize_agent_artifacts(
+    store: ArtifactStore,
+    *,
+    project_id: str,
+    session_id: str,
+    manifest: SessionManifest,
+    execution_fingerprint: str | None,
+    emit_trace: Callable[[TraceEvent], None] | None = None,
+    referenced_external_artifacts: Sequence[Artifact] = (),
+) -> list[Artifact]:
+    """Build metrics + handoff from one inventory, then publish each once."""
+    persisted = store.list_artifacts(project_id=project_id, session_id=session_id)
+    base = [
+        artifact
+        for artifact in persisted
+        if artifact.type not in {ArtifactType.SESSION_METRICS, ArtifactType.AGENT_HANDOFF}
+    ]
+    effective_fingerprint = execution_fingerprint or _stored_execution_fingerprint(persisted)
+    metrics_placeholder = Artifact(
+        id=make_artifact_id(
+            "session_metrics", {"project_id": project_id, "session_id": session_id}
+        ),
+        type=ArtifactType.SESSION_METRICS,
+        project_id=project_id,
+        session_id=session_id,
+        payload={},
+    )
+    handoff_placeholder = Artifact(
+        id=make_artifact_id("agent_handoff", {"project_id": project_id, "session_id": session_id}),
+        type=ArtifactType.AGENT_HANDOFF,
+        project_id=project_id,
+        session_id=session_id,
+        payload={},
+    )
+    external = {
+        artifact.id: artifact
+        for artifact in referenced_external_artifacts
+        if artifact.session_id != session_id
+        and artifact.type not in {ArtifactType.SESSION_METRICS, ArtifactType.AGENT_HANDOFF}
+    }
+    generated_at = datetime.now(UTC)
+    runtime_env_digest = env_digest()
+    handoff = handoff_placeholder
+    metrics = metrics_placeholder
+    previous_sizes: tuple[int, int, int, int] | None = None
+    # Resolve the size/context fixed point in memory. No provisional handoff is
+    # externally readable and a metrics failure remains a publication failure.
+    for _ in range(4):
+        metrics = create_run_metrics_artifact(
+            store,
+            project_id,
+            session_id,
+            artifact_snapshot=[*base, metrics_placeholder, handoff],
+        )
+        metrics.env_digest = runtime_env_digest
+        handoff = create_agent_handoff_artifact(
+            [*base, metrics],
+            external_artifacts=list(external.values()),
+            fetch_session_id=session_id,
+            project_id=project_id,
+            session_id=session_id,
+            producer_version=manifest.code_version,
+            execution_fingerprint=effective_fingerprint,
+            input_hashes=manifest.input_hashes,
+            generated_at=generated_at,
+        )
+        handoff.env_digest = runtime_env_digest
+        context = handoff.payload.get("context_policy", {})
+        sizes = (
+            len(metrics.model_dump_json().encode("utf-8")),
+            len(handoff.model_dump_json().encode("utf-8")),
+            int(context.get("serialized_bytes", 0)),
+            int(context.get("initial_context_bytes", 0)),
+        )
+        if sizes == previous_sizes:
+            break
+        previous_sizes = sizes
+    store.save_artifact(metrics)
+    store.save_artifact(handoff)
+    event = TraceEvent(
+        session_id=session_id,
+        event_type="agent_handoff_ready",
+        name="create_agent_handoff",
+        finished_at=datetime.now(UTC),
+        summary={
+            "artifact_id": handoff.id,
+            "source_artifact_count": len(base) + 1,
+            "referenced_external_artifact_count": len(external),
+            "persisted_artifact_count": len(base) + 2,
+            "contract_version": "3.0",
+        },
+    )
+    if emit_trace is not None:
+        emit_trace(event)
+    else:
+        store.append_trace(project_id, event)
+    published = store.list_artifacts(project_id=project_id, session_id=session_id)
+    published_ids = {artifact.id for artifact in published}
+    return [
+        *(artifact for artifact in published if artifact.type is ArtifactType.CLEANING_RECIPE),
+        *(artifact for artifact in published if artifact.type is not ArtifactType.CLEANING_RECIPE),
+        *(artifact for aid, artifact in external.items() if aid not in published_ids),
+    ]
 
 
 def _persist_run_metrics_best_effort(
@@ -2183,16 +2480,36 @@ def _persist_run_metrics_best_effort(
     project_id: str,
     session_id: str,
 ) -> None:
-    """Refresh the derived rollup without hiding a non-fatal failure."""
+    """Refresh the coherent metrics + handoff publication after source mutations."""
+    legacy_session = False
     try:
-        persist_run_metrics(store, project_id, session_id)
-    except Exception as exc:  # noqa: BLE001 - metrics must not fail completed work
+        manifest = store.read_manifest(project_id, session_id)
+        if manifest is None:
+            # A legacy/manual source session has no final handoff manifest.
+            # Retain the original best-effort observability refresh.
+            legacy_session = True
+            persist_run_metrics(store, project_id, session_id)
+            return
+        _finalize_agent_artifacts(
+            store,
+            project_id=project_id,
+            session_id=session_id,
+            manifest=manifest,
+            execution_fingerprint=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - refresh must not hide completed work
+        event_type = (
+            "session_metrics_error" if legacy_session else "agent_publication_refresh_error"
+        )
+        event_name = (
+            "persist_run_metrics" if legacy_session else "refresh_session_metrics_and_agent_handoff"
+        )
         store.append_trace(
             project_id,
             TraceEvent(
                 session_id=session_id,
-                event_type="session_metrics_error",
-                name="persist_run_metrics",
+                event_type=event_type,
+                name=event_name,
                 finished_at=datetime.now(UTC),
                 summary={
                     "error_type": type(exc).__name__,
@@ -2200,6 +2517,194 @@ def _persist_run_metrics_best_effort(
                 },
             ),
         )
+
+
+def _stored_execution_fingerprint(artifacts: Sequence[Artifact]) -> str:
+    for artifact in reversed(artifacts):
+        if artifact.type is not ArtifactType.AGENT_HANDOFF:
+            continue
+        run = artifact.payload.get("run")
+        if isinstance(run, dict) and isinstance(run.get("execution_fingerprint"), str):
+            return run["execution_fingerprint"]
+    return "unavailable"
+
+
+def _resource_preflight_artifact(
+    decision: EdaResourcePreflight,
+    *,
+    project_id: str,
+    session_id: str,
+) -> Artifact:
+    return Artifact(
+        id=make_artifact_id(
+            "resource_preflight", {"project_id": project_id, "session_id": session_id}
+        ),
+        type=ArtifactType.RESOURCE_PREFLIGHT,
+        project_id=project_id,
+        session_id=session_id,
+        payload=decision.model_dump(mode="json"),
+        plain_language=(
+            "Bounded resource decision made before expensive full-frame Auto-EDA work."
+        ),
+    )
+
+
+def _verify_resource_preflight(
+    decision: EdaResourcePreflight,
+    analysis: Sequence[LoadedDataset],
+    raw_lineage: Sequence[LoadedDataset],
+    *,
+    analysis_frame_bytes: Sequence[int],
+    raw_frame_bytes: Sequence[int],
+) -> EdaResourcePreflight:
+    policy = decision.policy
+    verified_estimates: list[EdaDatasetEstimate] = []
+    for index, (loaded, deep_bytes) in enumerate(zip(analysis, analysis_frame_bytes, strict=True)):
+        source = decision.datasets[index] if index < len(decision.datasets) else None
+        updates = {
+            "role": "analysis",
+            "name": loaded.record.name,
+            "file_bytes": loaded.record.path.stat().st_size,
+            "columns": len(loaded.frame.columns),
+            "exact_rows": len(loaded.frame),
+            "exact_frame_deep_bytes": deep_bytes,
+        }
+        if source is not None:
+            verified_estimates.append(source.model_copy(update=updates))
+        else:
+            verified_estimates.append(
+                EdaDatasetEstimate(
+                    **updates,
+                    sample_rows=0,
+                    sample_frame_deep_bytes=0,
+                    sample_serialized_bytes=0,
+                    frame_expansion_ratio=0.0,
+                    estimated_rows=len(loaded.frame),
+                    estimated_frame_deep_bytes=deep_bytes,
+                )
+            )
+
+    def exact_working_set(workers: int) -> int:
+        active_analysis = sum(sorted(analysis_frame_bytes, reverse=True)[:workers])
+        active_raw = sum(sorted(raw_frame_bytes, reverse=True)[:workers])
+        retained = sum(analysis_frame_bytes) + sum(raw_frame_bytes)
+        return ceil(
+            decision.baseline_peak_rss_bytes
+            + policy.held_frame_multiplier * retained
+            + policy.active_frame_multiplier * max(active_analysis, active_raw)
+        )
+
+    workers = min(
+        decision.effective_dataset_workers,
+        decision.requested_dataset_workers,
+        policy.max_dataset_workers,
+        max(1, len(analysis)),
+    )
+    worker_reason = decision.worker_adjustment_reason
+    verified_working_set = exact_working_set(workers)
+    if workers > 1 and verified_working_set > policy.max_working_set_bytes:
+        single_worker = exact_working_set(1)
+        if single_worker <= policy.max_working_set_bytes:
+            workers = 1
+            verified_working_set = single_worker
+            worker_reason = "memory_budget_worker_downgrade"
+
+    all_loaded = [*analysis, *raw_lineage]
+    all_frame_bytes = [*analysis_frame_bytes, *raw_frame_bytes]
+    file_sizes = [loaded.record.path.stat().st_size for loaded in all_loaded]
+    reasons: list[str] = []
+    if any(size > policy.max_single_input_bytes for size in file_sizes):
+        reasons.append("single_input_bytes_exceeded")
+    if _unique_loaded_file_bytes(all_loaded) > policy.max_input_bytes_total:
+        reasons.append("input_bytes_total_exceeded")
+    if any(len(loaded.frame.columns) > policy.max_columns_per_dataset for loaded in all_loaded):
+        reasons.append("column_count_exceeded")
+    if any(len(loaded.frame) > policy.max_rows_per_dataset for loaded in all_loaded):
+        reasons.append("row_count_exceeded")
+    if verified_working_set > policy.max_working_set_bytes:
+        reasons.append("verified_working_set_exceeded")
+    if worker_reason is not None:
+        reasons.append(worker_reason)
+    status = (
+        "accepted"
+        if not [
+            reason
+            for reason in reasons
+            if reason not in {"memory_budget_worker_downgrade", "dataset_or_policy_worker_cap"}
+        ]
+        else "limited"
+        if policy.on_exceed == "limited"
+        else "rejected"
+    )
+    return decision.model_copy(
+        update={
+            "status": status,
+            "phase": "verified",
+            "compute_mode": ("exact_in_memory" if status == "accepted" else "metadata_only"),
+            "reason_codes": reasons,
+            "effective_dataset_workers": workers,
+            "worker_adjustment_reason": worker_reason,
+            "input_dataset_count": len(verified_estimates),
+            "input_bytes_total": sum(item.file_bytes for item in verified_estimates),
+            "input_rows_estimated": sum(item.best_rows for item in verified_estimates),
+            "input_columns_total": sum(item.columns for item in verified_estimates),
+            "estimated_frame_deep_bytes_total": sum(all_frame_bytes),
+            "verified_working_set_bytes": verified_working_set,
+            "datasets": verified_estimates,
+        }
+    )
+
+
+def _resource_footprint(
+    datasets: Sequence[LoadedDataset], frame_bytes: Sequence[int]
+) -> EdaDataFootprint:
+    return EdaDataFootprint(
+        dataset_count=len(datasets),
+        file_bytes=sum(loaded.record.path.stat().st_size for loaded in datasets),
+        rows=sum(len(loaded.frame) for loaded in datasets),
+        columns=sum(len(loaded.frame.columns) for loaded in datasets),
+        max_rows=max((len(loaded.frame) for loaded in datasets), default=0),
+        max_columns=max((len(loaded.frame.columns) for loaded in datasets), default=0),
+        frame_deep_bytes=sum(frame_bytes),
+        measurement="exact" if datasets else "unavailable",
+    )
+
+
+def _unique_loaded_file_bytes(datasets: Sequence[LoadedDataset]) -> int:
+    paths: dict[Path, int] = {}
+    for loaded in datasets:
+        path = loaded.record.path.resolve()
+        paths.setdefault(path, path.stat().st_size)
+    return sum(paths.values())
+
+
+def _emit_auto_eda_resource_trace(
+    ctx: SessionContext,
+    *,
+    driver_started: float,
+    baseline_rss: PeakRssMeasurement,
+    preprocessing_duration_seconds: float,
+) -> None:
+    peak = process_peak_rss()
+    ctx.emit_trace(
+        TraceEvent(
+            session_id=ctx.session_id,
+            event_type="eda_resource_usage",
+            name="auto_eda",
+            finished_at=datetime.now(UTC),
+            summary={
+                "wall_duration_seconds": round(
+                    preprocessing_duration_seconds + perf_counter() - driver_started, 6
+                ),
+                "preprocessing_duration_seconds": max(
+                    0.0, round(preprocessing_duration_seconds, 6)
+                ),
+                "baseline_peak_rss_bytes": baseline_rss.bytes,
+                "peak_rss_bytes": peak.bytes,
+                "peak_rss_method": peak.method,
+            },
+        )
+    )
 
 
 def _align_precleaning(
@@ -2218,9 +2723,20 @@ def _align_precleaning(
     return recipes
 
 
-def _copy_and_load_upload(source: Path, workspace: Path, project_id: str) -> LoadedDataset:
+def _copy_and_load_upload(
+    source: Path,
+    workspace: Path,
+    project_id: str,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+) -> LoadedDataset:
     # Stream the hash so large uploads do not inflate memory (no bytes->hex->json).
-    content_hash = hash_file(source)
+    cooperative_cancel = (
+        None
+        if cancel_check is None
+        else lambda: raise_if_cancelled(cancel_check, operation="input loading")
+    )
+    content_hash = hash_file(source, cancel_check=cooperative_cancel)
     dataset_id = make_dataset_id(source.name, content_hash)
     upload_dir = workspace / "projects" / project_id / "uploads" / dataset_id / "v1"
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -2229,7 +2745,10 @@ def _copy_and_load_upload(source: Path, workspace: Path, project_id: str) -> Loa
         copy2(source, destination)
     # The source hash above is also the destination hash: copy2 is byte-for-byte.
     # Pass it through so the loader does not scan the file a second time.
-    return load_csv(destination, dataset_id=dataset_id, content_hash=content_hash)
+    raise_if_cancelled(cancel_check, operation="input loading")
+    loaded = load_csv(destination, dataset_id=dataset_id, content_hash=content_hash)
+    raise_if_cancelled(cancel_check, operation="input loading")
+    return loaded
 
 
 _STAT_MEASURE_PRIORITY_TOKENS = frozenset(

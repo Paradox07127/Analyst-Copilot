@@ -18,6 +18,7 @@ import {
   setTheme,
   type Theme,
 } from "../theme";
+import { useWorkspaceFocus } from "../workspace-focus";
 
 function statusTone(status: string | undefined): Tone {
   switch (status) {
@@ -52,8 +53,13 @@ export function TopBar({
   onOpenSettings,
   showInspector,
 }: TopBarProps) {
-  const { projectId, sessionId } = useParams();
+  const route = useParams();
   const { pathname } = useLocation();
+  const workspace = useWorkspaceFocus();
+  const splitContext =
+    workspace.mode === "split" ? workspace.activeContext : null;
+  const projectId = splitContext?.projectId ?? route.projectId;
+  const sessionId = splitContext?.sessionId ?? route.sessionId;
   const atHome = pathname === "/projects";
   const llm = useLlmStatus();
   const [theme, setThemeState] = useState<Theme>(() => getEffectiveTheme());
@@ -137,6 +143,11 @@ export function TopBar({
               </>
             ) : (
               <span className="text-status-neutral">no session open</span>
+            )}
+            {workspace.mode === "split" && (
+              <Badge tone="neutral" variant="outline">
+                Split · {workspace.activePane}
+              </Badge>
             )}
           </>
         )}

@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from eda_platform.schemas.publication import PublicationFreshness, PublicationReadiness
+from eda_platform.schemas.resource_metrics import AutoEdaResourceUsage
 
 
 class StepMetric(BaseModel):
@@ -22,7 +23,7 @@ class StepMetric(BaseModel):
 class SessionMetrics(BaseModel):
     """Whole-run observability rollup; artifact prefix ``session_metrics``."""
 
-    schema_version: int = 5
+    schema_version: int = 6
     session_id: str
     llm_calls: int = 0
     tool_calls: int = 0
@@ -59,6 +60,7 @@ class SessionMetrics(BaseModel):
         "not_applicable"
     )
     duration_seconds: float = 0.0
+    resource_usage: AutoEdaResourceUsage = Field(default_factory=AutoEdaResourceUsage)
     steps: list[StepMetric] = Field(default_factory=list)
     artifact_counts: dict[str, int] = Field(default_factory=dict)
     findings_count: int = 0

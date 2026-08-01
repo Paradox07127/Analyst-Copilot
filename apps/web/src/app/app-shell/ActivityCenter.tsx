@@ -199,7 +199,7 @@ function EventLog({ events }: { events: JobEvent[] }) {
   };
 
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       <ol
         ref={scrollRef}
         aria-label="Job event log"
@@ -210,22 +210,34 @@ function EventLog({ events }: { events: JobEvent[] }) {
             element.scrollHeight - element.scrollTop - element.clientHeight;
           setFollowing(distance < 24);
         }}
-        className="flex h-full min-h-32 flex-col gap-0.5 overflow-auto px-3 py-2 font-mono text-xs"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2 text-xs"
       >
         {events.map((event, index) => (
           <li
             key={event.event_id}
-            className={`grid grid-cols-[auto_auto_1fr] gap-2 rounded-sm ${
+            className={`grid grid-cols-[4.5rem_auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 border-b border-border/60 py-2 last:border-b-0 ${
               index >= backlog.current ? "animate-arrive" : ""
             }`}
           >
-            <span className="text-status-neutral">
+            <span className="pt-0.5 font-mono text-[11px] tabular-nums text-status-neutral">
               {formatEventTime(event)}
             </span>
-            <span className="font-medium">{event.type}</span>
-            <Marquee className="min-w-0 text-status-neutral">
+            <span className="rounded-sm bg-code-bg px-1.5 py-0.5 font-mono text-[10px] font-medium text-text">
+              {event.type}
+            </span>
+            <Marquee className="min-w-0 py-0.5 font-mono leading-5 text-status-neutral">
               {event.name}
             </Marquee>
+            {Object.keys(event.summary).length > 0 && (
+              <details className="col-span-2 col-start-2 min-w-0">
+                <summary className="cursor-pointer text-[11px] text-status-neutral hover:text-text">
+                  Event details
+                </summary>
+                <pre className="mt-1 max-h-32 overflow-auto rounded-base border border-border bg-code-bg p-2 font-mono text-[11px] leading-4 text-status-neutral">
+                  {JSON.stringify(event.summary, null, 2)}
+                </pre>
+              </details>
+            )}
           </li>
         ))}
       </ol>
@@ -319,7 +331,7 @@ function ActivityPanelFrame({
       aria-modal="false"
       onKeyDown={onKeyDown}
       style={geometry.panelStyle}
-      className="animate-enter pointer-events-auto absolute flex max-h-[min(35rem,calc(100dvh-1.5rem))] max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-xl border border-border bg-bg shadow-overlay"
+      className="animate-enter pointer-events-auto absolute flex h-[min(30rem,calc(100dvh-1.5rem))] max-h-[min(35rem,calc(100dvh-1.5rem))] max-w-[calc(100vw-1.5rem)] resize flex-col overflow-hidden rounded-xl border border-border bg-bg shadow-overlay"
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-border bg-surface px-4 py-3">
         <span className="mt-0.5 text-primary">

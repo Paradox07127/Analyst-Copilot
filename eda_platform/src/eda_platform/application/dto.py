@@ -7,7 +7,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from eda_platform.schemas.handoff import AgentHandoffV3
 from eda_platform.schemas.publication import PublicationFreshness, PublicationReadiness
+from eda_platform.schemas.resource_metrics import AutoEdaResourceUsage
 
 
 class ProjectSummary(BaseModel):
@@ -119,6 +121,16 @@ class ArtifactSummary(BaseModel):
     created_at: datetime | None = None
 
 
+class ArtifactEvidenceRef(BaseModel):
+    kind: Literal["sql", "code", "stat", "table", "chart", "profile_field", "artifact"]
+    artifact_id: str | None = None
+    locator: str
+    value: str | float | int | None = None
+    unit: Literal["raw", "percent", "currency"] = "raw"
+    unit_label: str | None = None
+    unit_reference: str | None = None
+
+
 class ArtifactDetail(BaseModel):
     artifact_id: str
     type: str
@@ -127,6 +139,16 @@ class ArtifactDetail(BaseModel):
     created_at: datetime | None = None
     payload: dict[str, Any]
     warnings: list[str] = Field(default_factory=list)
+    parents: list[str] = Field(default_factory=list)
+    evidence: list[ArtifactEvidenceRef] = Field(default_factory=list)
+    env_digest: str | None = None
+    code_ref: str | None = None
+    plain_language: str | None = None
+
+
+class AgentHandoffDetail(ArtifactDetail):
+    type: Literal["AgentHandoff"] = "AgentHandoff"
+    payload: AgentHandoffV3
 
 
 class JobStatus(BaseModel):
@@ -799,6 +821,81 @@ class CompareView(BaseModel):
     datasets: CompareDatasetDiff
 
 
+CompareScopeName = Literal[
+    "questions", "analysis", "findings", "report", "artifacts", "execution"
+]
+CompareChange = Literal["added", "removed", "changed", "same", "unavailable"]
+CompareMatchStatus = Literal["exact", "strong", "probable", "unmatched"]
+
+
+class CompareScopeField(BaseModel):
+    """One bounded, display-ready property of a scope record.
+
+    Scope APIs deliberately do not return arbitrary artifact payloads. Complex
+    values are summarized by the application service into text/list/code
+    fields, while comparison itself uses a private canonical representation.
+    """
+
+    key: str
+    label: str
+    value: str
+    value_kind: Literal["text", "number", "status", "list", "code"] = "text"
+
+
+class CompareScopeRecord(BaseModel):
+    record_id: str
+    title: str
+    kind: str
+    status: str | None = None
+    summary: str = ""
+    source_session_id: str
+    artifact_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    fields: list[CompareScopeField] = Field(default_factory=list)
+
+
+class CompareScopeItem(BaseModel):
+    match_key: str
+    matcher_version: str
+    reason: str
+    confidence: Literal["exact", "high", "medium", "none"]
+    match_status: CompareMatchStatus
+    change: CompareChange
+    left: CompareScopeRecord | None = None
+    right: CompareScopeRecord | None = None
+    changed_fields: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CompareScopeCounts(BaseModel):
+    added: int = 0
+    removed: int = 0
+    changed: int = 0
+    same: int = 0
+    unavailable: int = 0
+
+
+class CompareScopeSideState(BaseModel):
+    state: Literal["value", "missing", "unavailable"]
+    reason: str | None = None
+
+
+class CompareScopeView(BaseModel):
+    """Shared envelope for every lazily loaded semantic comparison scope."""
+
+    project_id: str
+    scope: CompareScopeName
+    left: CompareSessionSide
+    right: CompareSessionSide
+    left_state: CompareScopeSideState
+    right_state: CompareScopeSideState
+    counts: CompareScopeCounts
+    items: list[CompareScopeItem] = Field(default_factory=list)
+    next_cursor: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class SkillPlanCandidate(BaseModel):
     """A validated plan artifact of this run that can be frozen into a skill."""
 
@@ -1139,7 +1236,7 @@ class SessionMetricsView(BaseModel):
     """Trace & cost rollup. `source` is "artifact" when the run persisted a
     SessionMetrics artifact, "aggregated" when it was recomputed from trace events."""
 
-    schema_version: int = 5
+    schema_version: int = 6
     session_id: str
     source: str
     llm_calls: int = 0
@@ -1173,6 +1270,7 @@ class SessionMetricsView(BaseModel):
         "verified", "unverifiable", "not_applicable"
     ] = "not_applicable"
     duration_seconds: float = 0.0
+    resource_usage: AutoEdaResourceUsage = Field(default_factory=AutoEdaResourceUsage)
     event_count: int = 0
     trace_status: Literal["verified", "unverifiable"] = "verified"
     failures_count: int = 0

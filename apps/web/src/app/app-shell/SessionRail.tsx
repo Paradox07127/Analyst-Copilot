@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useDraggable } from "@dnd-kit/core";
 import { NavLink, useNavigate, useParams } from "react-router";
 import type { ProjectSummary, SessionSummary } from "../../api/client";
 import {
@@ -23,6 +24,8 @@ import {
 } from "../unfiled";
 import { useDialogFocus } from "../../components/use-dialog-focus";
 import { DeleteProjectDialog } from "../../features/projects/DeleteProjectDialog";
+import { sessionDragData, sessionDragId } from "../session-drag";
+import { useWorkspaceFocus } from "../workspace-focus";
 
 const SEARCH_DEBOUNCE_MS = 250;
 
@@ -148,6 +151,23 @@ function SessionItem({ run }: { run: SessionSummary }) {
   const [confirming, setConfirming] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const label = run.title ?? run.session_id;
+  const dragPayload = {
+    projectId: run.project_id,
+    sessionId: run.session_id,
+    label,
+  };
+  const { attributes, isDragging, listeners, setNodeRef } = useDraggable({
+    id: sessionDragId(dragPayload),
+    data: sessionDragData(dragPayload),
+    attributes: {
+      role: "link",
+      roleDescription: "draggable session",
+    },
+  });
+  const workspace = useWorkspaceFocus();
+  const focused =
+    workspace.mode === "split" &&
+    workspace.activeContext?.sessionId === run.session_id;
 
   const meta = [time, (run.dataset_names ?? []).join(", ")]
     .filter(Boolean)
@@ -156,10 +176,15 @@ function SessionItem({ run }: { run: SessionSummary }) {
   return (
     <div className="group/run relative">
       <NavLink
+        ref={setNodeRef}
         to={sessionBasePath(run.project_id, run.session_id)}
         draggable={false}
+        {...attributes}
+        {...listeners}
+        aria-label={label}
+        title="Open session, or drag it to the left or right workspace pane"
         className={({ isActive }) =>
-          `${rowClass(isActive)} flex-col items-start gap-[1.5px] py-[2px] pr-2`
+          `${rowClass(isActive || focused)} select-none flex-col items-start gap-[1.5px] py-[2px] pr-2 ${isDragging ? "cursor-grabbing opacity-45" : "cursor-default"}`
         }
       >
         <span className="flex w-full min-w-0 items-center gap-1.5">
@@ -678,20 +703,56 @@ function SessionSearchResults({
   const items = runs.data?.pages.flatMap((page) => page.items) ?? [];
   if (runs.isPending) return null;
   return items.map((run) => (
-    <NavLink
+    <SessionSearchResult
       key={`${projectId}-${run.session_id}`}
+      run={run}
+      projectLabel={label}
+      onChoose={onChoose}
+    />
+  ));
+}
+
+function SessionSearchResult({
+  run,
+  projectLabel,
+  onChoose,
+}: {
+  run: SessionSummary;
+  projectLabel: string;
+  onChoose: () => void;
+}) {
+  const label = run.title ?? run.session_id;
+  const payload = {
+    projectId: run.project_id,
+    sessionId: run.session_id,
+    label,
+  };
+  const { attributes, isDragging, listeners, setNodeRef } = useDraggable({
+    id: sessionDragId(payload, "search"),
+    data: sessionDragData(payload),
+    attributes: {
+      role: "link",
+      roleDescription: "draggable session",
+    },
+  });
+
+  return (
+    <NavLink
+      ref={setNodeRef}
       to={sessionBasePath(run.project_id, run.session_id)}
       draggable={false}
+      {...attributes}
+      {...listeners}
       onClick={onChoose}
-      className="flex flex-col gap-0.5 rounded-base px-3 py-2 transition-colors duration-150 ease-out-quart hover:bg-surface"
+      className={`flex select-none flex-col gap-0.5 rounded-base px-3 py-2 transition-colors duration-150 ease-out-quart hover:bg-surface ${isDragging ? "cursor-grabbing opacity-45" : "cursor-default"}`}
     >
-      <Marquee className="text-sm font-medium">{run.title ?? run.session_id}</Marquee>
+      <Marquee className="text-sm font-medium">{label}</Marquee>
       <Marquee className="text-xs text-status-neutral">
-        {label} · {run.session_id}
+        {projectLabel} · {run.session_id}
         {run.dataset_names?.length ? ` · ${run.dataset_names.join(", ")}` : ""}
       </Marquee>
     </NavLink>
-  ));
+  );
 }
 
 function SessionSearchDialog({ onClose }: { onClose: () => void }) {
@@ -768,6 +829,8 @@ function SessionList() {
    * whether the dragged project would land above or below it. */
   const [previewIds, setPreviewIds] = useState<string[] | null>(null);
   const { projectId } = useParams();
+  const workspace = useWorkspaceFocus();
+  const activeProjectId = workspace.activeContext?.projectId ?? projectId;
 
   const toggleProject = (projectId: string) => {
     const next = new Set(collapsed);
@@ -844,7 +907,7 @@ function SessionList() {
           project={project}
           collapsed={collapsed.has(project.project_id)}
           onToggle={() => toggleProject(project.project_id)}
-          active={project.project_id === projectId}
+          active={project.project_id === activeProjectId}
           dragging={draggingProjectId === project.project_id}
           onDragStart={(event) => {
             if (event.dataTransfer) {

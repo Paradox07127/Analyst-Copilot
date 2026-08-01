@@ -266,6 +266,59 @@ def test_compare_requires_both_sides(client: TestClient) -> None:
     assert client.get("/api/v1/compare", params={"left": "run_left"}).status_code == 422
 
 
+def test_compare_scope_endpoint_filters_and_paginates(client: TestClient) -> None:
+    response = client.get(
+        "/api/v1/compare/artifacts",
+        params={
+            "left": "run_left",
+            "right": "run_right",
+            "filter": "differences",
+            "limit": 1,
+        },
+    )
+    assert response.status_code == 200, response.text
+    first = response.json()
+    assert first["scope"] == "artifacts"
+    assert len(first["items"]) == 1
+    assert first["items"][0]["change"] != "same"
+    assert first["next_cursor"]
+
+    next_response = client.get(
+        "/api/v1/compare/artifacts",
+        params={
+            "left": "run_left",
+            "right": "run_right",
+            "filter": "differences",
+            "limit": 1,
+            "cursor": first["next_cursor"],
+        },
+    )
+    assert next_response.status_code == 200, next_response.text
+    second = next_response.json()
+    assert second["items"]
+    assert second["items"][0]["match_key"] != first["items"][0]["match_key"]
+
+    invalid = client.get(
+        "/api/v1/compare/artifacts",
+        params={
+            "left": "run_right",
+            "right": "run_left",
+            "filter": "differences",
+            "cursor": first["next_cursor"],
+        },
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "invalid_cursor"
+
+
+def test_compare_scope_name_is_typed(client: TestClient) -> None:
+    response = client.get(
+        "/api/v1/compare/not-a-scope",
+        params={"left": "run_left", "right": "run_right"},
+    )
+    assert response.status_code == 422
+
+
 def test_failed_session_absence_is_unavailable_not_zero(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path)
     store.ensure_project("demo", name="Demo")

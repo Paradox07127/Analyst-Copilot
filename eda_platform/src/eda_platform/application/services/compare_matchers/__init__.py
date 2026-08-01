@@ -21,6 +21,7 @@ from .reports import (
     match_report_claims,
     match_report_sections,
 )
+from .scopes import ScopeComparable, match_scope_records
 
 __all__ = [
     "ArtifactComparable",
@@ -33,6 +34,7 @@ __all__ = [
     "ReportClaimComparable",
     "ReportSectionComparable",
     "RuleMatch",
+    "ScopeComparable",
     "artifact_logical_key",
     "artifact_parent_logical_key",
     "deterministic_one_to_one_match",
@@ -42,5 +44,6 @@ __all__ = [
     "match_questions",
     "match_report_claims",
     "match_report_sections",
+    "match_scope_records",
     "normalize_text",
 ]

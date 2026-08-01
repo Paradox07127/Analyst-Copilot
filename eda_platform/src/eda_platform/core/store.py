@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import time
 import unicodedata
@@ -341,9 +342,7 @@ class ArtifactStore:
         """
         artifact_path = self.artifact_path(project_id, session_id, artifact_id)
         with self._session_write_transaction(project_id, session_id):
-            current = Artifact.model_validate_json(
-                artifact_path.read_text(encoding="utf-8")
-            )
+            current = Artifact.model_validate_json(artifact_path.read_text(encoding="utf-8"))
             updated = mutate(current)
             if (
                 updated.id != artifact_id
@@ -387,9 +386,7 @@ class ArtifactStore:
             raise ValueError(
                 f"ambiguous artifact identity: {artifact_id!r} requires project_id and session_id"
             )
-        return Artifact.model_validate_json(
-            self._abs(rows[0][0]).read_text(encoding="utf-8")
-        )
+        return Artifact.model_validate_json(self._abs(rows[0][0]).read_text(encoding="utf-8"))
 
     def list_artifacts(self, *, project_id: str, session_id: str) -> list[Artifact]:
         with closing(self._connect()) as conn:
@@ -405,6 +402,44 @@ class ArtifactStore:
             Artifact.model_validate_json(self._abs(row[0]).read_text(encoding="utf-8"))
             for row in rows
         ]
+
+    def reset_session_outputs(self, *, project_id: str, session_id: str) -> None:
+        """Discard generated outputs before reusing a run with new inputs.
+
+        Source uploads remain at project scope. Only session-derived artifacts,
+        reports, charts, checkpoints, traces, and pending HITL actions are
+        removed, so downstream consumers cannot observe stale evidence.
+        """
+        session_dir = self.session_dir(project_id, session_id)
+        output_dirs = ("artifacts", "charts", "checkpoints", "report")
+        output_files = ("trace.jsonl", "debug.jsonl", "loop.journal.jsonl")
+        with self._session_write_transaction(project_id, session_id) as conn:
+            for dirname in output_dirs:
+                path = session_dir / dirname
+                if path.exists():
+                    shutil.rmtree(path)
+            for filename in output_files:
+                (session_dir / filename).unlink(missing_ok=True)
+            conn.execute(
+                "delete from artifacts where project_id = ? and session_id = ?",
+                (project_id, session_id),
+            )
+            conn.execute(
+                "delete from trace_events where project_id = ? and session_id = ?",
+                (project_id, session_id),
+            )
+            conn.execute(
+                "delete from pending_actions where project_id = ? and session_id = ?",
+                (project_id, session_id),
+            )
+            conn.execute(
+                """
+                update sessions set artifact_count = 0, report_status = null,
+                    updated_at = ?
+                where project_id = ? and session_id = ? and storage_state = 'live'
+                """,
+                (datetime.now(UTC).isoformat(), project_id, session_id),
+            )
 
     def list_artifacts_safe(
         self, *, project_id: str, session_id: str
@@ -442,9 +477,7 @@ class ArtifactStore:
         for run_path in sorted(
             p
             for p in runs_dir.iterdir()
-            if p.is_dir()
-            and p.name not in hidden_session_ids
-            and p.name != AUDIT_SESSION_ID
+            if p.is_dir() and p.name not in hidden_session_ids and p.name != AUDIT_SESSION_ID
         ):
             infos.append(self._build_session_info(project_id, run_path.name))
         infos.sort(
@@ -567,9 +600,7 @@ class ArtifactStore:
         if not types:
             return [], []
         try:
-            indexed = self._indexed_artifacts(
-                project_id, session_id, artifact_types=types
-            )
+            indexed = self._indexed_artifacts(project_id, session_id, artifact_types=types)
             if self._session_has_artifact_index(project_id, session_id):
                 return indexed, []
             if not self._session_has_disk_artifacts(project_id, session_id):
@@ -577,9 +608,7 @@ class ArtifactStore:
                 return [], []
         except sqlite3.Error:
             pass
-        artifacts, warnings = self.list_artifacts_safe(
-            project_id=project_id, session_id=session_id
-        )
+        artifacts, warnings = self.list_artifacts_safe(project_id=project_id, session_id=session_id)
         wanted = frozenset(types)
         return [artifact for artifact in artifacts if artifact.type in wanted], warnings
 
@@ -684,6 +713,21 @@ class ArtifactStore:
                 (project_id, session_id, artifact_type),
             ).fetchall()
         return [{"rowid": row[0], "artifact_id": row[1]} for row in rows]
+
+    def latest_artifact_index_row(
+        self, project_id: str, session_id: str, artifact_type: str
+    ) -> dict | None:
+        """Newest row of one type without materializing its full history."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                select rowid, artifact_id from artifacts
+                where project_id = ? and session_id = ? and artifact_type = ?
+                order by rowid desc limit 1
+                """,
+                (project_id, session_id, artifact_type),
+            ).fetchone()
+        return None if row is None else {"rowid": row[0], "artifact_id": row[1]}
 
     def artifact_index_row(
         self,
@@ -974,9 +1018,7 @@ class ArtifactStore:
                     table = str(table_name)
                     if table.startswith("sqlite_") or table == "projects":
                         continue
-                    columns = {
-                        str(row[1]) for row in conn.execute(f"pragma table_info({table})")
-                    }
+                    columns = {str(row[1]) for row in conn.execute(f"pragma table_info({table})")}
                     if "project_id" in columns:
                         conn.execute(f' delete from "{table}" where project_id = ?', (project_id,))
                 conn.execute("delete from projects where project_id = ?", (project_id,))
@@ -1121,13 +1163,8 @@ class ArtifactStore:
         if correlation is not None:
             if event.job_id is not None and event.job_id != correlation.job_id:
                 raise ValueError("Trace event job_id conflicts with the active job scope.")
-            if (
-                event.job_generation is not None
-                and event.job_generation != correlation.generation
-            ):
-                raise ValueError(
-                    "Trace event job_generation conflicts with the active job scope."
-                )
+            if event.job_generation is not None and event.job_generation != correlation.generation:
+                raise ValueError("Trace event job_generation conflicts with the active job scope.")
             event = event.model_copy(
                 update={
                     "job_id": correlation.job_id,
@@ -1454,10 +1491,7 @@ class ArtifactStore:
                 """,
                 (project_id, session_id, after_rowid, limit),
             ).fetchall()
-        return [
-            (int(row[0]), str(row[1]), str(row[2]), self._abs(str(row[3])))
-            for row in rows
-        ]
+        return [(int(row[0]), str(row[1]), str(row[2]), self._abs(str(row[3]))) for row in rows]
 
     def trace_event_type_counts(self, *, project_id: str, session_id: str) -> dict[str, int]:
         """Event-type histogram for a run — powers the trace filter without payload reads."""
@@ -1518,7 +1552,9 @@ class ArtifactStore:
                 deleting_target = self._deleting_target(conn, (session_id, effective_lane))
                 if deleting_target is not None:
                     raise SessionStorageDeletingError(deleting_target)
-                targets = (session_id,) if effective_lane == session_id else (session_id, effective_lane)
+                targets = (
+                    (session_id,) if effective_lane == session_id else (session_id, effective_lane)
+                )
                 for target in targets:
                     row = conn.execute(
                         "select storage_state from sessions where session_id = ?",
@@ -1650,9 +1686,7 @@ class ArtifactStore:
                 raise
 
     @staticmethod
-    def _assert_publish_allowed(
-        conn: sqlite3.Connection, project_id: str, session_id: str
-    ) -> None:
+    def _assert_publish_allowed(conn: sqlite3.Connection, project_id: str, session_id: str) -> None:
         row = conn.execute(
             """
             select jobs.job_id
@@ -1667,9 +1701,7 @@ class ArtifactStore:
             raise SessionPublishFencedError(session_id, str(row[0]))
 
     @staticmethod
-    def _deleting_target(
-        conn: sqlite3.Connection, targets: Sequence[str]
-    ) -> str | None:
+    def _deleting_target(conn: sqlite3.Connection, targets: Sequence[str]) -> str | None:
         unique_targets = tuple(dict.fromkeys(targets))
         placeholders = ",".join("?" for _ in unique_targets)
         row = conn.execute(
@@ -1802,9 +1834,7 @@ class ArtifactStore:
         """Release a failed job's key so a same-key retry runs fresh instead of
         replaying a row nothing will ever pick up (questions review D)."""
         with closing(self._connect()) as conn, conn:
-            conn.execute(
-                "update jobs set idempotency_key = null where job_id = ?", (job_id,)
-            )
+            conn.execute("update jobs set idempotency_key = null where job_id = ?", (job_id,))
 
     def request_cancel(self, job_id: str) -> bool:
         """Set the cooperative-cancel flag; returns whether a row was updated.
@@ -2222,9 +2252,7 @@ class ArtifactStore:
                 conn.rollback()
                 raise
 
-    def complete_upload_reservation(
-        self, upload_id: str, dataset_id: str, byte_size: int
-    ) -> None:
+    def complete_upload_reservation(self, upload_id: str, dataset_id: str, byte_size: int) -> None:
         with closing(self._connect()) as conn:
             conn.execute("begin immediate")
             try:
@@ -2243,9 +2271,7 @@ class ArtifactStore:
                     """,
                     (str(row[0]), dataset_id, byte_size),
                 )
-                conn.execute(
-                    "delete from upload_reservations where upload_id = ?", (upload_id,)
-                )
+                conn.execute("delete from upload_reservations where upload_id = ?", (upload_id,))
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -2421,6 +2447,8 @@ class ArtifactStore:
                     on jobs(idempotency_key) where idempotency_key is not null;
                 create index if not exists idx_artifacts_run_type
                     on artifacts(project_id, session_id, artifact_type);
+                create index if not exists idx_artifacts_run_order
+                    on artifacts(project_id, session_id);
                 create index if not exists idx_trace_events_run
                     on trace_events(project_id, session_id, id);
                 create index if not exists idx_upload_usage_project
@@ -2469,6 +2497,10 @@ class ArtifactStore:
                     "create index if not exists idx_artifacts_run_type"
                     " on artifacts(project_id, session_id, artifact_type)"
                 )
+                conn.execute(
+                    "create index if not exists idx_artifacts_run_order"
+                    " on artifacts(project_id, session_id)"
+                )
             # Slice-E F2: the same CSV in two projects yields the same
             # action_hash, so the old single-column PK let a second preview
             # steal the first run's pending row. Composite PK (action_hash,
@@ -2499,23 +2531,17 @@ class ArtifactStore:
             )
             # Pre-C1 composite-PK tables lack the token columns; '' never
             # matches a client-supplied token, so legacy rows just re-preview.
-            self._ensure_column(
-                conn, "pending_actions", "generation", "text not null default ''"
-            )
+            self._ensure_column(conn, "pending_actions", "generation", "text not null default ''")
             self._ensure_column(
                 conn, "pending_actions", "payload_digest", "text not null default ''"
             )
-            self._ensure_column(
-                conn, "pending_actions", "consumed_idempotency_key", "text"
-            )
+            self._ensure_column(conn, "pending_actions", "consumed_idempotency_key", "text")
             self._ensure_column(conn, "sessions", "status", "text not null default 'running'")
             self._ensure_column(conn, "projects", "created_at", "text")
             self._ensure_column(conn, "projects", "sort_order", "integer")
             # Preserve the legacy creation order before introducing manual
             # ordering.  New projects append after the highest persisted rank.
-            conn.execute(
-                "update projects set sort_order = rowid where sort_order is null"
-            )
+            conn.execute("update projects set sort_order = rowid where sort_order is null")
             # Session-index columns (§8.1): the list API reads these instead of
             # scanning run directories; refresh_session_index/backfill maintain them.
             self._ensure_column(conn, "sessions", "title", "text")
@@ -2524,7 +2550,9 @@ class ArtifactStore:
             self._ensure_column(conn, "sessions", "dataset_names_json", "text")
             self._ensure_column(conn, "sessions", "artifact_count", "integer not null default 0")
             self._ensure_column(conn, "sessions", "report_status", "text")
-            self._ensure_column(conn, "sessions", "chat_message_count", "integer not null default 0")
+            self._ensure_column(
+                conn, "sessions", "chat_message_count", "integer not null default 0"
+            )
             self._ensure_column(conn, "sessions", "source_session_id", "text")
             self._ensure_column(conn, "sessions", "code_version", "text")
             self._ensure_column(conn, "sessions", "seed", "integer")
@@ -2569,11 +2597,7 @@ class ArtifactStore:
                     order by created_at, job_id
                     """
                 ).fetchall()
-                live = [
-                    str(row[0])
-                    for row in unscoped_legacy
-                    if _stored_pid_alive(row[1])
-                ]
+                live = [str(row[0]) for row in unscoped_legacy if _stored_pid_alive(row[1])]
                 if live:
                     raise RuntimeError(
                         "Cannot migrate active legacy derived jobs; wait for "
@@ -2582,9 +2606,7 @@ class ArtifactStore:
                 if unscoped_legacy:
                     now = datetime.now(UTC).isoformat()
                     state_version_update = (
-                        ", state_version = state_version + 1"
-                        if job_state_version_present
-                        else ""
+                        ", state_version = state_version + 1" if job_state_version_present else ""
                     )
                     conn.executemany(
                         f"""
@@ -2627,11 +2649,7 @@ class ArtifactStore:
             for lane_rows in active_by_lane.values():
                 if len(lane_rows) < 2:
                     continue
-                live_rows = [
-                    row
-                    for row in lane_rows
-                    if _stored_pid_alive(row[3])
-                ]
+                live_rows = [row for row in lane_rows if _stored_pid_alive(row[3])]
                 if len(live_rows) > 1:
                     raise RuntimeError(
                         "Cannot migrate a legacy lane with multiple live "
@@ -2650,15 +2668,11 @@ class ArtifactStore:
                         ),
                     )
                 )
-                duplicate_job_ids.extend(
-                    str(row[0]) for row in lane_rows if row[0] != owner[0]
-                )
+                duplicate_job_ids.extend(str(row[0]) for row in lane_rows if row[0] != owner[0])
             if duplicate_job_ids:
                 now = datetime.now(UTC).isoformat()
                 state_version_update = (
-                    ", state_version = state_version + 1"
-                    if job_state_version_present
-                    else ""
+                    ", state_version = state_version + 1" if job_state_version_present else ""
                 )
                 conn.executemany(
                     f"""
@@ -2758,14 +2772,10 @@ class ArtifactStore:
 
         self._ensure_column(conn, "sessions", "state_version", "integer not null default 0")
         self._ensure_column(conn, "sessions", "active_job_id", "text")
-        self._ensure_column(
-            conn, "sessions", "storage_state", "text not null default 'live'"
-        )
+        self._ensure_column(conn, "sessions", "storage_state", "text not null default 'live'")
         self._ensure_column(conn, "sessions", "delete_op_id", "text")
 
-        job_columns = {
-            str(row[1]) for row in conn.execute("pragma table_info(jobs)").fetchall()
-        }
+        job_columns = {str(row[1]) for row in conn.execute("pragma table_info(jobs)").fetchall()}
         kill_fence_was_missing = "kill_fence_state" not in job_columns
         self._ensure_column(conn, "jobs", "state_version", "integer not null default 0")
         self._ensure_column(conn, "jobs", "launch_attempt", "integer not null default 0")
@@ -2782,9 +2792,7 @@ class ArtifactStore:
             "kill_fence_state",
             "text not null default 'open'",
         )
-        self._ensure_column(
-            conn, "jobs", "critical_depth", "integer not null default 0"
-        )
+        self._ensure_column(conn, "jobs", "critical_depth", "integer not null default 0")
         self._ensure_column(conn, "jobs", "critical_owner_generation", "integer")
         if kill_fence_was_missing:
             # Existing jobs predate PID birth identities and must fail closed.
@@ -3305,9 +3313,7 @@ class ArtifactStore:
             """,
             (datetime.now(UTC).isoformat(),),
         )
-        migration = conn.execute(
-            "select name from schema_migrations where version = 1"
-        ).fetchone()
+        migration = conn.execute("select name from schema_migrations where version = 1").fetchone()
         if migration is None or str(migration[0]) != "unified_storage_foundation_v1":
             raise RuntimeError("Storage foundation migration version 1 is incompatible.")
 

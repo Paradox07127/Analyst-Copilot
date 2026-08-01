@@ -11,13 +11,20 @@ import pytest
 
 import eda_platform.application.services.artifact_service as artifact_service_module
 from eda_platform.application.services.artifact_service import (
+    AgentHandoffNotFoundError,
+    AgentHandoffNotReadyError,
+    AgentHandoffTerminalError,
     ArtifactNotFoundError,
     ArtifactService,
     ArtifactTooLargeError,
 )
-from eda_platform.application.services.session_service import InvalidCursorError, SessionNotFoundError
+from eda_platform.application.services.session_service import (
+    InvalidCursorError,
+    SessionNotFoundError,
+)
 from eda_platform.core.store import ArtifactStore
-from eda_platform.schemas.artifacts import Artifact, ArtifactType
+from eda_platform.schemas.artifacts import Artifact, ArtifactType, EvidenceRef
+from eda_platform.tools.agent_handoff import create_agent_handoff_artifact
 
 PROJECT = "demo"
 RUN = "run_1"
@@ -158,7 +165,19 @@ def test_cursor_is_bound_to_run(store: ArtifactStore, service: ArtifactService) 
 
 
 def test_get_artifact_detail(store: ArtifactStore, service: ArtifactService) -> None:
-    _save(store, "chart_1", ArtifactType.CHART_SPEC, title="Revenue by month")
+    store.save_artifact(
+        Artifact(
+            id="chart_1",
+            type=ArtifactType.CHART_SPEC,
+            project_id=PROJECT,
+            session_id=RUN,
+            parents=["profile_1"],
+            payload={"title": "Revenue by month"},
+            evidence=[EvidenceRef(kind="table", artifact_id="table_1", locator="rows[0]")],
+            code_ref="eda.chart",
+            plain_language="Revenue chart",
+        )
+    )
 
     detail = service.get_artifact(RUN, "chart_1")
 
@@ -166,6 +185,11 @@ def test_get_artifact_detail(store: ArtifactStore, service: ArtifactService) -> 
     assert detail.type == "ChartSpec"
     assert detail.session_id == RUN
     assert detail.payload == {"title": "Revenue by month"}
+    assert detail.parents == ["profile_1"]
+    assert detail.evidence[0].artifact_id == "table_1"
+    assert detail.env_digest
+    assert detail.code_ref == "eda.chart"
+    assert detail.plain_language == "Revenue chart"
 
 
 def test_get_artifact_detail_is_bound_to_run_partition(
@@ -188,6 +212,68 @@ def test_get_artifact_detail_is_bound_to_run_partition(
 def test_get_artifact_missing_raises(service: ArtifactService) -> None:
     with pytest.raises(ArtifactNotFoundError):
         service.get_artifact(RUN, "nope")
+
+
+def test_agent_handoff_requires_completed_publish_barrier(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    with pytest.raises(AgentHandoffNotReadyError):
+        service.get_agent_handoff(RUN)
+
+    handoff = create_agent_handoff_artifact(
+        [],
+        project_id=PROJECT,
+        session_id=RUN,
+        producer_version="test",
+        execution_fingerprint="fingerprint",
+        input_hashes={},
+    )
+    store.save_artifact(handoff)
+    with pytest.raises(AgentHandoffNotReadyError):
+        service.get_agent_handoff(RUN)
+
+    store.mark_session_status(PROJECT, RUN, "completed")
+    detail = service.get_agent_handoff(RUN)
+    assert detail.artifact_id == handoff.id
+    assert detail.payload.contract_version == "3.0"
+
+
+def test_agent_handoff_waits_for_active_source_lane_job(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    store.mark_session_status(PROJECT, RUN, "completed")
+    store.create_job(
+        job_id="job_report",
+        session_id="rpsess_report_1",
+        project_id=PROJECT,
+        kind="report_generate",
+        lane_key=RUN,
+    )
+
+    with pytest.raises(AgentHandoffNotReadyError, match="job_report"):
+        service.get_agent_handoff(RUN)
+
+    store.mark_job_status("job_report", "completed")
+    with pytest.raises(AgentHandoffNotFoundError):
+        service.get_agent_handoff(RUN)
+
+
+def test_completed_legacy_session_has_typed_handoff_not_found(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    store.mark_session_status(PROJECT, RUN, "completed")
+    with pytest.raises(AgentHandoffNotFoundError):
+        service.get_agent_handoff(RUN)
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_terminal_session_does_not_publish_agent_handoff(
+    store: ArtifactStore, service: ArtifactService, status: str
+) -> None:
+    store.mark_session_status(PROJECT, RUN, status)
+
+    with pytest.raises(AgentHandoffTerminalError):
+        service.get_agent_handoff(RUN)
 
 
 def test_internal_run_artifact_hidden(store: ArtifactStore, service: ArtifactService) -> None:
@@ -263,6 +349,36 @@ def test_warnings_workspace_paths_are_relativized(
     assert warnings == [f"projects/{PROJECT}/uploads/a.csv", "plain warning"]
 
 
+def test_evidence_workspace_paths_are_relativized(
+    tmp_path: Path, store: ArtifactStore, service: ArtifactService
+) -> None:
+    absolute = str((tmp_path / "projects" / PROJECT / "uploads" / "a.csv").resolve())
+    store.save_artifact(
+        Artifact(
+            id="evidence_1",
+            type=ArtifactType.TABLE,
+            project_id=PROJECT,
+            session_id=RUN,
+            payload={},
+            evidence=[
+                EvidenceRef(
+                    kind="artifact",
+                    locator=absolute,
+                    value=absolute,
+                    unit_reference=absolute,
+                )
+            ],
+        )
+    )
+
+    evidence = service.get_artifact(RUN, "evidence_1").evidence[0]
+    relative = f"projects/{PROJECT}/uploads/a.csv"
+
+    assert evidence.locator == relative
+    assert evidence.value == relative
+    assert evidence.unit_reference == relative
+
+
 def test_identity_mismatch_is_refused(store: ArtifactStore, service: ArtifactService) -> None:
     _save(store, "chart_1", ArtifactType.CHART_SPEC)
     _save(store, "chart_2", ArtifactType.CHART_SPEC)
@@ -285,6 +401,22 @@ def test_oversized_artifact_is_refused(
     _save(store, "chart_1", ArtifactType.CHART_SPEC, title="Revenue")
     monkeypatch.setattr(artifact_service_module, "MAX_ARTIFACT_PAYLOAD_BYTES", 16)
 
+    with pytest.raises(ArtifactTooLargeError):
+        service.get_artifact(RUN, "chart_1")
+
+
+def test_artifact_read_cap_is_inclusive(
+    store: ArtifactStore,
+    service: ArtifactService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _save(store, "chart_1", ArtifactType.CHART_SPEC, title="Revenue")
+    size = store.artifact_path(PROJECT, RUN, "chart_1").stat().st_size
+
+    monkeypatch.setattr(artifact_service_module, "MAX_ARTIFACT_PAYLOAD_BYTES", size)
+    assert service.get_artifact(RUN, "chart_1").artifact_id == "chart_1"
+
+    monkeypatch.setattr(artifact_service_module, "MAX_ARTIFACT_PAYLOAD_BYTES", size - 1)
     with pytest.raises(ArtifactTooLargeError):
         service.get_artifact(RUN, "chart_1")
 

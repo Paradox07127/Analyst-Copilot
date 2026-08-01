@@ -43,12 +43,14 @@ class JobCreateRequest(BaseModel):
     kind: Literal["auto_eda"]
     project_id: str = "default"
     """Used only when the run does not exist yet; an existing run wins."""
-    datasets: list[str] = Field(min_length=1)
+    datasets: list[str] = Field(min_length=1, max_length=20)
     """Dataset references: an uploaded dataset_id or a workspace-relative CSV path."""
     business_context: str = ""
     ml_target_column: str | None = None
     ml_time_column: str | None = None
     generate_report: bool = True
+    dataset_workers: Literal[1, 2] = 1
+    resource_limit_action: Literal["limited", "reject"] = "limited"
     llm: Literal["env", "offline"] = "env"
     precleaning: PrecleaningOptions | None = None
     """Optional pre-ingest clean; the uploaded files are never rewritten."""
@@ -78,6 +80,8 @@ def create_job(
         ml_target_column=body.ml_target_column,
         ml_time_column=body.ml_time_column,
         generate_report=body.generate_report,
+        dataset_workers=body.dataset_workers,
+        resource_limit_action=body.resource_limit_action,
         llm=body.llm,
         payload_policy=effective.payload_policy,
         llm_env=effective.env_overlay,

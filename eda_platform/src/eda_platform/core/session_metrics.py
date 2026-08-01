@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -17,6 +18,14 @@ from eda_platform.core.llm_ledger import (
 from eda_platform.core.publication_state import derive_publication_state
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.publication import PublicationFreshness
+from eda_platform.schemas.resource_metrics import (
+    AutoEdaResourceUsage,
+    EdaArtifactMetrics,
+    EdaDataFootprint,
+    EdaInputMetrics,
+    EdaMemoryMetrics,
+    EdaResourcePreflight,
+)
 from eda_platform.schemas.session_metrics import SessionMetrics, StepMetric
 
 if TYPE_CHECKING:
@@ -41,10 +50,21 @@ _RELATIONSHIP_ON_DEMAND_EVENT_TYPE = "relationship_validation_on_demand"
 _RELATIONSHIP_DEFERRED_EVENT_TYPE = "relationship_discovery_deferred"
 
 
-def summarize_session(store: ArtifactStore, project_id: str, session_id: str) -> SessionMetrics:
+def summarize_session(
+    store: ArtifactStore,
+    project_id: str,
+    session_id: str,
+    *,
+    artifact_snapshot: Sequence[Artifact] | None = None,
+) -> SessionMetrics:
     """Build metrics for a persisted run, treating missing data as empty."""
     events, trace_unverifiable = _load_events(store, project_id, session_id)
-    artifacts, _warnings = store.list_artifacts_safe(project_id=project_id, session_id=session_id)
+    if artifact_snapshot is None:
+        artifacts, _warnings = store.list_artifacts_safe(
+            project_id=project_id, session_id=session_id
+        )
+    else:
+        artifacts = list(artifact_snapshot)
 
     question_route = _question_route_rollup(events)
     billed = spend_events(events)
@@ -56,9 +76,7 @@ def summarize_session(store: ArtifactStore, project_id: str, session_id: str) ->
         prompt_tokens=_prompt_tokens_total(billed),
         completion_tokens=sum(_as_int(e.summary.get("completion_tokens")) for e in billed),
         cached_tokens=_cached_tokens_total(billed),
-        cache_creation_tokens=sum(
-            _as_int(e.summary.get("cache_creation_tokens")) for e in billed
-        ),
+        cache_creation_tokens=sum(_as_int(e.summary.get("cache_creation_tokens")) for e in billed),
         reasoning_tokens=sum(_as_int(e.summary.get("reasoning_tokens")) for e in billed),
         cache_hit_rate=_cache_hit_rate(billed),
         est_cost_usd=_total_cost(billed),
@@ -67,9 +85,7 @@ def summarize_session(store: ArtifactStore, project_id: str, session_id: str) ->
         usage_known_calls=sum(e.summary.get("usage_known") is True for e in billed),
         usage_unknown_calls=sum(e.summary.get("usage_known") is not True for e in billed),
         cost_estimate_status=_cost_estimate_status(billed),
-        llm_calls_by_model=dict(
-            Counter(str(e.summary.get("model") or "unknown") for e in billed)
-        ),
+        llm_calls_by_model=dict(Counter(str(e.summary.get("model") or "unknown") for e in billed)),
         llm_calls_by_kind=dict(
             Counter(
                 str(e.summary.get("transport_kind") or e.summary.get("kind") or "unknown")
@@ -82,18 +98,11 @@ def summarize_session(store: ArtifactStore, project_id: str, session_id: str) ->
         llm_calls_by_status=dict(
             Counter(str(e.summary.get("status") or "unknown") for e in billed)
         ),
-        budget_reserved_calls=sum(
-            event.event_type == BUDGET_RESERVED_EVENT for event in events
-        ),
-        budget_settled_calls=sum(
-            event.event_type == BUDGET_SETTLED_EVENT for event in events
-        ),
-        budget_rejected_calls=sum(
-            event.event_type == BUDGET_REJECTED_EVENT for event in events
-        ),
+        budget_reserved_calls=sum(event.event_type == BUDGET_RESERVED_EVENT for event in events),
+        budget_settled_calls=sum(event.event_type == BUDGET_SETTLED_EVENT for event in events),
+        budget_rejected_calls=sum(event.event_type == BUDGET_REJECTED_EVENT for event in events),
         budget_uncertain_calls=sum(
-            event.event_type == BUDGET_SETTLED_EVENT
-            and event.summary.get("status") == "uncertain"
+            event.event_type == BUDGET_SETTLED_EVENT and event.summary.get("status") == "uncertain"
             for event in events
         ),
         budget_total_tokens=sum(
@@ -104,6 +113,7 @@ def summarize_session(store: ArtifactStore, project_id: str, session_id: str) ->
         budget_est_cost_usd=_budget_total_cost(events),
         budget_reconciliation=_budget_reconciliation(events, billed),
         duration_seconds=_run_duration_seconds(events),
+        resource_usage=_resource_usage(events, artifacts),
         steps=_step_metrics(events),
         artifact_counts=dict(Counter(a.type.value for a in artifacts)),
         findings_count=_findings_count(artifacts),
@@ -220,16 +230,34 @@ def summarize_session(store: ArtifactStore, project_id: str, session_id: str) ->
 
 def persist_run_metrics(store: ArtifactStore, project_id: str, session_id: str) -> str:
     """Summarize the run and save the rollup as a SESSION_METRICS artifact."""
-    metrics = summarize_session(store, project_id, session_id)
-    artifact = Artifact(
-        id=make_artifact_id("session_metrics", {"project_id": project_id, "session_id": session_id}),
+    artifact = create_run_metrics_artifact(store, project_id, session_id)
+    store.save_artifact(artifact)
+    return artifact.id
+
+
+def create_run_metrics_artifact(
+    store: ArtifactStore,
+    project_id: str,
+    session_id: str,
+    *,
+    artifact_snapshot: Sequence[Artifact] | None = None,
+) -> Artifact:
+    """Build, but do not publish, a metrics artifact from one explicit inventory."""
+    metrics = summarize_session(
+        store,
+        project_id,
+        session_id,
+        artifact_snapshot=artifact_snapshot,
+    )
+    return Artifact(
+        id=make_artifact_id(
+            "session_metrics", {"project_id": project_id, "session_id": session_id}
+        ),
         type=ArtifactType.SESSION_METRICS,
         project_id=project_id,
         session_id=session_id,
         payload=metrics.model_dump(mode="json"),
     )
-    store.save_artifact(artifact)
-    return artifact.id
 
 
 # --------------------------------------------------------------------------- #
@@ -302,9 +330,7 @@ def _cost_estimate_status(
 
 
 def _budget_total_cost(events: list[TraceEvent]) -> float | None:
-    settled = [
-        event for event in events if event.event_type == BUDGET_SETTLED_EVENT
-    ]
+    settled = [event for event in events if event.event_type == BUDGET_SETTLED_EVENT]
     if not settled:
         return None
     if any(event.summary.get("estimated_cost_usd") is None for event in settled):
@@ -363,8 +389,7 @@ def _budget_reconciliation(
         ledger = ledger_by_call[call_id]
         budget = settled_by_call[call_id]
         if any(
-            _as_int(ledger.summary.get(ledger_name))
-            != _as_int(budget.summary.get(budget_name))
+            _as_int(ledger.summary.get(ledger_name)) != _as_int(budget.summary.get(budget_name))
             for ledger_name, budget_name in token_pairs
         ):
             return "unverifiable"
@@ -385,6 +410,135 @@ def _run_duration_seconds(events: list[TraceEvent]) -> float:
         return 0.0
     span = (max(ends) - min(starts)).total_seconds()
     return max(round(span, 6), 0.0)
+
+
+def _latest_event_summary(events: list[TraceEvent], event_type: str) -> dict[str, object]:
+    for event in reversed(events):
+        if event.event_type == event_type:
+            return dict(event.summary)
+    return {}
+
+
+def _resource_usage(events: list[TraceEvent], artifacts: list[Artifact]) -> AutoEdaResourceUsage:
+    inputs_summary = _latest_event_summary(events, "eda_inputs_loaded")
+    runtime_summary = _latest_event_summary(events, "eda_resource_usage")
+    preflight_artifact = next(
+        (
+            artifact
+            for artifact in reversed(artifacts)
+            if artifact.type is ArtifactType.RESOURCE_PREFLIGHT
+        ),
+        None,
+    )
+    preflight: EdaResourcePreflight | None = None
+    if preflight_artifact is not None:
+        try:
+            preflight = EdaResourcePreflight.model_validate(preflight_artifact.payload)
+        except ValueError:
+            preflight = None
+
+    analysis = _data_footprint(inputs_summary.get("analysis"))
+    raw_lineage = _data_footprint(inputs_summary.get("raw_lineage"))
+    handoff = next(
+        (
+            artifact
+            for artifact in reversed(artifacts)
+            if artifact.type is ArtifactType.AGENT_HANDOFF
+        ),
+        None,
+    )
+    context = handoff.payload.get("context_policy", {}) if handoff is not None else {}
+    non_metrics = [
+        artifact for artifact in artifacts if artifact.type is not ArtifactType.SESSION_METRICS
+    ]
+    canonical_bytes = sum(
+        len(artifact.model_dump_json().encode("utf-8")) for artifact in non_metrics
+    )
+    storage_bytes = sum(
+        len(artifact.model_dump_json(indent=2).encode("utf-8")) for artifact in non_metrics
+    )
+    baseline = _optional_int(runtime_summary.get("baseline_peak_rss_bytes"))
+    peak = _optional_int(runtime_summary.get("peak_rss_bytes"))
+    method = str(runtime_summary.get("peak_rss_method") or "unavailable")
+    if method not in {
+        "getrusage_ru_maxrss",
+        "get_process_memory_info_peak_working_set",
+        "unavailable",
+    }:
+        method = "unavailable"
+    estimated_working_set = preflight.estimated_working_set_bytes if preflight is not None else 0
+    verified_working_set = preflight.verified_working_set_bytes if preflight is not None else None
+    budget = preflight.policy.max_working_set_bytes if preflight is not None else 0
+    preflight_status = preflight.status if preflight is not None else "unavailable"
+    processing_mode = preflight.compute_mode if preflight is not None else "unknown"
+    requested_workers = preflight.requested_dataset_workers if preflight is not None else 1
+    effective_workers = preflight.effective_dataset_workers if preflight is not None else 0
+    has_runtime = bool(inputs_summary or runtime_summary)
+    return AutoEdaResourceUsage(
+        measurement_status=(
+            "verified"
+            if has_runtime and preflight is not None and preflight.phase == "verified"
+            else "partial"
+            if has_runtime or preflight is not None
+            else "unavailable"
+        ),
+        wall_duration_seconds=max(0.0, _as_float(runtime_summary.get("wall_duration_seconds"))),
+        preprocessing_duration_seconds=max(
+            0.0, _as_float(runtime_summary.get("preprocessing_duration_seconds"))
+        ),
+        ingest_duration_seconds=max(0.0, _as_float(inputs_summary.get("ingest_duration_seconds"))),
+        processing_mode=processing_mode,
+        preflight_status=preflight_status,
+        requested_dataset_workers=requested_workers,
+        effective_dataset_workers=effective_workers,
+        worker_adjustment_reason=(
+            preflight.worker_adjustment_reason if preflight is not None else None
+        ),
+        inputs=EdaInputMetrics(
+            analysis=analysis,
+            raw_lineage=raw_lineage,
+            unique_file_bytes=max(0, _as_int(inputs_summary.get("unique_file_bytes"))),
+        ),
+        memory=EdaMemoryMetrics(
+            baseline_peak_rss_bytes=baseline,
+            peak_rss_bytes=peak,
+            peak_rss_delta_bytes=(
+                max(0, peak - baseline) if peak is not None and baseline is not None else None
+            ),
+            peak_rss_method=method,
+            working_set_budget_bytes=budget,
+            estimated_working_set_bytes=estimated_working_set,
+            verified_working_set_bytes=verified_working_set,
+        ),
+        artifacts=EdaArtifactMetrics(
+            artifact_count=len(artifacts),
+            storage_bytes_excluding_session_metrics=storage_bytes,
+            canonical_json_bytes_excluding_session_metrics=canonical_bytes,
+            agent_handoff_payload_bytes=max(0, _as_int(context.get("serialized_bytes"))),
+            default_context_bytes=max(0, _as_int(context.get("initial_context_bytes"))),
+            default_context_estimated_tokens=max(
+                0, _as_int(context.get("initial_context_estimated_tokens"))
+            ),
+        ),
+    )
+
+
+def _data_footprint(value: object) -> EdaDataFootprint:
+    if not isinstance(value, dict):
+        return EdaDataFootprint()
+    try:
+        return EdaDataFootprint.model_validate(value)
+    except ValueError:
+        return EdaDataFootprint()
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0, int(value))  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
 
 
 def _step_metrics(events: list[TraceEvent]) -> list[StepMetric]:

@@ -27,6 +27,9 @@ _CORRELATION_CANDIDATE_PAIRS = 256
 _CORRELATION_BLOCK_COLUMNS = 256
 _MAX_ASSOCIATION_LEVELS = 30
 _MAX_ASSOCIATION_ROWS = 15
+_MAX_ASSOCIATION_CATEGORICAL_COLUMNS = 24
+_MAX_ASSOCIATION_NUMERIC_COLUMNS = 24
+_MAX_ASSOCIATION_SAMPLE_ROWS = 50_000
 
 
 def create_analysis_tables(
@@ -88,7 +91,32 @@ def _association_table(
     """
     if not categorical_columns:
         return None
-    frame = loaded.frame
+    details = {column.name: column for column in profile.columns_detail}
+    categorical_total = len(categorical_columns)
+    numeric_total = len(numeric_columns)
+    # Full categorical pair scans are O(rows * (c^2 + c*n)). Prefer complete,
+    # informative columns and cap both axes before any pairwise work.
+    categorical_columns = sorted(
+        categorical_columns,
+        key=lambda name: (
+            details[name].missing_count,
+            -details[name].unique_count,
+            name,
+        ),
+    )[:_MAX_ASSOCIATION_CATEGORICAL_COLUMNS]
+    numeric_columns = sorted(
+        numeric_columns,
+        key=lambda name: (
+            details[name].missing_count,
+            -details[name].unique_count,
+            name,
+        ),
+    )[:_MAX_ASSOCIATION_NUMERIC_COLUMNS]
+    selected_columns = list(dict.fromkeys([*categorical_columns, *numeric_columns]))
+    frame = loaded.frame.loc[:, selected_columns]
+    sampled = len(frame) > _MAX_ASSOCIATION_SAMPLE_ROWS
+    if sampled:
+        frame = frame.sample(n=_MAX_ASSOCIATION_SAMPLE_ROWS, random_state=0).sort_index()
     rows: list[dict[str, Any]] = []
     for column_a, column_b in combinations(categorical_columns, 2):
         paired = frame.loc[:, [column_a, column_b]].dropna()
@@ -109,6 +137,9 @@ def _association_table(
                 "association": _round(value, digits=4),
                 "pairwise_complete_n": int(len(paired)),
                 "missing_policy": "pairwise_complete",
+                "selection_is_approximate": sampled,
+                "selection_method": ("deterministic_row_sample" if sampled else "exact_full_rows"),
+                "analysis_population_rows": len(loaded.frame),
             }
         )
     for category in categorical_columns:
@@ -116,9 +147,7 @@ def _association_table(
             paired = pd.DataFrame(
                 {
                     category: _column_series(frame, category),
-                    measure: _numeric_series(
-                        _column_series(frame, measure), column_name=measure
-                    ),
+                    measure: _numeric_series(_column_series(frame, measure), column_name=measure),
                 }
             ).dropna()
             if len(paired) < 3:
@@ -138,11 +167,21 @@ def _association_table(
                     "association": _round(value, digits=4),
                     "pairwise_complete_n": int(len(paired)),
                     "missing_policy": "pairwise_complete",
+                    "selection_is_approximate": sampled,
+                    "selection_method": (
+                        "deterministic_row_sample" if sampled else "exact_full_rows"
+                    ),
+                    "analysis_population_rows": len(loaded.frame),
                 }
             )
     if not rows:
         return None
     rows.sort(key=lambda row: (-float(row["association"]), str(row["column_a"])))
+    row_scope = (
+        f"a deterministic sample of {len(frame)}"
+        if sampled
+        else f"all {len(frame)}"
+    )
     return AnalysisTable(
         dataset_id=profile.dataset_id,
         title=f"{profile.name} - Categorical associations",
@@ -150,7 +189,10 @@ def _association_table(
         description=(
             f"Strongest categorical associations in {profile.name}: Cramér's V between "
             "categories and the correlation ratio between a category and a measure. "
-            "Association is symmetric and is not evidence of causation."
+            "Association is symmetric and is not evidence of causation. "
+            f"Evaluated {len(categorical_columns)} of {categorical_total} eligible categorical "
+            f"fields and {len(numeric_columns)} of {numeric_total} numeric fields on "
+            f"{row_scope} rows."
         ),
         rows=rows[:_MAX_ASSOCIATION_ROWS],
     )
@@ -210,8 +252,7 @@ def _numeric_summary_table(
             continue
         # p1/p95/p99 are what reveal capping and long tails; quartiles hide both.
         p1, q1, median, q3, p95, p99 = (
-            float(value)
-            for value in non_null.quantile([0.01, 0.25, 0.5, 0.75, 0.95, 0.99])
+            float(value) for value in non_null.quantile([0.01, 0.25, 0.5, 0.75, 0.95, 0.99])
         )
         rows.append(
             {
@@ -263,9 +304,7 @@ def _correlation_table(
     numeric_series = {
         column: series
         for column in numeric_columns
-        for series in [
-            _numeric_series(_column_series(loaded.frame, column), column_name=column)
-        ]
+        for series in [_numeric_series(_column_series(loaded.frame, column), column_name=column)]
         if series.dropna().nunique() > 1
     }
     numeric_columns = [column for column in numeric_columns if column in numeric_series]
@@ -276,9 +315,7 @@ def _correlation_table(
     # 310 MiB credit-card table that erased the profiler's memory savings.
     # Spearman is still computed only for the ten rows the artifact publishes.
     strongest: list[tuple[float, int, str, str, float]] = []
-    for pair_order, (column_a, column_b) in enumerate(
-        combinations(numeric_columns, 2)
-    ):
+    for pair_order, (column_a, column_b) in enumerate(combinations(numeric_columns, 2)):
         # A pair can still be constant on its pairwise-complete rows; NaN from
         # the suppressed divide is skipped below instead of warning.
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -607,11 +644,7 @@ def _rescale_token_set(value: str) -> set[str]:
     tokens = _name_tokens(normalized)
     while tokens and tokens[-1] in {"90", "90s", "rate", "ratio"}:
         tokens = tokens[:-1]
-    return {
-        token
-        for token in tokens
-        if token not in {"per90", "p90", "pct", "percent"}
-    }
+    return {token for token in tokens if token not in {"per90", "p90", "pct", "percent"}}
 
 
 def _name_tokens(value: str) -> list[str]:

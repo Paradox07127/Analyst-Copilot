@@ -13,6 +13,7 @@ import eda_platform.application.services.report_service as report_service_module
 from eda_platform.api.main import create_app
 from eda_platform.core.store import ArtifactStore
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
+from eda_platform.tools.agent_handoff import create_agent_handoff_artifact
 
 PROJECT = "demo"
 RUN = "run_1"
@@ -153,6 +154,56 @@ def test_get_artifact_detail(client: TestClient) -> None:
     assert body["artifact_id"] == "chart_1"
     assert body["type"] == "ChartSpec"
     assert body["payload"] == {"title": "Chart 1"}
+    assert body["parents"] == []
+    assert body["evidence"] == []
+    assert body["env_digest"]
+
+
+def test_agent_handoff_publish_barrier_and_typed_endpoint(
+    client: TestClient, workspace: Path
+) -> None:
+    not_ready = client.get(f"/api/v1/sessions/{BARE_RUN}/agent-handoff")
+    assert not_ready.status_code == 409
+    assert not_ready.headers["retry-after"] == "2"
+    assert not_ready.json()["error"]["code"] == "agent_handoff_not_ready"
+
+    store = ArtifactStore(workspace)
+    source = store.list_artifacts(project_id=PROJECT, session_id=RUN)
+    handoff = create_agent_handoff_artifact(
+        source,
+        project_id=PROJECT,
+        session_id=RUN,
+        producer_version="test",
+        execution_fingerprint="fingerprint",
+        input_hashes={},
+    )
+    store.save_artifact(handoff)
+    store.mark_session_status(PROJECT, RUN, "completed")
+    response = client.get(f"/api/v1/sessions/{RUN}/agent-handoff")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["artifact_id"] == handoff.id
+    assert body["type"] == "AgentHandoff"
+    assert body["payload"]["contract_version"] == "3.0"
+
+    store.mark_session_status(PROJECT, BARE_RUN, "completed")
+    missing = client.get(f"/api/v1/sessions/{BARE_RUN}/agent-handoff")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "agent_handoff_not_found"
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_agent_handoff_terminal_session_is_non_retryable_409(
+    client: TestClient, workspace: Path, status: str
+) -> None:
+    ArtifactStore(workspace).mark_session_status(PROJECT, BARE_RUN, status)
+
+    response = client.get(f"/api/v1/sessions/{BARE_RUN}/agent-handoff")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "agent_handoff_terminal"
+    assert "retry-after" not in response.headers
 
 
 def test_get_artifact_missing_404(client: TestClient) -> None:

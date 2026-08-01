@@ -6,9 +6,11 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from eda_platform.application.services.artifact_service import ArtifactService
 from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.auto_eda import AutoEDAResult, generate_report_on_demand
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, SqlResult
+from eda_platform.schemas.handoff import AgentHandoffV3
 from eda_platform.schemas.questions import QuestionExecutionResult
 from eda_platform.schemas.sessions import SessionManifest
 from eda_platform.tools.loader import load_csv
@@ -45,9 +47,7 @@ def _build_workspace(tmp_path: Path) -> AutoEDAResult:
     store.start_session(PROJECT, DERIVED)
 
     csv_path = tmp_path / "sales.csv"
-    csv_path.write_text(
-        "order_id,revenue,region\n1,10,East\n2,30,East\n", encoding="utf-8"
-    )
+    csv_path.write_text("order_id,revenue,region\n1,10,East\n2,30,East\n", encoding="utf-8")
     loaded = load_csv(csv_path, dataset_id="ds_sales")
     profile = profile_dataset(loaded, project_id=PROJECT, session_id=PRIMARY)
 
@@ -75,7 +75,9 @@ def _build_workspace(tmp_path: Path) -> AutoEDAResult:
     for artifact in [*primary_artifacts, hop1, hop2, unrelated]:
         store.save_artifact(artifact)
     store.write_manifest(
-        SessionManifest(session_id=PRIMARY, project_id=PROJECT, input_hashes={}, code_version="test")
+        SessionManifest(
+            session_id=PRIMARY, project_id=PROJECT, input_hashes={}, code_version="test"
+        )
     )
     store.write_manifest(
         SessionManifest(
@@ -114,9 +116,53 @@ def test_offline_on_demand_report_terminates_and_persists(tmp_path: Path) -> Non
     assert ArtifactType.REPORT_BUNDLE in types
     assert generated.report_markdown.strip()
 
-    report_file = tmp_path / "ws" / "projects" / PROJECT / "sessions" / PRIMARY / "report" / "report.md"
+    report_file = (
+        tmp_path / "ws" / "projects" / PROJECT / "sessions" / PRIMARY / "report" / "report.md"
+    )
     assert report_file.is_file()
 
     ids = {artifact.id for artifact in generated.artifacts}
     assert {"sql_hop1", "sql_hop2"} <= ids, "transitive derived artifacts must be included"
     assert "sql_unrelated" not in ids
+
+    # The compact handoff must keep external results fetchable from their
+    # canonical origin partition, while the report DAG remains acyclic and
+    # never points backward to publication-only metrics/handoff artifacts.
+    handoff_artifact = next(
+        artifact for artifact in generated.artifacts if artifact.type is ArtifactType.AGENT_HANDOFF
+    )
+    handoff = AgentHandoffV3.model_validate(handoff_artifact.payload)
+    external = next(entry for entry in handoff.artifact_catalog if entry.artifact_id == "sql_hop1")
+    assert external.origin_session_id == DERIVED
+    assert external.fetch == f"/api/v1/sessions/{DERIVED}/artifacts/sql_hop1"
+    assert (
+        ArtifactService(ArtifactStore(result.workspace))
+        .get_artifact(DERIVED, "sql_hop1")
+        .artifact_id
+        == "sql_hop1"
+    )
+
+    by_id = {artifact.id: artifact for artifact in generated.artifacts}
+    publication_ids = {
+        artifact.id
+        for artifact in generated.artifacts
+        if artifact.type in {ArtifactType.SESSION_METRICS, ArtifactType.AGENT_HANDOFF}
+    }
+    for artifact in generated.artifacts:
+        if artifact.type in {ArtifactType.MARKDOWN_REPORT, ArtifactType.REPORT_BUNDLE}:
+            assert not (set(artifact.parents) & publication_ids)
+
+    def visit(artifact_id: str, active: set[str], done: set[str]) -> None:
+        if artifact_id in active:
+            raise AssertionError(f"artifact parent cycle at {artifact_id}")
+        if artifact_id in done or artifact_id not in by_id:
+            return
+        active.add(artifact_id)
+        for parent_id in by_id[artifact_id].parents:
+            visit(parent_id, active, done)
+        active.remove(artifact_id)
+        done.add(artifact_id)
+
+    done: set[str] = set()
+    for artifact_id in by_id:
+        visit(artifact_id, set(), done)

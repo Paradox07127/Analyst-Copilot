@@ -45,11 +45,13 @@ class ArtifactType(StrEnum):
     MODEL_CARD = "ModelCard"
     ANOMALY_SCREEN_RESULT = "AnomalyScreenResult"
     SESSION_METRICS = "SessionMetrics"
+    RESOURCE_PREFLIGHT = "ResourcePreflight"
     COLUMN_ROLE_SET = "ColumnRoleSet"
     EVIDENCE_INTERLEAVE_TRANSCRIPT = "EvidenceInterleaveTranscript"
     FOLLOW_UP_PROPOSAL_SET = "FollowUpProposalSet"
     LOOP_LEDGER = "LoopLedger"
     EDA_HANDOFF = "EdaHandoff"
+    AGENT_HANDOFF = "AgentHandoff"
 
 
 class EvidenceRef(BaseModel):

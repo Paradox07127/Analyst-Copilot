@@ -85,6 +85,12 @@ export const routes: RouteObject[] = [
         lazy: () => import("../features/settings/SettingsPage"),
       },
       {
+        /* AppShell owns the two independently routed panes. The leaf only
+         * gives the data router a valid match for the shareable split URL. */
+        path: "split",
+        Component: () => null,
+      },
+      {
         path: "projects/:projectId/new-session",
         lazy: () => import("../features/launchpad/LaunchpadPage"),
       },

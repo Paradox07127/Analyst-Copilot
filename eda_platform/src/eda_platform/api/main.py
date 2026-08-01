@@ -38,8 +38,8 @@ from eda_platform.api.routers.jobs import router as jobs_router
 from eda_platform.api.routers.questions import router as questions_router
 from eda_platform.api.routers.relationships import router as relationships_router
 from eda_platform.api.routers.reports import router as reports_router
-from eda_platform.api.routers.sessions import router as runs_router
 from eda_platform.api.routers.semantic import router as semantic_router
+from eda_platform.api.routers.sessions import router as runs_router
 from eda_platform.api.routers.settings import router as settings_router
 from eda_platform.api.routers.skills import router as skills_router
 from eda_platform.api.routers.support_docs import router as support_docs_router
@@ -52,6 +52,7 @@ from eda_platform.application.services.artifact_service import ArtifactService
 from eda_platform.application.services.board_service import BoardService
 from eda_platform.application.services.chat_service import ChatService
 from eda_platform.application.services.cleaning_service import CleaningService
+from eda_platform.application.services.compare_scope_service import CompareScopeService
 from eda_platform.application.services.compare_service import CompareService
 from eda_platform.application.services.data_operation_service import DataOperationService
 from eda_platform.application.services.dataset_service import DatasetService
@@ -71,10 +72,10 @@ from eda_platform.application.services.report_generation_service import (
     ReportGenerationService,
 )
 from eda_platform.application.services.report_service import ReportService
-from eda_platform.application.services.session_fork_service import SessionForkService
-from eda_platform.application.services.session_service import SessionService
 from eda_platform.application.services.sandbox_status_service import SandboxStatusService
 from eda_platform.application.services.semantic_service import SemanticService
+from eda_platform.application.services.session_fork_service import SessionForkService
+from eda_platform.application.services.session_service import SessionService
 from eda_platform.application.services.settings_service import SettingsService
 from eda_platform.application.services.skill_service import SkillService
 from eda_platform.application.services.support_doc_service import SupportDocService
@@ -90,13 +91,13 @@ from eda_platform.core.config import (
     resolve_workspace_path,
 )
 from eda_platform.core.query import TrustedFileQueryEngine
+from eda_platform.core.sandbox_broker import SandboxBroker, sandbox_required_at_startup
 from eda_platform.core.session_deletion import (
     SessionDeletionBlockedError,
     SessionDeletionBusyError,
     SessionDeletionCoordinator,
     SessionDeletionRetryableError,
 )
-from eda_platform.core.sandbox_broker import SandboxBroker, sandbox_required_at_startup
 from eda_platform.core.store import ArtifactStore
 from eda_platform.infrastructure.job_backend import LocalProcessJobBackend
 
@@ -135,18 +136,21 @@ def create_app(
     )
     app.state.job_service = job_service
     app.state.data_operation_service = DataOperationService(store, job_service)
-    app.state.report_service = ReportService(store)
+    report_service = ReportService(store)
+    app.state.report_service = report_service
     app.state.artifact_service = ArtifactService(store)
     app.state.insight_service = InsightService(store)
     approval_service = ApprovalService(store)
     app.state.cleaning_service = CleaningService(
         store, dataset_service, approval_service, job_service
     )
-    app.state.question_service = QuestionService(store, approval_service, job_service)
+    question_service = QuestionService(store, approval_service, job_service)
+    app.state.question_service = question_service
     app.state.investigation_service = InvestigationService(
         store, approval_service, job_service
     )
-    app.state.finding_service = FindingService(store)
+    finding_service = FindingService(store)
+    app.state.finding_service = finding_service
     semantic_service = SemanticService(store)
     app.state.semantic_service = semantic_service
     app.state.relationship_service = RelationshipService(
@@ -161,8 +165,19 @@ def create_app(
     )
     app.state.chat_service = ChatService(store, approval_service)
     app.state.board_service = BoardService(store)
-    app.state.analysis_service = AnalysisService(store)
-    app.state.trace_service = TraceService(store)
+    analysis_service = AnalysisService(store)
+    trace_service = TraceService(store)
+    app.state.analysis_service = analysis_service
+    app.state.trace_service = trace_service
+    app.state.compare_scope_service = CompareScopeService(
+        store,
+        session_service,
+        question_service,
+        analysis_service,
+        finding_service,
+        report_service,
+        trace_service,
+    )
     decision_report_service = DecisionReportService(store, job_service)
     app.state.decision_report_service = decision_report_service
     app.state.report_export_service = ReportExportService(store, decision_report_service)

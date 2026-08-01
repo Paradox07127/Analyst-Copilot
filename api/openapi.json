@@ -3969,6 +3969,127 @@
               }
             },
             "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{session_id}/agent-handoff": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Get Agent Handoff",
+        "operationId": "get_agent_handoff_api_v1_sessions__session_id__agent_handoff_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentHandoffDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "409": {
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before retrying while the session is still running; absent for terminal failed or cancelled sessions.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           }
         }
       }
@@ -4050,6 +4171,16 @@
               }
             },
             "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           },
           "413": {
             "content": {
@@ -6413,6 +6544,139 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CompareView"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/v1/compare/{scope}": {
+      "get": {
+        "tags": [
+          "compare"
+        ],
+        "summary": "Compare Scope",
+        "operationId": "compare_scope_api_v1_compare__scope__get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "enum": [
+                "questions",
+                "analysis",
+                "findings",
+                "report",
+                "artifacts",
+                "execution"
+              ],
+              "type": "string",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "left",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Left"
+            }
+          },
+          {
+            "name": "right",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Right"
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "all",
+                "differences"
+              ],
+              "type": "string",
+              "default": "all",
+              "title": "Filter"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompareScopeView"
                 }
               }
             }
@@ -11648,6 +11912,359 @@
         ],
         "title": "AboutInfo"
       },
+      "AgentDataset": {
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "title": "Dataset Id"
+          },
+          "raw_dataset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Dataset Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "content_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Hash"
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Rows"
+          },
+          "columns": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Columns"
+          },
+          "grain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grain"
+          },
+          "semantic_type_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Semantic Type Counts"
+          },
+          "primary_key_candidates": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Primary Key Candidates"
+          },
+          "composite_key_candidates": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Composite Key Candidates"
+          },
+          "pii_columns": {
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "email",
+                "phone",
+                "name",
+                "id",
+                "unknown"
+              ]
+            },
+            "type": "object",
+            "title": "Pii Columns"
+          },
+          "pii_column_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Pii Column Count"
+          },
+          "pii_columns_omitted": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Pii Columns Omitted"
+          },
+          "quality": {
+            "$ref": "#/components/schemas/DatasetQualitySummary"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/DatasetReadiness"
+          },
+          "artifact_ids": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Artifact Ids"
+          },
+          "artifact_omitted_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Artifact Omitted Counts"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dataset_id",
+          "name",
+          "rows",
+          "columns",
+          "pii_column_count",
+          "pii_columns_omitted",
+          "quality",
+          "readiness"
+        ],
+        "title": "AgentDataset"
+      },
+      "AgentHandoffDetail": {
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "title": "Artifact Id"
+          },
+          "type": {
+            "type": "string",
+            "const": "AgentHandoff",
+            "title": "Type",
+            "default": "AgentHandoff"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AgentHandoffV3"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "parents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Parents"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactEvidenceRef"
+            },
+            "type": "array",
+            "title": "Evidence"
+          },
+          "env_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env Digest"
+          },
+          "code_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code Ref"
+          },
+          "plain_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plain Language"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artifact_id",
+          "project_id",
+          "session_id",
+          "payload"
+        ],
+        "title": "AgentHandoffDetail"
+      },
+      "AgentHandoffV3": {
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "const": "3.0",
+            "title": "Contract Version",
+            "default": "3.0"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "run": {
+            "$ref": "#/components/schemas/HandoffRun"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/AgentReadiness"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/HandoffCapabilities"
+          },
+          "datasets": {
+            "items": {
+              "$ref": "#/components/schemas/AgentDataset"
+            },
+            "type": "array",
+            "title": "Datasets"
+          },
+          "artifact_catalog": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactCatalogEntry"
+            },
+            "type": "array",
+            "title": "Artifact Catalog"
+          },
+          "question_results": {
+            "items": {
+              "$ref": "#/components/schemas/HandoffQuestionResult"
+            },
+            "type": "array",
+            "title": "Question Results"
+          },
+          "report": {
+            "$ref": "#/components/schemas/HandoffReport"
+          },
+          "next_actions": {
+            "items": {
+              "$ref": "#/components/schemas/HandoffNextAction"
+            },
+            "type": "array",
+            "title": "Next Actions"
+          },
+          "context_policy": {
+            "$ref": "#/components/schemas/HandoffContextPolicy"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "generated_at",
+          "run",
+          "readiness",
+          "capabilities",
+          "report",
+          "context_policy"
+        ],
+        "title": "AgentHandoffV3",
+        "description": "Final session manifest. Large evidence remains lazy artifact references."
+      },
+      "AgentReadiness": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "limited",
+              "blocked"
+            ],
+            "title": "Status"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reasons"
+          },
+          "quality_gate": {
+            "$ref": "#/components/schemas/HandoffGate"
+          },
+          "report_gate": {
+            "$ref": "#/components/schemas/HandoffGate"
+          },
+          "cross_dataset_relationships": {
+            "$ref": "#/components/schemas/RelationshipReadiness"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "quality_gate",
+          "report_gate",
+          "cross_dataset_relationships"
+        ],
+        "title": "AgentReadiness"
+      },
       "AnalysisTableView": {
         "properties": {
           "artifact_id": {
@@ -11796,6 +12413,157 @@
         ],
         "title": "ApiErrorInfo"
       },
+      "ArtifactCatalogEntry": {
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "title": "Artifact Id"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ArtifactType"
+          },
+          "origin_session_id": {
+            "type": "string",
+            "title": "Origin Session Id"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "ingest",
+              "profile",
+              "quality",
+              "exploration",
+              "statistics",
+              "semantic",
+              "question_planning",
+              "question_execution",
+              "reporting",
+              "observability"
+            ],
+            "title": "Stage"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "gate",
+              "summary",
+              "evidence",
+              "visual",
+              "plan",
+              "result",
+              "presentation",
+              "metric"
+            ],
+            "title": "Role"
+          },
+          "dataset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "normal",
+              "on_demand"
+            ],
+            "title": "Priority"
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required"
+          },
+          "fetch": {
+            "type": "string",
+            "title": "Fetch"
+          },
+          "content_sha256": {
+            "type": "string",
+            "title": "Content Sha256"
+          },
+          "content_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Content Bytes"
+          },
+          "estimated_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Estimated Tokens"
+          },
+          "parent_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Parent Count"
+          },
+          "parents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Parents"
+          },
+          "evidence_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Evidence Count"
+          },
+          "warning_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Warning Count"
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "sensitive",
+              "pii_restricted"
+            ],
+            "title": "Sensitivity"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "artifact_id",
+          "type",
+          "origin_session_id",
+          "stage",
+          "role",
+          "priority",
+          "required",
+          "fetch",
+          "content_sha256",
+          "content_bytes",
+          "estimated_tokens",
+          "parent_count",
+          "evidence_count",
+          "warning_count",
+          "sensitivity"
+        ],
+        "title": "ArtifactCatalogEntry"
+      },
       "ArtifactDetail": {
         "properties": {
           "artifact_id": {
@@ -11837,6 +12605,53 @@
             },
             "type": "array",
             "title": "Warnings"
+          },
+          "parents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Parents"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactEvidenceRef"
+            },
+            "type": "array",
+            "title": "Evidence"
+          },
+          "env_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env Digest"
+          },
+          "code_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code Ref"
+          },
+          "plain_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plain Language"
           }
         },
         "type": "object",
@@ -11848,6 +12663,93 @@
           "payload"
         ],
         "title": "ArtifactDetail"
+      },
+      "ArtifactEvidenceRef": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "sql",
+              "code",
+              "stat",
+              "table",
+              "chart",
+              "profile_field",
+              "artifact"
+            ],
+            "title": "Kind"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id"
+          },
+          "locator": {
+            "type": "string",
+            "title": "Locator"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "raw",
+              "percent",
+              "currency"
+            ],
+            "title": "Unit",
+            "default": "raw"
+          },
+          "unit_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Label"
+          },
+          "unit_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Reference"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "locator"
+        ],
+        "title": "ArtifactEvidenceRef"
       },
       "ArtifactSummary": {
         "properties": {
@@ -11879,6 +12781,147 @@
         ],
         "title": "ArtifactSummary",
         "description": "Index-only listing row — never the payload (§13.2). created_at is\nomitted because the SQLite artifacts index does not store it; including it\nwould force a payload read per row."
+      },
+      "ArtifactType": {
+        "type": "string",
+        "enum": [
+          "DatasetProfile",
+          "RawDatasetProfile",
+          "QualityIssueSet",
+          "QualityContextSet",
+          "ChartSpec",
+          "RawChartSpec",
+          "RawDataPreview",
+          "MarkdownReport",
+          "ReportBundle",
+          "ReportAudit",
+          "HtmlReport",
+          "SqlResult",
+          "CodeExecutionResult",
+          "PiiReport",
+          "ChatTurnPlan",
+          "Table",
+          "SessionSummary",
+          "RelationshipCandidateSet",
+          "RelationshipValidationSet",
+          "ErDiagram",
+          "ValueMap",
+          "QuestionCandidateSet",
+          "InvestigationPlan",
+          "InvestigationApproval",
+          "ValidatedFinding",
+          "InvestigationRecord",
+          "SynthesisBrief",
+          "DecisionReport",
+          "DeepInvestigationResult",
+          "DecisionCoverage",
+          "QuestionExecutionResult",
+          "CleaningRecipe",
+          "CleaningPreview",
+          "StatTestResult",
+          "ModelCard",
+          "AnomalyScreenResult",
+          "SessionMetrics",
+          "ResourcePreflight",
+          "ColumnRoleSet",
+          "EvidenceInterleaveTranscript",
+          "FollowUpProposalSet",
+          "LoopLedger",
+          "EdaHandoff",
+          "AgentHandoff"
+        ],
+        "title": "ArtifactType"
+      },
+      "AutoEdaResourceUsage": {
+        "properties": {
+          "measurement_status": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "partial",
+              "unavailable"
+            ],
+            "title": "Measurement Status",
+            "default": "unavailable"
+          },
+          "wall_duration_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Wall Duration Seconds",
+            "default": 0.0
+          },
+          "preprocessing_duration_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Preprocessing Duration Seconds",
+            "default": 0.0
+          },
+          "ingest_duration_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Ingest Duration Seconds",
+            "default": 0.0
+          },
+          "processing_mode": {
+            "type": "string",
+            "enum": [
+              "exact_in_memory",
+              "metadata_only",
+              "unknown"
+            ],
+            "title": "Processing Mode",
+            "default": "unknown"
+          },
+          "preflight_status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "limited",
+              "rejected",
+              "unavailable"
+            ],
+            "title": "Preflight Status",
+            "default": "unavailable"
+          },
+          "requested_dataset_workers": {
+            "type": "integer",
+            "maximum": 2.0,
+            "minimum": 1.0,
+            "title": "Requested Dataset Workers",
+            "default": 1
+          },
+          "effective_dataset_workers": {
+            "type": "integer",
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Effective Dataset Workers",
+            "default": 0
+          },
+          "worker_adjustment_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Adjustment Reason"
+          },
+          "inputs": {
+            "$ref": "#/components/schemas/EdaInputMetrics"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/EdaMemoryMetrics"
+          },
+          "artifacts": {
+            "$ref": "#/components/schemas/EdaArtifactMetrics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AutoEdaResourceUsage",
+        "description": "Nested SessionMetrics v6 payload; defaults keep legacy runs readable."
       },
       "BoardCard": {
         "properties": {
@@ -13559,6 +14602,341 @@
         ],
         "title": "CompareRuntimeView"
       },
+      "CompareScopeCounts": {
+        "properties": {
+          "added": {
+            "type": "integer",
+            "title": "Added",
+            "default": 0
+          },
+          "removed": {
+            "type": "integer",
+            "title": "Removed",
+            "default": 0
+          },
+          "changed": {
+            "type": "integer",
+            "title": "Changed",
+            "default": 0
+          },
+          "same": {
+            "type": "integer",
+            "title": "Same",
+            "default": 0
+          },
+          "unavailable": {
+            "type": "integer",
+            "title": "Unavailable",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "CompareScopeCounts"
+      },
+      "CompareScopeField": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value"
+          },
+          "value_kind": {
+            "type": "string",
+            "enum": [
+              "text",
+              "number",
+              "status",
+              "list",
+              "code"
+            ],
+            "title": "Value Kind",
+            "default": "text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "value"
+        ],
+        "title": "CompareScopeField",
+        "description": "One bounded, display-ready property of a scope record.\n\nScope APIs deliberately do not return arbitrary artifact payloads. Complex\nvalues are summarized by the application service into text/list/code\nfields, while comparison itself uses a private canonical representation."
+      },
+      "CompareScopeItem": {
+        "properties": {
+          "match_key": {
+            "type": "string",
+            "title": "Match Key"
+          },
+          "matcher_version": {
+            "type": "string",
+            "title": "Matcher Version"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "high",
+              "medium",
+              "none"
+            ],
+            "title": "Confidence"
+          },
+          "match_status": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "strong",
+              "probable",
+              "unmatched"
+            ],
+            "title": "Match Status"
+          },
+          "change": {
+            "type": "string",
+            "enum": [
+              "added",
+              "removed",
+              "changed",
+              "same",
+              "unavailable"
+            ],
+            "title": "Change"
+          },
+          "left": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompareScopeRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "right": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompareScopeRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "changed_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Changed Fields"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "match_key",
+          "matcher_version",
+          "reason",
+          "confidence",
+          "match_status",
+          "change"
+        ],
+        "title": "CompareScopeItem"
+      },
+      "CompareScopeRecord": {
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "title": "Record Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "source_session_id": {
+            "type": "string",
+            "title": "Source Session Id"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Ids"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/CompareScopeField"
+            },
+            "type": "array",
+            "title": "Fields"
+          }
+        },
+        "type": "object",
+        "required": [
+          "record_id",
+          "title",
+          "kind",
+          "source_session_id"
+        ],
+        "title": "CompareScopeRecord"
+      },
+      "CompareScopeSideState": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "value",
+              "missing",
+              "unavailable"
+            ],
+            "title": "State"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "CompareScopeSideState"
+      },
+      "CompareScopeView": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "questions",
+              "analysis",
+              "findings",
+              "report",
+              "artifacts",
+              "execution"
+            ],
+            "title": "Scope"
+          },
+          "left": {
+            "$ref": "#/components/schemas/CompareSessionSide"
+          },
+          "right": {
+            "$ref": "#/components/schemas/CompareSessionSide"
+          },
+          "left_state": {
+            "$ref": "#/components/schemas/CompareScopeSideState"
+          },
+          "right_state": {
+            "$ref": "#/components/schemas/CompareScopeSideState"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/CompareScopeCounts"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CompareScopeItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "scope",
+          "left",
+          "right",
+          "left_state",
+          "right_state",
+          "counts"
+        ],
+        "title": "CompareScopeView",
+        "description": "Shared envelope for every lazily loaded semantic comparison scope."
+      },
       "CompareSessionSide": {
         "properties": {
           "session_id": {
@@ -14366,6 +15744,66 @@
           "columns"
         ],
         "title": "DatasetProfileSummary"
+      },
+      "DatasetQualitySummary": {
+        "properties": {
+          "critical": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Critical"
+          },
+          "warn": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Warn"
+          },
+          "info": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Info"
+          },
+          "material_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Material Codes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "critical",
+          "warn",
+          "info"
+        ],
+        "title": "DatasetQualitySummary"
+      },
+      "DatasetReadiness": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "limited",
+              "blocked"
+            ],
+            "title": "Status"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reasons"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "DatasetReadiness"
       },
       "DatasetSchema": {
         "properties": {
@@ -15325,6 +16763,205 @@
         ],
         "title": "DistributionCategory"
       },
+      "EdaArtifactMetrics": {
+        "properties": {
+          "artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Artifact Count",
+            "default": 0
+          },
+          "storage_bytes_excluding_session_metrics": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Storage Bytes Excluding Session Metrics",
+            "default": 0
+          },
+          "canonical_json_bytes_excluding_session_metrics": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Canonical Json Bytes Excluding Session Metrics",
+            "default": 0
+          },
+          "agent_handoff_payload_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Agent Handoff Payload Bytes",
+            "default": 0
+          },
+          "default_context_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Default Context Bytes",
+            "default": 0
+          },
+          "default_context_estimated_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Default Context Estimated Tokens",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "EdaArtifactMetrics"
+      },
+      "EdaDataFootprint": {
+        "properties": {
+          "dataset_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Dataset Count",
+            "default": 0
+          },
+          "file_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "File Bytes",
+            "default": 0
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Rows",
+            "default": 0
+          },
+          "columns": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Columns",
+            "default": 0
+          },
+          "max_rows": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Rows",
+            "default": 0
+          },
+          "max_columns": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Columns",
+            "default": 0
+          },
+          "frame_deep_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Frame Deep Bytes",
+            "default": 0
+          },
+          "measurement": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "estimated",
+              "unavailable"
+            ],
+            "title": "Measurement",
+            "default": "unavailable"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "EdaDataFootprint",
+        "description": "Aggregate shape and memory footprint for analysis or raw-lineage frames."
+      },
+      "EdaInputMetrics": {
+        "properties": {
+          "analysis": {
+            "$ref": "#/components/schemas/EdaDataFootprint"
+          },
+          "raw_lineage": {
+            "$ref": "#/components/schemas/EdaDataFootprint"
+          },
+          "unique_file_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unique File Bytes",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "EdaInputMetrics"
+      },
+      "EdaMemoryMetrics": {
+        "properties": {
+          "baseline_peak_rss_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Peak Rss Bytes"
+          },
+          "peak_rss_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Rss Bytes"
+          },
+          "peak_rss_delta_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Rss Delta Bytes"
+          },
+          "peak_rss_method": {
+            "type": "string",
+            "enum": [
+              "getrusage_ru_maxrss",
+              "get_process_memory_info_peak_working_set",
+              "unavailable"
+            ],
+            "title": "Peak Rss Method",
+            "default": "unavailable"
+          },
+          "working_set_budget_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Working Set Budget Bytes",
+            "default": 0
+          },
+          "estimated_working_set_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Estimated Working Set Bytes",
+            "default": 0
+          },
+          "verified_working_set_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Working Set Bytes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "EdaMemoryMetrics"
+      },
       "EntityNoteView": {
         "properties": {
           "name": {
@@ -15709,6 +17346,601 @@
         ],
         "title": "FindingsView",
         "description": "Project-scoped findings library viewed from one run."
+      },
+      "HandoffCapabilities": {
+        "properties": {
+          "cleaning": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Cleaning"
+          },
+          "profiling": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Profiling"
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Quality"
+          },
+          "visualization": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Visualization"
+          },
+          "statistics": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Statistics"
+          },
+          "modeling": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Modeling"
+          },
+          "relationships": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Relationships"
+          },
+          "questions": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Questions"
+          },
+          "report": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Report"
+          },
+          "metrics": {
+            "type": "string",
+            "enum": [
+              "available",
+              "deferred",
+              "not_run",
+              "not_applicable",
+              "failed"
+            ],
+            "title": "Metrics"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "cleaning",
+          "profiling",
+          "quality",
+          "visualization",
+          "statistics",
+          "modeling",
+          "relationships",
+          "questions",
+          "report",
+          "metrics"
+        ],
+        "title": "HandoffCapabilities"
+      },
+      "HandoffContextPolicy": {
+        "properties": {
+          "default_artifact_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Default Artifact Ids"
+          },
+          "on_demand_types": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactType"
+            },
+            "type": "array",
+            "title": "On Demand Types"
+          },
+          "excluded_by_default_types": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactType"
+            },
+            "type": "array",
+            "title": "Excluded By Default Types"
+          },
+          "max_initial_bytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Max Initial Bytes"
+          },
+          "max_initial_estimated_tokens": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Max Initial Estimated Tokens"
+          },
+          "cataloged_artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cataloged Artifact Count"
+          },
+          "default_artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Default Artifact Count"
+          },
+          "omitted_artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Omitted Artifact Count"
+          },
+          "included_question_result_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Included Question Result Count"
+          },
+          "omitted_question_result_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Omitted Question Result Count"
+          },
+          "default_artifact_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Default Artifact Bytes"
+          },
+          "default_artifact_estimated_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Default Artifact Estimated Tokens"
+          },
+          "serialized_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Serialized Bytes"
+          },
+          "estimated_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Estimated Tokens"
+          },
+          "initial_context_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Initial Context Bytes"
+          },
+          "initial_context_estimated_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Initial Context Estimated Tokens"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "max_initial_bytes",
+          "max_initial_estimated_tokens",
+          "cataloged_artifact_count",
+          "default_artifact_count",
+          "omitted_artifact_count",
+          "included_question_result_count",
+          "omitted_question_result_count",
+          "default_artifact_bytes",
+          "default_artifact_estimated_tokens",
+          "serialized_bytes",
+          "estimated_tokens",
+          "initial_context_bytes",
+          "initial_context_estimated_tokens"
+        ],
+        "title": "HandoffContextPolicy"
+      },
+      "HandoffGate": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "warn",
+              "fail",
+              "not_run"
+            ],
+            "title": "Status"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reasons"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "HandoffGate"
+      },
+      "HandoffNextAction": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "normal",
+              "low"
+            ],
+            "title": "Priority"
+          },
+          "blocking": {
+            "type": "boolean",
+            "title": "Blocking"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action",
+          "priority",
+          "blocking"
+        ],
+        "title": "HandoffNextAction"
+      },
+      "HandoffQuestionResult": {
+        "properties": {
+          "question_id": {
+            "type": "string",
+            "title": "Question Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "answered",
+              "abstained",
+              "failed",
+              "awaiting_approval"
+            ],
+            "title": "Status"
+          },
+          "execution_artifact_id": {
+            "type": "string",
+            "title": "Execution Artifact Id"
+          },
+          "sql_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Artifact Id"
+          },
+          "chart_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chart Artifact Id"
+          },
+          "finding_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Finding Count"
+          },
+          "limitation_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Limitation Count"
+          },
+          "exploratory": {
+            "type": "boolean",
+            "title": "Exploratory",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question_id",
+          "status",
+          "execution_artifact_id",
+          "finding_count",
+          "limitation_count"
+        ],
+        "title": "HandoffQuestionResult"
+      },
+      "HandoffReport": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "limited",
+              "failed",
+              "not_generated"
+            ],
+            "title": "Status"
+          },
+          "audit_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Artifact Id"
+          },
+          "bundle_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Artifact Id"
+          },
+          "markdown_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Markdown Artifact Id"
+          },
+          "html_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Html Artifact Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "HandoffReport"
+      },
+      "HandoffRun": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "completed_with_limits"
+            ],
+            "title": "Status"
+          },
+          "producer_version": {
+            "type": "string",
+            "title": "Producer Version"
+          },
+          "execution_fingerprint": {
+            "type": "string",
+            "title": "Execution Fingerprint"
+          },
+          "input_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Input Hashes"
+          },
+          "pipeline_artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Pipeline Artifact Count"
+          },
+          "persisted_source_artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Persisted Source Artifact Count"
+          },
+          "referenced_external_artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Referenced External Artifact Count"
+          },
+          "artifact_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Artifact Count"
+          },
+          "artifact_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Artifact Counts"
+          },
+          "source_inventory_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Source Inventory Count"
+          },
+          "source_inventory_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Inventory Digest"
+          },
+          "external_inventory_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "External Inventory Digest"
+          },
+          "lineage_candidate_parent_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Lineage Candidate Parent Count"
+          },
+          "lineage_parent_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Lineage Parent Count"
+          },
+          "lineage_parents_truncated": {
+            "type": "boolean",
+            "title": "Lineage Parents Truncated",
+            "default": false
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "project_id",
+          "session_id",
+          "status",
+          "producer_version",
+          "execution_fingerprint",
+          "pipeline_artifact_count",
+          "persisted_source_artifact_count",
+          "referenced_external_artifact_count",
+          "artifact_count",
+          "source_inventory_count",
+          "source_inventory_digest",
+          "external_inventory_digest",
+          "lineage_candidate_parent_count",
+          "lineage_parent_count"
+        ],
+        "title": "HandoffRun"
       },
       "HealthStatusView": {
         "properties": {
@@ -16337,6 +18569,7 @@
               "type": "string"
             },
             "type": "array",
+            "maxItems": 20,
             "minItems": 1,
             "title": "Datasets"
           },
@@ -16371,6 +18604,24 @@
             "type": "boolean",
             "title": "Generate Report",
             "default": true
+          },
+          "dataset_workers": {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Dataset Workers",
+            "default": 1
+          },
+          "resource_limit_action": {
+            "type": "string",
+            "enum": [
+              "limited",
+              "reject"
+            ],
+            "title": "Resource Limit Action",
+            "default": "limited"
           },
           "llm": {
             "type": "string",
@@ -19189,6 +21440,50 @@
         "title": "RelationshipNode",
         "description": "One dataset of the run, as a node of the relationship graph."
       },
+      "RelationshipReadiness": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_applicable",
+              "deferred",
+              "materialized",
+              "validated",
+              "rejected"
+            ],
+            "title": "Status"
+          },
+          "cross_table_claims_allowed": {
+            "type": "boolean",
+            "title": "Cross Table Claims Allowed"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "artifact_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Artifact Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "cross_table_claims_allowed"
+        ],
+        "title": "RelationshipReadiness"
+      },
       "RelationshipValidateRequest": {
         "properties": {
           "action_hash": {
@@ -20067,7 +22362,7 @@
           "schema_version": {
             "type": "integer",
             "title": "Schema Version",
-            "default": 5
+            "default": 6
           },
           "session_id": {
             "type": "string",
@@ -20242,6 +22537,9 @@
             "type": "number",
             "title": "Duration Seconds",
             "default": 0.0
+          },
+          "resource_usage": {
+            "$ref": "#/components/schemas/AutoEdaResourceUsage"
           },
           "event_count": {
             "type": "integer",

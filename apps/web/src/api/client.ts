@@ -28,6 +28,7 @@ export type ApiErrorEnvelope = Schemas["ApiErrorEnvelope"];
 export type ReportView = Schemas["ReportView"];
 export type ArtifactSummary = Schemas["ArtifactSummary"];
 export type ArtifactDetail = Schemas["ArtifactDetail"];
+export type AgentHandoffDetail = Schemas["AgentHandoffDetail"];
 export type ArtifactPage = Schemas["Page_ArtifactSummary_"];
 export type UploadStatus = Schemas["UploadStatus"];
 export type JobCreateRequest = Schemas["JobCreateRequest"];
@@ -70,6 +71,17 @@ export type CompareSessionSide = Schemas["CompareSessionSide"];
 export type CompareMetricRow = Schemas["CompareMetricRow"];
 export type CompareTextRow = Schemas["CompareTextRow"];
 export type CompareArtifactDelta = Schemas["CompareArtifactDelta"];
+export type CompareScopeName =
+  | "questions"
+  | "analysis"
+  | "findings"
+  | "report"
+  | "artifacts"
+  | "execution";
+export type CompareScopeView = Schemas["CompareScopeView"];
+export type CompareScopeItem = Schemas["CompareScopeItem"];
+export type CompareScopeRecord = Schemas["CompareScopeRecord"];
+export type CompareScopeCounts = Schemas["CompareScopeCounts"];
 export type CompareNumberValue = Schemas["CompareValue_float_"];
 export type CompareIntegerValue = Schemas["CompareValue_int_"];
 export type CompareStringValue = Schemas["CompareValue_str_"];
@@ -482,6 +494,11 @@ export const api = {
       { signal },
     ),
 
+  getAgentHandoff: (sessionId: string, signal?: AbortSignal) =>
+    apiFetch<AgentHandoffDetail>(`/sessions/${enc(sessionId)}/agent-handoff`, {
+      signal,
+    }),
+
   getQuality: (sessionId: string, signal?: AbortSignal) =>
     apiFetch<QualityView>(`/sessions/${enc(sessionId)}/quality`, { signal }),
 
@@ -651,6 +668,27 @@ export const api = {
       `/compare?left=${enc(left)}&right=${enc(right)}`,
       { signal },
     ),
+
+  compareScope: (
+    scope: CompareScopeName,
+    left: string,
+    right: string,
+    opts: {
+      filter?: "all" | "differences";
+      limit?: number;
+      cursor?: string;
+    } = {},
+    signal?: AbortSignal,
+  ) => {
+    const params = new URLSearchParams({ left, right });
+    if (opts.filter) params.set("filter", opts.filter);
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    return apiFetch<CompareScopeView>(
+      `/compare/${enc(scope)}?${params.toString()}`,
+      { signal },
+    );
+  },
 
   listSkills: (
     sessionId: string,

@@ -62,6 +62,7 @@ export const queryKeys = {
     ["artifact", sessionId, artifactId] as const,
   quality: (sessionId: string) => ["quality", sessionId] as const,
   edaHandoff: (sessionId: string) => ["eda-handoff", sessionId] as const,
+  agentHandoff: (sessionId: string) => ["agent-handoff", sessionId] as const,
   profiles: (sessionId: string) => ["profiles", sessionId] as const,
   charts: (sessionId: string) => ["charts", sessionId] as const,
   chart: (sessionId: string, chartId: string) => ["chart", sessionId, chartId] as const,
@@ -70,6 +71,12 @@ export const queryKeys = {
   findings: (sessionId: string) => ["findings", sessionId] as const,
   semantic: (sessionId: string) => ["semantic", sessionId] as const,
   compare: (left: string, right: string) => ["compare", left, right] as const,
+  compareScope: (
+    scope: string,
+    left: string,
+    right: string,
+    filter: "all" | "differences",
+  ) => ["compare", "scope", scope, left, right, { filter }] as const,
   skills: (sessionId: string) => ["skills", sessionId] as const,
   relationships: (sessionId: string) => ["relationships", sessionId] as const,
   job: (jobId: string) => ["job", jobId] as const,
@@ -304,6 +311,16 @@ export function useEdaHandoff(sessionId: string) {
   });
 }
 
+/* Final, versioned contract for downstream analysis agents. Unlike the
+ * early EdaHandoff gate, this exists only after the completed publish barrier. */
+export function useAgentHandoff(sessionId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.agentHandoff(sessionId),
+    queryFn: ({ signal }) => api.getAgentHandoff(sessionId, signal),
+    enabled: enabled && Boolean(sessionId),
+  });
+}
+
 export function useProfiles(sessionId: string) {
   return useQuery({
     queryKey: queryKeys.profiles(sessionId),
@@ -330,10 +347,11 @@ export function useChart(sessionId: string, chartId: string, enabled: boolean) {
   });
 }
 
-export function useQuestions(sessionId: string) {
+export function useQuestions(sessionId: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.questions(sessionId),
     queryFn: ({ signal }) => api.listQuestions(sessionId, signal),
+    enabled: enabled && Boolean(sessionId),
   });
 }
 
@@ -371,6 +389,32 @@ export function useCompare(left: string, right: string) {
     queryKey: queryKeys.compare(left, right),
     queryFn: ({ signal }) => api.compareSessions(left, right, signal),
     enabled: Boolean(left) && Boolean(right),
+  });
+}
+
+export function useCompareScope(
+  scope: import("./client").CompareScopeName,
+  left: string,
+  right: string,
+  filter: "all" | "differences",
+) {
+  return useInfiniteQuery({
+    queryKey: queryKeys.compareScope(scope, left, right, filter),
+    queryFn: ({ pageParam, signal }) =>
+      api.compareScope(
+        scope,
+        left,
+        right,
+        {
+          filter,
+          limit: RESOURCE_PAGE_SIZE,
+          cursor: pageParam,
+        },
+        signal,
+      ),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    enabled: Boolean(scope && left && right),
   });
 }
 

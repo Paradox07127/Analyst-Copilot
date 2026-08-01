@@ -226,9 +226,16 @@ function SessionNavGroups({
 
 /* The section links only exist once a session is loaded: every one of them
  * interpolates a session id, so before that they would all 404. */
-export function SessionNav() {
-  const { projectId, sessionId } = useParams();
-  if (!projectId) return null;
-  if (!sessionId) return null;
+export function SessionNav({
+  projectId: projectIdProp,
+  sessionId: sessionIdProp,
+}: {
+  projectId?: string;
+  sessionId?: string;
+} = {}) {
+  const route = useParams();
+  const projectId = projectIdProp ?? route.projectId;
+  const sessionId = sessionIdProp ?? route.sessionId;
+  if (!projectId || !sessionId) return null;
   return <SessionNavGroups projectId={projectId} sessionId={sessionId} />;
 }

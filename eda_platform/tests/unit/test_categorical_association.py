@@ -2,9 +2,13 @@
 
 from pathlib import Path
 
+import pandas as pd
+
 from eda_platform.schemas.artifacts import AnalysisTable
+from eda_platform.schemas.datasets import DatasetRecord
+from eda_platform.tools import analysis
 from eda_platform.tools.analysis import create_analysis_tables
-from eda_platform.tools.loader import load_csv
+from eda_platform.tools.loader import LoadedDataset, load_csv
 from eda_platform.tools.profiler import profile_dataset
 
 
@@ -76,3 +80,50 @@ def test_association_reports_nothing_when_only_one_category_exists(
         rows.append(f"g,{float(index)}")
 
     assert _association_table(tmp_path, rows) is None
+
+
+def test_wide_large_association_is_column_and_row_bounded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(analysis, "_MAX_ASSOCIATION_SAMPLE_ROWS", 50)
+    row_count = 100
+    frame = pd.DataFrame(
+        {
+            **{
+                f"cat_{column:02d}": [f"g{(row + column) % 3}" for row in range(row_count)]
+                for column in range(30)
+            },
+            **{
+                f"measure_{column:02d}": [float(row + column) for row in range(row_count)]
+                for column in range(30)
+            },
+        }
+    )
+    source = tmp_path / "wide.csv"
+    source.write_text("placeholder", encoding="utf-8")
+    loaded = LoadedDataset(
+        record=DatasetRecord(
+            dataset_id="ds_wide",
+            name="wide.csv",
+            path=source,
+            content_hash="hash",
+        ),
+        frame=frame,
+    )
+    profile = profile_dataset(loaded, project_id="p", session_id="s")
+
+    artifacts = create_analysis_tables(
+        loaded, profile, project_id="p", session_id="s"
+    )
+    table = next(
+        AnalysisTable.model_validate(artifact.payload)
+        for artifact in artifacts
+        if artifact.payload["kind"] == "association"
+    )
+
+    assert "Evaluated 24 of 30 eligible categorical fields" in table.description
+    assert "24 of 30 numeric fields" in table.description
+    assert all(row["selection_is_approximate"] is True for row in table.rows)
+    assert all(row["selection_method"] == "deterministic_row_sample" for row in table.rows)
+    assert all(row["analysis_population_rows"] == row_count for row in table.rows)
+    assert all(row["pairwise_complete_n"] <= 50 for row in table.rows)

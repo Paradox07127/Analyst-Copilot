@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from eda_platform.application.services.session_service import ProjectNotFoundErr
 from eda_platform.core.ids import validate_session_id
 from eda_platform.core.store import ArtifactStore, SessionStorageDeletingError
 from eda_platform.infrastructure.job_lifecycle import JobLifecycleRepository
+from eda_platform.schemas.resource_metrics import EdaResourcePolicy
 from eda_platform.schemas.sessions import TraceEvent
 
 SUPPORTED_JOB_KINDS = frozenset(
@@ -91,6 +93,30 @@ class EventsPage(NamedTuple):
     """False when the underlying page was full — more rows may follow immediately."""
 
 
+def _resolved_resource_policy(on_exceed: str) -> EdaResourcePolicy:
+    env_fields = {
+        "EDA_MAX_WORKING_SET_BYTES": "max_working_set_bytes",
+        "EDA_MAX_INPUT_BYTES_TOTAL": "max_input_bytes_total",
+        "EDA_MAX_SINGLE_INPUT_BYTES": "max_single_input_bytes",
+        "EDA_MAX_COLUMNS_PER_DATASET": "max_columns_per_dataset",
+        "EDA_MAX_ROWS_PER_DATASET": "max_rows_per_dataset",
+        "EDA_PREFLIGHT_SAMPLE_ROWS": "sample_rows",
+    }
+    values: dict[str, Any] = {"on_exceed": on_exceed}
+    for env_name, field_name in env_fields.items():
+        raw = os.environ.get(env_name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            values[field_name] = int(raw)
+        except ValueError as exc:
+            raise JobValidationError(f"{env_name} must be an integer") from exc
+    try:
+        return EdaResourcePolicy.model_validate(values)
+    except ValueError as exc:
+        raise JobValidationError(f"Invalid Auto-EDA resource policy: {exc}") from exc
+
+
 class JobService:
     def __init__(self, store: ArtifactStore, backend: JobBackend) -> None:
         self._store = store
@@ -108,6 +134,8 @@ class JobService:
         ml_target_column: str | None = None,
         ml_time_column: str | None = None,
         generate_report: bool = True,
+        dataset_workers: int = 1,
+        resource_limit_action: str = "limited",
         llm: str = "env",
         payload_policy: str | None = None,
         llm_env: dict[str, str] | None = None,
@@ -123,6 +151,11 @@ class JobService:
         uploaded files untouched."""
         if kind != "auto_eda":
             raise JobValidationError(f"Unsupported job kind: {kind}")
+        if dataset_workers not in {1, 2}:
+            raise JobValidationError("dataset_workers must be 1 or 2")
+        if resource_limit_action not in {"limited", "reject"}:
+            raise JobValidationError("resource_limit_action must be limited or reject")
+        resource_policy = _resolved_resource_policy(resource_limit_action)
         return self._create_and_enqueue(
             session_id,
             kind=kind,
@@ -137,6 +170,8 @@ class JobService:
                 "ml_target_column": ml_target_column,
                 "ml_time_column": ml_time_column,
                 "generate_report": generate_report,
+                "dataset_workers": dataset_workers,
+                "resource_policy": resource_policy.model_dump(mode="json"),
                 "llm": llm,
                 "payload_policy": payload_policy,
                 "precleaning": precleaning,
@@ -693,8 +728,7 @@ class JobService:
             if winner is not None:
                 raise JobConflictError(
                     str(winner["job_id"]),
-                    f"Run {lane_key or session_id} already has an active job: "
-                    f"{winner['job_id']}",
+                    f"Run {lane_key or session_id} already has an active job: {winner['job_id']}",
                 ) from None
             raise
         try:
@@ -846,10 +880,9 @@ class JobService:
             resolved = candidate.resolve()
             projects_root = (root / "projects").resolve()
             inside_workspace = resolved != root and resolved.is_relative_to(root)
-            crosses_project = (
-                resolved.is_relative_to(projects_root)
-                and not resolved.is_relative_to(project_root)
-            )
+            crosses_project = resolved.is_relative_to(
+                projects_root
+            ) and not resolved.is_relative_to(project_root)
         except OSError:
             return None
         if (

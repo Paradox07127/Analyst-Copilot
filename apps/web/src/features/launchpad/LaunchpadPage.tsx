@@ -743,6 +743,8 @@ export function NewSessionPanel({
           datasets: datasets.map((handle) => handle.dataset_id),
           business_context: businessContext,
           generate_report: true,
+          dataset_workers: 1,
+          resource_limit_action: "limited",
           llm: "env",
           precleaning: precleanEnabled(preclean) ? preclean : null,
         },
