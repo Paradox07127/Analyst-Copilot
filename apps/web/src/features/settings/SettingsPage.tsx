@@ -29,7 +29,7 @@ export function Component() {
   };
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data min-w-0 flex-col gap-4 p-6">
+    <div className="mx-auto flex w-[95%] max-w-data min-w-0 flex-col gap-4 p-6">
       <div className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold">Settings</h1>
         <p className="text-sm text-status-neutral">

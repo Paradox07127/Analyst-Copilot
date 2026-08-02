@@ -176,6 +176,9 @@ describe("Table header distributions (integration)", () => {
       "header-distribution-bin",
     );
 
+    /* The target is a full-height bucket column, so a very short painted bar
+     * is still discoverable by moving anywhere vertically in its x-range. */
+    expect(bins[0]).toHaveClass("h-full");
     fireEvent.mouseEnter(bins[0]!);
 
     expect(

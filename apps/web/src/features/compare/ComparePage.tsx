@@ -922,7 +922,7 @@ export function Component() {
   }
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-4 sm:p-6">
+    <div className="mx-auto flex w-[95%] max-w-data flex-col gap-5 p-4 sm:p-6">
       <SectionHeader
         level={1}
         title="Compare"

@@ -290,14 +290,14 @@ export function Component() {
 
   if (datasets.isPending) {
     return (
-      <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
+      <div className="mx-auto flex w-[95%] max-w-data flex-col gap-5 p-6">
         <LoadingSkeleton lines={4} label="Loading datasets" />
       </div>
     );
   }
   if (datasets.isError) {
     return (
-      <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
+      <div className="mx-auto flex w-[95%] max-w-data flex-col gap-5 p-6">
         <PageHeading />
         <ErrorState error={datasets.error} onRetry={() => datasets.refetch()} />
       </div>
@@ -305,7 +305,7 @@ export function Component() {
   }
   if (datasets.data.length === 0) {
     return (
-      <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
+      <div className="mx-auto flex w-[95%] max-w-data flex-col gap-5 p-6">
         <PageHeading />
         <EmptyState
           title="No datasets in this session"
@@ -316,7 +316,7 @@ export function Component() {
   }
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
+    <div className="mx-auto flex w-[95%] max-w-data flex-col gap-5 p-6">
       <PageHeading />
 
       <StepChain

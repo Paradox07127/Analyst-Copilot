@@ -444,6 +444,7 @@ export function useJob(jobId: string) {
   return useQuery({
     queryKey: queryKeys.job(jobId),
     queryFn: ({ signal }) => api.getJob(jobId, signal),
+    enabled: Boolean(jobId),
     staleTime: Infinity,
   });
 }

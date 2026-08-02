@@ -78,7 +78,7 @@ describe("page width adoption", () => {
     expect(roots.length, `${file}: no page root found`).toBeGreaterThan(0);
     for (const cls of roots) {
       expect(cls, file).toContain("mx-auto");
-      expect(cls, file).toContain("w-[90%]");
+      expect(cls, file).toContain("w-[95%]");
       expect(cls, file).toContain("max-w-data");
     }
   });

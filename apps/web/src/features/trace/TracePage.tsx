@@ -631,7 +631,7 @@ export function Component() {
   const total = events.data?.pages[0]?.total ?? 0;
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data min-w-0 flex-col gap-6 p-6">
+    <div className="mx-auto flex w-[95%] max-w-data min-w-0 flex-col gap-6 p-6">
       <header className="flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">Trace &amp; cost</h1>
         {metrics.data && (

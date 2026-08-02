@@ -351,7 +351,7 @@ export function Component() {
         : "loading";
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data min-w-0 flex-col gap-4 p-6">
+    <div className="mx-auto flex w-[95%] max-w-data min-w-0 flex-col gap-4 p-6">
       <SectionHeader
         level={1}
         title="Data Map"

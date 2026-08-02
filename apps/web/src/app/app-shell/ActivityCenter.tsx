@@ -27,7 +27,11 @@ import {
   type JobPhase,
 } from "../../api/job-events";
 import { SessionQualitySummary } from "../../components/session-quality-summary";
-import { useJobActivity, type ActiveJob } from "../job-activity";
+import {
+  useJobActivity,
+  type ActiveJob,
+  type JobActivitySnapshot,
+} from "../job-activity";
 import { sessionSectionPath } from "../paths";
 import { PipelineProgress } from "./PipelineProgress";
 import { Marquee } from "../../components/ui";
@@ -40,12 +44,6 @@ const PHASE_LABELS: Record<JobPhase, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
   disconnected: "Stream lost",
-};
-
-const TOAST_TEXT: Partial<Record<JobPhase, string>> = {
-  completed: "Analysis completed.",
-  failed: "Analysis failed.",
-  cancelled: "Analysis cancelled.",
 };
 
 /* Terminal and asking nothing of the user — the only runs safe to fold away. */
@@ -747,11 +745,9 @@ function useOverlayGeometry(): OverlayGeometry {
 
 function ActivityPortal({
   children,
-  toast,
   onDismiss,
 }: {
   children: ReactNode;
-  toast?: string | null;
   onDismiss?: () => void;
 }) {
   return createPortal(
@@ -768,16 +764,6 @@ function ActivityPortal({
         />
       )}
       {children}
-      {toast && (
-        <div
-          role="status"
-          /* Fade, not rise: the rise keyframe's transform would cancel the
-           * -translate-x-1/2 that centres this. */
-          className="animate-fade pointer-events-auto absolute top-16 left-1/2 -translate-x-1/2 rounded-base border border-border bg-bg px-3 py-2 text-sm shadow-overlay"
-        >
-          {toast}
-        </div>
-      )}
     </div>,
     document.body,
   );
@@ -807,11 +793,6 @@ function useActivityKeyboardShortcut() {
   }, [panelOpen, setPanelOpen]);
 }
 
-interface TrackedJobSnapshot {
-  state: JobEventsState;
-  kind: string | undefined;
-}
-
 function activityKindLabel(kind: string | undefined): string {
   if (!kind) return "Background task";
   return kind
@@ -823,11 +804,9 @@ function activityKindLabel(kind: string | undefined): string {
 function JobObserver({
   trackedJob,
   onSnapshot,
-  onSettled,
 }: {
   trackedJob: ActiveJob;
-  onSnapshot: (jobId: string, snapshot: TrackedJobSnapshot) => void;
-  onSettled: (phase: JobPhase) => void;
+  onSnapshot: (jobId: string, snapshot: JobActivitySnapshot) => void;
 }) {
   const state = useJobEvents(trackedJob.jobId, trackedJob.eventsUrl);
   const kind = useJob(trackedJob.jobId).data?.kind;
@@ -846,14 +825,12 @@ function JobObserver({
     )
       return;
     void invalidateJobResultQueries(queryClient, kind, trackedJob);
-    onSettled(state.phase);
   }, [
     state.phase,
     kind,
     queryClient,
     trackedJob,
     claimSettlement,
-    onSettled,
   ]);
 
   return null;
@@ -867,7 +844,7 @@ function RunRow({
   onDismiss,
 }: {
   trackedJob: ActiveJob;
-  snapshot: TrackedJobSnapshot | undefined;
+  snapshot: JobActivitySnapshot | undefined;
   selected: boolean;
   onSelect: (jobId: string) => void;
   onDismiss: (jobId: string) => void;
@@ -952,7 +929,7 @@ function RunsInbox({
   onDismiss,
 }: {
   jobs: ActiveJob[];
-  snapshots: ReadonlyMap<string, TrackedJobSnapshot>;
+  snapshots: ReadonlyMap<string, JobActivitySnapshot>;
   selectedJobId: string | null;
   onSelect: (jobId: string) => void;
   onDismiss: (jobId: string) => void;
@@ -1028,7 +1005,9 @@ function AgentActivityCenter() {
     launcherVisible,
     panelOpen,
     selectedJobId,
+    jobSnapshots: snapshots,
     selectJob,
+    setJobSnapshot,
     setLauncherVisible,
     setPanelOpen,
     trackedJobs,
@@ -1039,28 +1018,15 @@ function AgentActivityCenter() {
   const [section, setSection] = useState<PanelSection>(
     trackedJobs.length === 1 ? "activity" : "runs",
   );
-  const [snapshots, setSnapshots] = useState<
-    ReadonlyMap<string, TrackedJobSnapshot>
-  >(new Map());
-  const [toast, setToast] = useState<string | null>(null);
   const previousJobCount = useRef(trackedJobs.length);
   useActivityKeyboardShortcut();
 
   const onSnapshot = useCallback(
-    (jobId: string, snapshot: TrackedJobSnapshot) => {
-      setSnapshots((current) => {
-        if (current.get(jobId) === snapshot) return current;
-        const next = new Map(current);
-        next.set(jobId, snapshot);
-        return next;
-      });
+    (jobId: string, snapshot: JobActivitySnapshot) => {
+      setJobSnapshot(jobId, snapshot);
     },
-    [],
+    [setJobSnapshot],
   );
-
-  const onSettled = useCallback((phase: JobPhase) => {
-    setToast(TOAST_TEXT[phase] ?? null);
-  }, []);
 
   useEffect(() => {
     if (trackedJobs.length === 0) {
@@ -1072,24 +1038,6 @@ function AgentActivityCenter() {
     }
     previousJobCount.current = trackedJobs.length;
   }, [trackedJobs.length]);
-
-  useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => setToast(null), 6000);
-    return () => clearTimeout(timer);
-  }, [toast]);
-
-  useEffect(() => {
-    const liveIds = new Set(trackedJobs.map((job) => job.jobId));
-    setSnapshots((current) => {
-      if ([...current.keys()].every((jobId) => liveIds.has(jobId))) {
-        return current;
-      }
-      return new Map(
-        [...current.entries()].filter(([jobId]) => liveIds.has(jobId)),
-      );
-    });
-  }, [trackedJobs]);
 
   const selectedSnapshot = activeJob
     ? snapshots.get(activeJob.jobId)
@@ -1193,16 +1141,12 @@ function AgentActivityCenter() {
   };
 
   return (
-    <ActivityPortal
-      toast={toast}
-      onDismiss={panelOpen ? () => setPanelOpen(false) : undefined}
-    >
+    <ActivityPortal onDismiss={panelOpen ? () => setPanelOpen(false) : undefined}>
       {trackedJobs.map((trackedJob) => (
         <JobObserver
           key={trackedJob.jobId}
           trackedJob={trackedJob}
           onSnapshot={onSnapshot}
-          onSettled={onSettled}
         />
       ))}
       {!panelOpen && activeJob && (

@@ -1,15 +1,33 @@
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { createPortal } from "react-dom";
 import { Link, useLocation, useParams } from "react-router";
-import { useSessionDetail, useSessionMetrics } from "../../api/hooks";
+import { useSessionDetail } from "../../api/hooks";
 import {
   Badge,
   Button,
-  Dot,
-  Hint,
   IconButton,
   Marquee,
-  type Tone,
 } from "../../components/ui";
+import {
+  JOB_KIND_ACTIVITY,
+  phaseProgress,
+  type JobPhase,
+  type PhaseState,
+} from "../../api/job-events";
+import {
+  useJobActivity,
+  type ActiveJob,
+  type JobActivitySnapshot,
+} from "../job-activity";
 import { LlmStatusDot, useLlmStatus } from "./LlmStatus";
 import { NavIcon } from "./nav-icons";
 import {
@@ -20,18 +38,300 @@ import {
 } from "../theme";
 import { useWorkspaceFocus } from "../workspace-focus";
 
-function statusTone(status: string | undefined): Tone {
-  switch (status) {
-    case "completed":
-      return "ok";
-    case "running":
-      return "warn";
-    case "failed":
-    case "cancelled":
-      return "critical";
-    default:
-      return "neutral";
+const HEADER_SEGMENT: Record<PhaseState, string> = {
+  done: "bg-status-ok",
+  active: "animate-breathe bg-status-warn",
+  failed: "bg-status-critical",
+  pending: "bg-track",
+  skipped: "bg-track",
+};
+
+function matchesSession(job: ActiveJob, sessionId: string): boolean {
+  return (
+    job.sourceSessionId === sessionId ||
+    job.sessionId === sessionId ||
+    job.resultSessionId === sessionId
+  );
+}
+
+function jobKindLabel(kind: string | undefined): string {
+  if (kind === "auto_eda") return "EDA";
+  if (kind === "report_generate") return "Report";
+  if (kind === "question_exec") return "Question";
+  if (kind === "cleaning_apply" || kind === "cleaning_preview") return "Cleaning";
+  return kind ? "Task" : "Job";
+}
+
+function isDegraded(snapshot: JobActivitySnapshot | undefined): boolean {
+  return Boolean(snapshot?.state.events.some(
+    (event) =>
+      event.type === "budget_degraded" || event.summary["degraded"] === true,
+  ));
+}
+
+function jobPhaseLabel(
+  phase: JobPhase,
+  kind: string | undefined,
+  currentPhase: ReturnType<typeof phaseProgress>[number] | undefined,
+  degraded: boolean,
+): string {
+  const name = jobKindLabel(kind);
+  if (degraded) return `${name} · degraded`;
+  if (phase === "completed") return `${name} · complete`;
+  if (phase === "failed" || phase === "cancelled") return `${name} · stopped`;
+  if (phase === "queued" || phase === "connecting") return `${name} · queued`;
+  return `${name} · ${currentPhase?.label ?? "working"}`;
+}
+
+function jobStatusLabel(phase: JobPhase, degraded: boolean): string {
+  if (degraded) return "Degraded";
+  if (phase === "completed") return "Completed";
+  if (phase === "failed") return "Failed";
+  if (phase === "cancelled") return "Stopped";
+  if (phase === "queued" || phase === "connecting") return "Queued";
+  if (phase === "disconnected") return "Connection lost";
+  return "Running";
+}
+
+function readableEvent(type: string | undefined): string {
+  if (!type) return "Waiting for job events";
+  return type.replace(/[._]/g, " ");
+}
+
+function detailFromSummary(snapshot: JobActivitySnapshot | undefined): string | null {
+  const event = [...(snapshot?.state.events ?? [])]
+    .reverse()
+    .find((candidate) => candidate.type === "budget_degraded") ??
+    snapshot?.state.events.at(-1);
+  if (!event) return null;
+  for (const key of ["message", "reason", "detail", "error"]) {
+    const value = event.summary[key];
+    if (typeof value === "string" && value.trim()) return value;
   }
+  return null;
+}
+
+/* Header content sits before the session navigation in DOM order. An absolute
+ * child can therefore still be painted under later app content in some nested
+ * layout contexts, even with a high local z-index. This portal has a single,
+ * documented layer in the viewport instead:
+ *
+ *   base content / session navigation (0) < top bar (20) < Activity (40)
+ *   < header tooltip (45) < modal dialogs (50).
+ *
+ * It is intentionally pointer-events-none: a hover card explains the status;
+ * it must not steal focus or block the navigation below it. */
+function HeaderJobTooltip({
+  anchorRef,
+  id,
+  children,
+}: {
+  anchorRef: RefObject<HTMLDivElement | null>;
+  id: string;
+  children: ReactNode;
+}) {
+  const [style, setStyle] = useState<CSSProperties | null>(null);
+
+  useLayoutEffect(() => {
+    const updatePosition = () => {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = 320;
+      const gap = 8;
+      const margin = 12;
+      setStyle({
+        top: rect.bottom + gap,
+        left: Math.max(
+          margin,
+          Math.min(rect.left, window.innerWidth - width - margin),
+        ),
+      });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    /* The app has independent scroll containers, so capture catches a scroll
+     * from any one of them rather than only document scrolling. */
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [anchorRef]);
+
+  if (!style) return null;
+  return createPortal(
+    <span
+      id={id}
+      role="tooltip"
+      style={style}
+      className="pointer-events-none animate-enter fixed z-[45] flex w-80 flex-col gap-2 rounded-base border border-border bg-bg p-3 text-left text-xs leading-relaxed text-text shadow-overlay"
+    >
+      {children}
+    </span>,
+    document.body,
+  );
+}
+
+function TopBarJobProgress({
+  job,
+  snapshot,
+}: {
+  job: ActiveJob;
+  snapshot: JobActivitySnapshot | undefined;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const tooltipId = useId();
+  const jobRef = useRef<HTMLDivElement>(null);
+  const phase = snapshot?.state.phase ?? "connecting";
+  const kind = snapshot?.kind;
+  const phases = kind === "auto_eda" && snapshot ? phaseProgress(snapshot.state) : [];
+  const current = phases.find((phase) => phase.state === "active");
+  const mostRecentPhase = current ?? [...phases].reverse().find(
+    (candidate) => candidate.state === "done" || candidate.state === "failed",
+  );
+  const degraded = isDegraded(snapshot);
+
+  const states: PhaseState[] =
+    kind === "auto_eda"
+      ? phases.map((phase) => phase.state)
+      : phase === "completed" || phase === "failed" || phase === "cancelled"
+        ? Array.from({ length: 3 }, () =>
+            phase === "completed" ? "done" : "failed",
+          )
+      : phase === "running"
+        ? ["done", "active", "pending"]
+        : ["active", "pending", "pending"];
+  const label = jobPhaseLabel(phase, kind, current, degraded);
+  const status = jobStatusLabel(phase, degraded);
+  const lastEvent = snapshot?.state.events.at(-1);
+  const detail =
+    detailFromSummary(snapshot) ??
+    (degraded ? "This job continued with a reduced capability or budget." : undefined) ??
+    mostRecentPhase?.activity ??
+    (kind ? JOB_KIND_ACTIVITY[kind] : undefined) ??
+    "Waiting for this job to begin.";
+  const dot = degraded
+    ? "bg-status-warn"
+    : phase === "completed"
+      ? "bg-status-ok"
+      : phase === "failed" || phase === "cancelled"
+        ? "bg-status-critical"
+        : phase === "running"
+          ? "animate-breathe bg-status-warn"
+          : "bg-status-neutral";
+
+  return (
+    <div
+      ref={jobRef}
+      className="flex w-52 min-w-0 cursor-help flex-col gap-1 rounded-base px-2 py-1 transition-colors hover:bg-surface focus:bg-surface xl:w-60"
+      tabIndex={0}
+      aria-label={`${label}. ${status}. Focus for job details.`}
+      aria-describedby={detailsOpen ? tooltipId : undefined}
+      onMouseEnter={() => setDetailsOpen(true)}
+      onMouseLeave={() => setDetailsOpen(false)}
+      onFocus={() => setDetailsOpen(true)}
+      onBlur={() => setDetailsOpen(false)}
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        <span aria-hidden className={`size-2 shrink-0 rounded-full ${dot}`} />
+        <Marquee className="text-xs leading-tight font-medium text-text xl:text-sm">
+          {label}
+        </Marquee>
+      </span>
+      <span className="flex items-center gap-1" aria-hidden="true">
+        {states.map((state, index) => (
+          <span
+            key={index}
+            className={`h-1 flex-1 rounded-full transition-colors duration-slow ease-out-quart ${HEADER_SEGMENT[state]}`}
+          />
+        ))}
+      </span>
+      {detailsOpen && <HeaderJobTooltip anchorRef={jobRef} id={tooltipId}>
+        <span className="flex items-center justify-between gap-3">
+          <span className="text-sm font-semibold">{jobKindLabel(kind)} job</span>
+          <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+            degraded
+              ? "bg-status-warn/15 text-status-warn"
+              : phase === "completed"
+                ? "bg-status-ok/15 text-status-ok"
+                : phase === "failed" || phase === "cancelled"
+                  ? "bg-status-critical/15 text-status-critical"
+                  : "bg-surface text-status-neutral"
+          }`}>
+            {status}
+          </span>
+        </span>
+        <span className="grid grid-cols-[76px_minmax(0,1fr)] gap-x-2 gap-y-1">
+          <span className="text-status-neutral">Step</span>
+          <span>{mostRecentPhase?.label ?? "Not started"}</span>
+          <span className="text-status-neutral">Activity</span>
+          <span>{detail}</span>
+          <span className="text-status-neutral">Last event</span>
+          <span className="capitalize">{readableEvent(lastEvent?.type)}</span>
+          <span className="text-status-neutral">Job ID</span>
+          <span className="truncate font-mono" title={job.jobId}>{job.jobId}</span>
+        </span>
+        {current?.items && (
+          <span className="text-status-neutral">
+            {current.items.total
+              ? `${current.items.current} of ${current.items.total} items`
+              : `${current.items.current} item${current.items.current === 1 ? "" : "s"} processed`}
+          </span>
+        )}
+      </HeaderJobTooltip>}
+    </div>
+  );
+}
+
+/* The focused session can run several small jobs. Keep their terminal bars in
+ * place instead of collapsing them after success, so the header is a compact
+ * record of completed, queued, and degraded work. */
+function TopBarProgress({
+  jobs,
+  snapshots,
+  maxVisible = 2,
+}: {
+  jobs: ActiveJob[];
+  snapshots: ReadonlyMap<string, JobActivitySnapshot>;
+  maxVisible?: number;
+}) {
+  if (jobs.length === 0) return null;
+  const visible = jobs.slice(0, maxVisible);
+  return (
+    <div aria-label="Current session job progress" className="flex items-center gap-2">
+      {visible.map((job) => (
+        <TopBarJobProgress
+          key={job.jobId}
+          job={job}
+          snapshot={snapshots.get(job.jobId)}
+        />
+      ))}
+      {jobs.length > visible.length && (
+        <span className="text-xs font-medium text-status-neutral">+{jobs.length - visible.length}</span>
+      )}
+    </div>
+  );
+}
+
+/* The header remains useful on a laptop: one widened card at ordinary desktop
+ * widths, two only once there is enough room for both without overlapping the
+ * route context or the controls on the right. */
+function useHeaderJobLimit(): number {
+  const media = "(min-width: 1536px)";
+  const [limit, setLimit] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia?.(media).matches ? 2 : 1,
+  );
+
+  useEffect(() => {
+    const query = window.matchMedia?.(media);
+    if (!query) return;
+    const sync = () => setLimit(query.matches ? 2 : 1);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  return limit;
 }
 
 interface TopBarProps {
@@ -62,21 +362,22 @@ export function TopBar({
   const sessionId = splitContext?.sessionId ?? route.sessionId;
   const atHome = pathname === "/projects";
   const llm = useLlmStatus();
+  const { trackedJobs, jobSnapshots } = useJobActivity();
   const [theme, setThemeState] = useState<Theme>(() => getEffectiveTheme());
-  // Status and cost were hardcoded placeholders; they now read the same
-  // sources as the Data Map and Trace pages so the header cannot disagree.
   const runDetail = useSessionDetail(sessionId ?? "");
-  const metrics = useSessionMetrics(sessionId ?? "");
 
-  /* Without a stored choice the CSS follows the OS via prefers-color-scheme;
-   * keep the button's label in sync when the OS theme changes. */
+  /* A manual choice is persistent. Otherwise, update the default as local
+   * time crosses the daytime/night-time boundary without a page reload. */
   useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => {
-      if (!hasStoredTheme()) setThemeState(getEffectiveTheme());
+    const syncTimeTheme = () => {
+      if (hasStoredTheme()) return;
+      const next = getEffectiveTheme();
+      document.documentElement.dataset["theme"] = next;
+      setThemeState(next);
     };
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
+    syncTimeTheme();
+    const timer = window.setInterval(syncTimeTheme, 60_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const toggleTheme = () => {
@@ -85,19 +386,22 @@ export function TopBar({
     setThemeState(next);
   };
 
-  const status = sessionId ? runDetail.data?.status : undefined;
   /* The run id was the headline here, which meant the bar read
    * "run_1785039866191_k1det2" while the run's actual name sat unused in the
    * same payload. Title leads; the id stays visible but subordinate, because
    * it is what you paste into a bug report. */
   const runTitle = runDetail.data?.title;
+  const headerJobLimit = useHeaderJobLimit();
+  const focusedJobs = sessionId
+    ? trackedJobs.filter((job) => matchesSession(job, sessionId))
+    : [];
 
   return (
     /* Named because a page's own <header> also maps to the banner role, and
      * an unnamed query then matches two landmarks. */
     <header
       aria-label="Workbench"
-      className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-3 py-2 sm:h-12 sm:gap-3 sm:px-4 sm:py-0"
+      className="relative z-20 flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-3 py-2 sm:h-12 sm:gap-3 sm:px-4 sm:py-0"
     >
       {/* Wrapper, not `className="hidden md:…"` on the control: IconButton's
         * base sets inline-flex and Tailwind resolves that conflict by CSS
@@ -152,38 +456,22 @@ export function TopBar({
           </>
         )}
       </nav>
+      <div className="pointer-events-none absolute left-1/2 hidden -translate-x-1/2 lg:flex">
+        {/* One generous status card fits without colliding with the context and
+         * controls on ordinary laptops. Ultra-wide screens expose a second
+         * card; the +N marker keeps every remaining job accounted for. */}
+        <span className="pointer-events-auto">
+          <TopBarProgress
+            jobs={focusedJobs}
+            snapshots={jobSnapshots}
+            maxVisible={headerJobLimit}
+          />
+        </span>
+      </div>
       <div className="ml-auto flex shrink-0 items-center gap-1 text-sm sm:gap-2">
         <Button size="sm" onClick={onOpenSessions} className="md:hidden">
           Sessions
         </Button>
-        {sessionId && (
-          <span
-            className="hidden items-center gap-1.5 sm:flex"
-            title="Session status"
-          >
-            <Dot
-              tone={statusTone(status)}
-              motion={status === "running" ? "working" : undefined}
-            />
-            <span className="text-sm">{status ?? "…"}</span>
-          </span>
-        )}
-        {sessionId && (
-          <span className="hidden items-center gap-1 lg:flex">
-            <Badge tone="neutral" variant="outline">
-              <span className="tabular font-mono">
-                {typeof metrics.data?.est_cost_usd === "number"
-                  ? `$${metrics.data.est_cost_usd.toFixed(4)}`
-                  : "$—"}
-              </span>
-            </Badge>
-            <Hint label="Estimated cost">
-              Model spend for this session, priced from the token counts in its
-              trace. It is an estimate: your provider's invoice is the
-              authority.
-            </Hint>
-          </span>
-        )}
         {/* The rail footer used to own this, which meant collapsing the rail
          * hid the one signal that says whether a session will call a paid model. */}
         {llm && (

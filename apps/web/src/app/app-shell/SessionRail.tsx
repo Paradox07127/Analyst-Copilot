@@ -965,7 +965,7 @@ export function SessionRail() {
   return (
     <aside
       aria-label="Sessions"
-      className="flex h-full flex-col border-r border-rail-border bg-rail-bg"
+      className="flex h-full flex-col bg-rail-bg"
     >
       {/* Start, find, browse — the three things you can do that are not "open
        * this session", in one block above the list they act on. Search was an

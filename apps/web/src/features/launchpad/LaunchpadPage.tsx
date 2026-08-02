@@ -381,8 +381,9 @@ function SupportDocsBar({
         type="button"
         onClick={() => inputRef.current?.click()}
         disabled={disabled || upload.isPending}
-        className="rounded-base px-1.5 py-1 underline-offset-2 hover:text-text hover:underline disabled:opacity-50"
+        className="inline-flex items-center gap-1.5 rounded-base border border-border bg-surface px-2 py-1.5 font-medium text-text shadow-sm transition-colors hover:border-primary/50 hover:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-50"
       >
+        <span aria-hidden="true" className="text-sm leading-none">+</span>
         {upload.isPending
           ? "Uploading…"
           : items.length === 0
@@ -574,6 +575,12 @@ export function NewSessionPanel({
   const existing = (projectUploads.data ?? []).filter(
     (handle) => !freshIds.has(handle.dataset_id),
   );
+  const selectableExisting = existing.filter(
+    (handle) => handle.ingest_status === "ready" && Boolean(handle.original_uri),
+  );
+  const allExistingSelected =
+    selectableExisting.length > 0 &&
+    selectableExisting.every((handle) => reusedIds.includes(handle.dataset_id));
 
   const setDatasetSelected = (datasetId: string, selected: boolean) => {
     setUploads((entries) =>
@@ -587,6 +594,17 @@ export function NewSessionPanel({
           ? current
           : [...current, datasetId]
         : current.filter((id) => id !== datasetId),
+    );
+  };
+
+  const setAllExistingSelected = (selected: boolean) => {
+    const selectableIds = new Set(
+      selectableExisting.map((handle) => handle.dataset_id),
+    );
+    setReusedIds((current) =>
+      selected
+        ? Array.from(new Set([...current, ...selectableIds]))
+        : current.filter((id) => !selectableIds.has(id)),
     );
   };
 
@@ -919,7 +937,7 @@ export function NewSessionPanel({
       className={
         layout === "route"
           ? "grid min-w-0 grid-cols-1 items-start gap-5 @2xl/launchpad:grid-cols-[minmax(0,1fr)_19rem]"
-          : "flex min-w-0 flex-col gap-3"
+          : "flex min-w-0 flex-col gap-2"
       }
     >
       <div className="flex min-w-0 flex-col gap-4">
@@ -1003,7 +1021,18 @@ export function NewSessionPanel({
             <h2 id="launchpad-data-title" className="text-sm font-semibold">
               Data
             </h2>
-            <Badge tone="brand">Required</Badge>
+            <div className="flex items-center gap-2">
+              {selectableExisting.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setAllExistingSelected(!allExistingSelected)}
+                >
+                  {allExistingSelected ? "Clear selection" : "Select all"}
+                </Button>
+              )}
+              <Badge tone="brand">Required</Badge>
+            </div>
           </div>
           {rows.length > 0 && (
             <ul
@@ -1027,7 +1056,9 @@ export function NewSessionPanel({
             className={`flex flex-wrap items-center gap-x-3 gap-y-2 px-3 ${
               rows.length > 0 || projectUploads.isPending
                 ? "border-t border-hairline py-2.5"
-                : "py-8"
+                : layout === "inline"
+                  ? "py-3"
+                  : "py-8"
             }`}
           >
             <Button
@@ -1037,11 +1068,6 @@ export function NewSessionPanel({
             >
               Choose CSV files
             </Button>
-            <span className="text-sm text-status-neutral">
-              {rows.length > 0
-                ? "or drop more here"
-                : "or drop CSVs here. One table per file; joins are detected automatically."}
-            </span>
             <input
               ref={fileInputRef}
               aria-label="Data files (.csv)"
@@ -1080,14 +1106,14 @@ export function NewSessionPanel({
             aria-label="Business context"
             value={businessContext}
             onChange={(event) => setBusinessContext(event.target.value)}
-            rows={3}
+            rows={layout === "inline" ? 1 : 3}
             placeholder="What is this data about, and what decision should the analysis support?"
             className="w-full resize-y rounded-base border border-border bg-bg p-2.5 text-sm outline-none placeholder:text-status-neutral"
           />
         </label>
 
         {layout === "inline" && (
-          <div className="flex flex-col overflow-hidden rounded-base border border-border bg-surface">
+          <div className="flex flex-col rounded-base border border-border bg-surface">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5">
               {runOptions}
               <span className="ml-auto flex flex-wrap items-center gap-3">
@@ -1184,7 +1210,7 @@ export function NewSessionPanel({
 export function Component() {
   const { projectId } = useParams();
   return (
-    <div className="mx-auto grid w-[90%] max-w-data grid-cols-1 items-start gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_19rem]">
+    <div className="mx-auto grid w-[95%] max-w-data grid-cols-1 items-start gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_19rem]">
       <header className="flex flex-col gap-1 lg:col-span-2">
         <h1 className="text-xl font-semibold">New session</h1>
         <p className="text-sm text-status-neutral">

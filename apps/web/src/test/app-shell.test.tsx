@@ -31,6 +31,19 @@ const GROUPS: Record<string, string[]> = {
   "Trust & trace": ["Trace & cost", "Artifacts"],
 };
 
+async function chooseStage(
+  user: ReturnType<typeof userEvent.setup>,
+  title: string,
+) {
+  const navigation = screen.getByRole("navigation", {
+    name: "Session sections",
+  });
+  await user.click(within(navigation).getByRole("button", { expanded: false }));
+  await user.click(
+    within(navigation).getByRole("button", { name: `Show ${title} pages` }),
+  );
+}
+
 describe("App Shell", () => {
   it("answers grain and readiness in the inspector on data pages", async () => {
     server.use(
@@ -263,13 +276,13 @@ describe("App Shell", () => {
       expect(
         screen.queryByRole("heading", { name: "Context Inspector" }),
       ).not.toBeInTheDocument();
-      /* The section nav wraps at this width instead of becoming a second
-       * horizontal scroller inside a page the body already cannot scroll. */
+      /* The compact session nav stays one row high; its page links scroll
+       * inside their own strip rather than creating a second page-wide wrap. */
       expect(
         within(
           screen.getByRole("navigation", { name: "Session sections" }),
         ).getByRole("list", { name: "Understand the data" }),
-      ).toHaveClass("flex-wrap");
+      ).toHaveClass("overflow-x-auto");
       expect(
         screen.getByRole("navigation", { name: "Session sections" }),
       ).not.toHaveClass("overflow-x-auto");
@@ -317,7 +330,7 @@ describe("Run navigation groups", () => {
     await screen.findByRole("heading", { name: "Data Map" });
 
     for (const [title, pages] of Object.entries(GROUPS)) {
-      await user.click(screen.getByRole("button", { name: title }));
+      await chooseStage(user, title);
       const list = await screen.findByRole("list", { name: title });
       /* Table preview only appears once the run's datasets resolve. */
       await waitFor(() =>
@@ -325,7 +338,6 @@ describe("Run navigation groups", () => {
           within(list).getAllByRole("link").map((link) => link.textContent),
         ).toEqual(pages),
       );
-      await user.click(screen.getByRole("button", { name: title }));
     }
   });
 
@@ -335,7 +347,7 @@ describe("Run navigation groups", () => {
     await screen.findByRole("heading", { name: "Data Map" });
 
     for (const title of Object.keys(GROUPS)) {
-      await user.click(screen.getByRole("button", { name: title }));
+      await chooseStage(user, title);
       const list = await screen.findByRole("list", { name: title });
       for (const link of within(list).getAllByRole("link")) {
         expect(
@@ -343,7 +355,6 @@ describe("Run navigation groups", () => {
           `${link.textContent} has no icon`,
         ).not.toBeNull();
       }
-      await user.click(screen.getByRole("button", { name: title }));
     }
   });
 
@@ -357,7 +368,7 @@ describe("Run navigation groups", () => {
     });
     expect(understand).toHaveAttribute("aria-current", "true");
 
-    await user.click(screen.getByRole("button", { name: "Trust & trace" }));
+    await chooseStage(user, "Trust & trace");
     await user.click(await screen.findByRole("link", { name: "Trace & cost" }));
 
     expect(
@@ -366,12 +377,9 @@ describe("Run navigation groups", () => {
     expect(
       screen.getByRole("button", { name: "Trust & trace" }),
     ).toHaveAttribute("aria-current", "true");
-    expect(understand).not.toHaveAttribute("aria-current", "true");
   });
 
-  /* The stage row is a tab strip, not a menu: exactly one stage's pages are on
-   * screen at any time, and looking ahead at another stage does not navigate. */
-  it("shows one stage's pages at a time and does not navigate on pick", async () => {
+  it("expands stages on demand and does not navigate on pick", async () => {
     const user = userEvent.setup();
     renderAppAt("/projects/p1/sessions/r1/data-map");
     await screen.findByRole("heading", { name: "Data Map" });
@@ -380,8 +388,14 @@ describe("Run navigation groups", () => {
       screen.getByRole("list", { name: "Understand the data" }),
     ).toBeInTheDocument();
 
+    const trigger = screen.getByRole("button", { name: "Understand the data" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await user.click(trigger);
+    expect(
+      screen.getByRole("button", { name: "Show Investigate with the agent pages" }),
+    ).toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "Investigate with the agent" }),
+      screen.getByRole("button", { name: "Show Investigate with the agent pages" }),
     );
     expect(
       await screen.findByRole("list", { name: "Investigate with the agent" }),
@@ -390,11 +404,11 @@ describe("Run navigation groups", () => {
       screen.queryByRole("list", { name: "Understand the data" }),
     ).not.toBeInTheDocument();
     /* Picking a stage is a look-ahead; the open page is unchanged and the
-     * stage that owns it keeps `aria-current`. */
+     * picker folds away immediately. */
     expect(screen.getByRole("heading", { name: "Data Map" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Understand the data" }),
-    ).toHaveAttribute("aria-current", "true");
+      screen.queryByRole("button", { name: "Show Understand the data pages" }),
+    ).not.toBeInTheDocument();
   });
 
   it("hides session navigation without an open run", async () => {

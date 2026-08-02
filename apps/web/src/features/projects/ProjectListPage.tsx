@@ -40,6 +40,8 @@ const MAX_PROJECT_NAME_LENGTH = 200;
 const DEFAULT_USAGE_WINDOW_DAYS = 180;
 const MONTH_USAGE_WINDOW_DAYS = 30;
 const WEEK_USAGE_WINDOW_DAYS = 7;
+const RECENT_SESSION_LIMIT = 6;
+const PROJECT_LIMIT = 2;
 type UsagePeriod = "week" | "month" | "half-year";
 
 /* Mirrors the server's project_id rules (run_service._validated_project_id):
@@ -263,7 +265,7 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
   const [deleting, setDeleting] = useState(false);
 
   return (
-    <article className="group/card flex flex-col gap-3 rounded-xl border border-border bg-bg p-4 transition-colors duration-150 ease-out-quart hover:border-primary/35">
+    <article className="group/card flex flex-col gap-2 rounded-xl border border-border bg-bg p-3 transition-colors duration-150 ease-out-quart hover:border-primary/35">
       <div className="flex items-baseline justify-between gap-2">
         <h2 className="min-w-0 text-base font-semibold"><Marquee>{project.name}</Marquee></h2>
         <span className="tabular shrink-0 text-xs text-status-neutral">
@@ -271,7 +273,7 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
         </span>
       </div>
       <LatestSessionLink project={project} />
-      <div className="mt-auto flex items-center gap-2 border-t border-border pt-3">
+      <div className="mt-auto flex items-center gap-2 border-t border-border pt-2">
         <Link
           to={newProjectSessionPath(project.project_id)}
           aria-label={`New session in ${project.name}`}
@@ -350,7 +352,7 @@ function UsageDashboard({
   return (
     <Card
       tone="quiet"
-      className="flex min-w-0 flex-col gap-2.5 p-3 sm:p-4 xl:p-3 2xl:p-4"
+      className="flex h-full min-w-0 flex-col gap-2.5 p-3 sm:p-4 xl:p-3 2xl:p-4"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold" id="workspace-overview">
@@ -446,7 +448,7 @@ function RecentSessions({ sessions }: { sessions: UsageRecentSession[] }) {
         description="Continue from the sessions you touched most recently."
       />
       <ul className="flex flex-col">
-        {sessions.map((session) => (
+        {sessions.slice(0, RECENT_SESSION_LIMIT).map((session) => (
           <li key={`${session.project_id}-${session.session_id}`}>
             <Link
               to={sessionBasePath(session.project_id, session.session_id)}
@@ -510,7 +512,7 @@ function UsagePeriodToggle({
  * that then asked for the same project this one already lists. */
 function QuickStart({ onNewProject }: { onNewProject: () => void }) {
   return (
-    <Card tone="quiet" className="flex flex-col gap-3 px-4 py-3">
+    <Card tone="quiet" className="flex flex-col gap-2 px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-base font-semibold">Start an analysis</h2>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -552,6 +554,9 @@ export function Component() {
   const [creating, setCreating] = useState(() => searchParams.get("new") === "1");
   const active = (projects.data ?? []).filter((p) => p.session_count > 0);
   const idle = (projects.data ?? []).filter((p) => p.session_count === 0);
+  const visibleActive = active.slice(0, PROJECT_LIMIT);
+  const visibleIdle = idle.slice(0, Math.max(0, PROJECT_LIMIT - visibleActive.length));
+  const hiddenProjectCount = active.length + idle.length - visibleActive.length - visibleIdle.length;
 
   const changePeriod = (nextPeriod: UsagePeriod) => {
     const next = new URLSearchParams(searchParams);
@@ -561,14 +566,14 @@ export function Component() {
   };
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data flex-col gap-4 py-4 sm:py-5 lg:py-6">
+    <div className="mx-auto flex w-[95%] max-w-data flex-col gap-4 py-4 sm:py-5 lg:py-6">
       <div
         data-home-layout="workspace"
-        className="grid min-w-0 gap-4 xl:grid-cols-5 xl:items-start"
+        className="grid min-w-0 gap-4 lg:grid-cols-5 lg:items-stretch"
       >
         <div
           data-home-column="overview"
-          className="flex min-w-0 flex-col gap-4 xl:col-span-2"
+          className="flex min-w-0 flex-col gap-4 lg:col-span-2"
         >
           {(usage.isPending || historyUsage.isPending) && (
             <LoadingSkeleton lines={6} label="Loading workspace overview" />
@@ -592,22 +597,12 @@ export function Component() {
           )}
         </div>
 
-        <div
-          data-home-column="actions"
-          className="flex min-w-0 flex-col gap-4 xl:col-span-3"
+        <aside
+          aria-label="Recent projects and sessions"
+          data-home-column="recent"
+          className="grid w-full min-w-0 gap-4 lg:col-span-3 lg:grid-cols-2 lg:items-stretch"
         >
-          <QuickStart onNewProject={() => setCreating(true)} />
-
-          {creating && <NewProjectForm onCancel={() => setCreating(false)} />}
-        </div>
-      </div>
-
-      <aside
-        aria-label="Recent projects and sessions"
-        data-home-column="recent"
-        className="flex w-full min-w-0 flex-col gap-4"
-      >
-        <div className="min-w-0 rounded-xl border border-border bg-bg p-4">
+          <Card as="section" tone="quiet" className="flex h-full min-w-0 flex-col p-4">
           {historyUsage.isPending && (
             <LoadingSkeleton lines={3} label="Loading recent work" />
           )}
@@ -623,9 +618,9 @@ export function Component() {
                 </p>
               </div>
             )}
-        </div>
+          </Card>
 
-        <div className="min-w-0">
+          <Card as="section" tone="quiet" className="flex h-full min-w-0 flex-col p-4">
           {projects.isPending && (
             <LoadingSkeleton lines={4} label="Loading projects" />
           )}
@@ -644,9 +639,9 @@ export function Component() {
             ) : (
               <section className="flex flex-col gap-3">
                 <SectionHeader title="Projects" level={2} />
-                {active.length > 0 && (
-                  <div className="grid items-stretch gap-3 2xl:grid-cols-2">
-                    {active.map((project) => (
+                {visibleActive.length > 0 && (
+                  <div className="grid items-stretch gap-3">
+                    {visibleActive.map((project) => (
                       <ProjectCard
                         key={project.project_id}
                         project={project}
@@ -654,9 +649,9 @@ export function Component() {
                     ))}
                   </div>
                 )}
-                {idle.length > 0 && (
+                {visibleIdle.length > 0 && (
                   <ul className="flex flex-col">
-                    {idle.map((project) => (
+                    {visibleIdle.map((project) => (
                       <EmptyProjectRow
                         key={project.project_id}
                         project={project}
@@ -664,10 +659,19 @@ export function Component() {
                     ))}
                   </ul>
                 )}
+                {hiddenProjectCount > 0 && (
+                  <p className="text-xs text-status-neutral">
+                    + {hiddenProjectCount} more project{hiddenProjectCount === 1 ? "" : "s"}
+                  </p>
+                )}
               </section>
             ))}
-        </div>
-      </aside>
+          </Card>
+        </aside>
+      </div>
+
+      <QuickStart onNewProject={() => setCreating(true)} />
+      {creating && <NewProjectForm onCancel={() => setCreating(false)} />}
     </div>
   );
 }

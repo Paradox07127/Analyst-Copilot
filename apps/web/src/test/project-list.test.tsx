@@ -23,7 +23,7 @@ async function fillNewProject(name: string, projectId?: string) {
 }
 
 describe("Project list with real API", () => {
-  it("places the analysis launcher to the right of the compact Overview", async () => {
+  it("keeps overview, recent work, and projects in one aligned top row", async () => {
     renderAppAt("/projects");
 
     const overview = await screen.findByRole("heading", {
@@ -32,20 +32,15 @@ describe("Project list with real API", () => {
     });
     expect(
       overview.closest('[data-home-layout="workspace"]'),
-    ).toHaveClass("xl:grid-cols-5");
+    ).toHaveClass("lg:grid-cols-5");
     expect(
       overview.closest('[data-home-column="overview"]'),
-    ).toHaveClass("xl:col-span-2");
+    ).toHaveClass("lg:col-span-2");
     expect(
       overview
         .closest('[data-home-column="overview"]')
         ?.querySelector("[data-dashboard-metrics]"),
     ).toHaveClass("md:grid-cols-4");
-    const actions = document.querySelector('[data-home-column="actions"]');
-    expect(actions).toHaveClass("xl:col-span-3");
-    expect(actions).toContainElement(
-      screen.getByRole("heading", { name: "Start an analysis" }),
-    );
     expect(
       overview.closest('[data-home-column="overview"]'),
     ).not.toContainElement(
@@ -55,8 +50,16 @@ describe("Project list with real API", () => {
     const recent = screen.getByRole("complementary", {
       name: "Recent projects and sessions",
     });
-    expect(actions).not.toContainElement(recent);
-    expect(recent).toHaveClass("w-full");
+    expect(recent).toHaveClass("w-full", "lg:col-span-3", "lg:grid-cols-2");
+    expect(recent).not.toContainElement(
+      screen.getByRole("heading", { name: "Start an analysis" }),
+    );
+    expect(overview.closest('[data-home-layout="workspace"]')).toContainElement(
+      recent,
+    );
+    expect(overview.closest('[data-home-layout="workspace"]')?.parentElement).toContainElement(
+      screen.getByRole("heading", { name: "Start an analysis" }),
+    );
     expect(recent).toContainElement(
       screen.getByRole("heading", { name: "Recent work" }),
     );

@@ -367,7 +367,7 @@ export function Component() {
   );
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-4 sm:p-6">
+    <div className="mx-auto flex w-[95%] max-w-data flex-col gap-5 p-4 sm:p-6">
       <header className="flex flex-col gap-4 border-b border-hairline pb-5 lg:flex-row lg:items-start">
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">

@@ -225,7 +225,7 @@ export function Component() {
     );
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data flex-col gap-4 p-6">
+    <div className="mx-auto flex w-[95%] max-w-data flex-col gap-4 p-6">
       <SectionHeader
         level={1}
         title="Artifacts"

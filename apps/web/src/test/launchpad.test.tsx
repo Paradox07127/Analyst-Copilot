@@ -465,6 +465,34 @@ describe("Reusing project data", () => {
     expect(within(runPanel).getByText("4 files")).toBeInTheDocument();
   });
 
+  it("selects or clears all reusable project files in one action", async () => {
+    const files = ["orders.csv", "customers.csv", "products.csv"].map(
+      (display_name, index) => ({
+        ...existing,
+        dataset_id: `ds_${index}`,
+        display_name,
+      }),
+    );
+    server.use(
+      http.get("/api/v1/projects/:projectId/uploads", () =>
+        HttpResponse.json(files),
+      ),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/new-session");
+
+    await user.click(await screen.findByRole("button", { name: "Select all" }));
+    for (const file of files) {
+      expect(screen.getByRole("checkbox", { name: `Exclude ${file.display_name}` })).toBeChecked();
+    }
+    expect(screen.getByRole("button", { name: "Run analysis" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Clear selection" }));
+    for (const file of files) {
+      expect(screen.getByRole("checkbox", { name: `Include ${file.display_name}` })).not.toBeChecked();
+    }
+  });
+
   it("deselects a project file without deleting it", async () => {
     let deletes = 0;
     server.use(

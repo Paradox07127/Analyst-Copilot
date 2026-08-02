@@ -525,7 +525,7 @@ export function Component() {
   };
 
   return (
-    <div className="mx-auto flex h-full w-[90%] max-w-data min-w-0 flex-col gap-2 overflow-hidden px-6 pt-5 pb-2">
+    <div className="mx-auto flex h-full w-[95%] max-w-data min-w-0 flex-col gap-2 overflow-hidden px-6 pt-5 pb-2">
       <SectionHeader
         level={1}
         title="Table Preview"
