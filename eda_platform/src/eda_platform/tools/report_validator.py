@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from eda_platform.core.claim_language import REPORT_BODY_CAUSAL_TERMS
 from eda_platform.core.column_roles import ColumnRoleSet
-from eda_platform.schemas.artifacts import ArtifactType, EvidenceRef, SqlResult
+from eda_platform.schemas.artifacts import Artifact, ArtifactType, EvidenceRef, SqlResult
 from eda_platform.schemas.reports import (
     GateVerdict,
     NumericEvidenceSource,
@@ -651,6 +651,31 @@ def _currency_amounts(text: str) -> list[tuple[float, str]]:
         if value is not None and code is not None:
             amounts.append((float(value), code))
     return amounts
+
+
+def full_coverage_evidence_refs(artifacts: Sequence[Artifact]) -> list[EvidenceRef]:
+    """Cite every number each payload can resolve; the caller picks no locator.
+
+    Kept beside the resolvers below so the two stay in step. Types absent here
+    resolve nothing, so a figure drawn from one is refused rather than admitted
+    unchecked.
+    """
+    refs: list[EvidenceRef] = []
+    for artifact in artifacts:
+        if artifact.type is ArtifactType.SQL_RESULT:
+            refs.append(EvidenceRef(kind="sql", artifact_id=artifact.id, locator="rows"))
+        elif artifact.type is ArtifactType.DATASET_PROFILE:
+            refs.extend(
+                EvidenceRef(kind="profile_field", artifact_id=artifact.id, locator=locator)
+                for locator in ("summary", "missing_percent")
+            )
+        elif artifact.type is ArtifactType.STAT_TEST_RESULT:
+            refs.append(EvidenceRef(kind="stat", artifact_id=artifact.id, locator=""))
+        elif artifact.type is ArtifactType.MODEL_CARD:
+            refs.append(EvidenceRef(kind="artifact", artifact_id=artifact.id, locator=""))
+        elif artifact.type is ArtifactType.TABLE:
+            refs.append(EvidenceRef(kind="table", artifact_id=artifact.id, locator="rows"))
+    return refs
 
 
 def _resolve_evidence_numbers(

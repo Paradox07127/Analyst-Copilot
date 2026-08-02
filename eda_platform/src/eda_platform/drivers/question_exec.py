@@ -71,6 +71,7 @@ from eda_platform.tools.domain_metrics import (
 from eda_platform.tools.evidence import PayloadPolicy
 from eda_platform.tools.loader import LoadedDataset, load_csv
 from eda_platform.tools.relationship_discovery import _relation_name
+from eda_platform.tools.report_validator import full_coverage_evidence_refs
 from eda_platform.tools.sql_runner import SqlCatalog, build_catalog, run_sql
 
 
@@ -720,8 +721,9 @@ def _agent_qexec_artifact(
             QuestionFinding(
                 text=agent_result.answer.strip(),
                 evidence=[
-                    _agent_evidence_ref(artifact)
+                    ref
                     for artifact in evidence_artifacts[:30]
+                    for ref in _agent_evidence_refs(artifact)
                 ],
                 exploratory=candidate.exploratory,
             )
@@ -791,27 +793,23 @@ def _unique_agent_artifacts(values: Sequence[Any]) -> list[Artifact]:
     return artifacts
 
 
-def _agent_evidence_ref(artifact: Artifact) -> EvidenceRef:
-    kind: Literal["sql", "code", "stat", "table", "chart", "profile_field", "artifact"]
-    if artifact.type is ArtifactType.SQL_RESULT:
-        kind = "sql"
-    elif artifact.type is ArtifactType.CODE_EXECUTION_RESULT:
-        kind = "code"
-    elif artifact.type is ArtifactType.STAT_TEST_RESULT:
-        kind = "stat"
-    elif artifact.type is ArtifactType.TABLE:
-        kind = "table"
-    elif artifact.type is ArtifactType.CHART_SPEC:
-        kind = "chart"
-    elif artifact.type is ArtifactType.DATASET_PROFILE:
-        kind = "profile_field"
-    else:
-        kind = "artifact"
-    return EvidenceRef(
-        kind=kind,
-        artifact_id=artifact.id,
-        locator="agent_tool_result",
-    )
+def _agent_evidence_refs(artifact: Artifact) -> list[EvidenceRef]:
+    """Cite an agent artifact with locators the report validator can resolve."""
+    # Types the validator resolves no numbers for keep a whole-artifact citation:
+    # dropping them would leave the finding with no evidence at all.
+    return full_coverage_evidence_refs([artifact]) or [
+        EvidenceRef(kind=_agent_evidence_kind(artifact), artifact_id=artifact.id, locator="")
+    ]
+
+
+def _agent_evidence_kind(
+    artifact: Artifact,
+) -> Literal["sql", "code", "stat", "table", "chart", "profile_field", "artifact"]:
+    if artifact.type is ArtifactType.CODE_EXECUTION_RESULT:
+        return "code"
+    if artifact.type is ArtifactType.CHART_SPEC:
+        return "chart"
+    return "artifact"
 
 
 def _execute_template_question(
