@@ -8,12 +8,16 @@ import {
   LoadingSkeleton,
 } from "../../components/async-states";
 import {
+  DataWorkspacePage,
+  DatasetScopeBar,
+  SegmentedControl,
+} from "../../components/data-workspace";
+import {
   Badge,
   Dot,
   Marquee,
   MetricStrip,
   MetricTile,
-  SectionHeader,
   buttonClass,
   type Tone,
 } from "../../components/ui";
@@ -149,25 +153,30 @@ export function Component() {
   const severity = SEVERITIES.includes(severityParam as Severity)
     ? severityParam
     : "";
-  /* Code multiselect: options
-   * deduped from the loaded issues, default = every code selected. `null`
-   * stands for that default so no effect is needed to seed it once data
-   * loads; an explicit empty Set means the same thing as `null` (unchecking
-   * every code falls back to "no filter"
-   * `not selected_codes or row.code in selected_codes`). */
+  /* Missing param means all codes. `none` represents a genuine empty
+   * selection; without the sentinel, clearing the last checkbox silently
+   * turned every code back on. */
   const [codesParam, setCodesParam] = useRouteSearchParam("codes");
-  const selectedCodes = codesParam
-    ? new Set(parseCsvParam(codesParam))
-    : null;
+  const selectedCodes =
+    codesParam === "none"
+      ? new Set<string>()
+      : codesParam
+        ? new Set(parseCsvParam(codesParam))
+        : null;
 
   /* Filter compares dataset ids, not display names: same-named datasets keep
    * distinct entries. The name fallback covers rows from older servers. */
   const datasetOptions = useMemo(
-    () =>
-      (quality.data?.datasets ?? []).map((card) => ({
-        id: card.dataset_id ?? card.dataset_name,
-        label: card.dataset_name,
-      })),
+    () => {
+      const options = new Map<string, string>();
+      for (const card of quality.data?.datasets ?? []) {
+        options.set(card.dataset_id ?? card.dataset_name, card.dataset_name);
+      }
+      for (const issue of quality.data?.issues ?? []) {
+        options.set(issue.dataset_id ?? issue.dataset_name, issue.dataset_name);
+      }
+      return Array.from(options, ([value, label]) => ({ value, label }));
+    },
     [quality.data],
   );
 
@@ -189,9 +198,11 @@ export function Component() {
     else next.add(code);
     const allCodes = codeOptions.map((option) => option.code);
     setCodesParam(
-      next.size === 0 || allCodes.every((option) => next.has(option))
-        ? ""
-        : serializeCsvParam(next),
+      next.size === 0
+        ? "none"
+        : allCodes.every((option) => next.has(option))
+          ? ""
+          : serializeCsvParam(next),
     );
   };
 
@@ -200,7 +211,7 @@ export function Component() {
     (issue) =>
       (!dataset || (issue.dataset_id ?? issue.dataset_name) === dataset) &&
       (!severity || severityOf(issue) === severity) &&
-      (!selectedCodes || selectedCodes.size === 0 || selectedCodes.has(issue.code)),
+      (!selectedCodes || selectedCodes.has(issue.code)),
   );
   const filtered = visible.length !== allIssues.length;
   const affectedDatasets = new Set(
@@ -220,12 +231,10 @@ export function Component() {
     (quality.data?.info ?? 0);
 
   return (
-    <div className="mx-auto flex w-[95%] max-w-data min-w-0 flex-col gap-4 p-6">
-      <SectionHeader
-        level={1}
-        title="Quality"
-        description="Triage profiler flags by severity and scope, then inspect the evidence before deciding whether to clean."
-      />
+    <DataWorkspacePage
+      title="Quality"
+      description="Triage profiler flags by severity and scope, then inspect the evidence before deciding whether to clean."
+    >
 
       {quality.isPending && <LoadingSkeleton lines={4} label="Loading quality" />}
       {quality.isError && (
@@ -233,6 +242,12 @@ export function Component() {
       )}
       {quality.data && (
         <>
+          <DatasetScopeBar
+            value={dataset}
+            onChange={setDataset}
+            options={datasetOptions}
+            allLabel="All datasets"
+          />
           <MetricStrip>
             <MetricTile
               label="Critical"
@@ -251,7 +266,7 @@ export function Component() {
             <MetricTile
               label="Info"
               value={quality.data.info ?? 0}
-              tone="ok"
+              tone="info"
               emphasis={(quality.data.info ?? 0) > 0}
               hint="Profiler context"
             />
@@ -281,25 +296,33 @@ export function Component() {
             />
           ) : (
               <section aria-labelledby="issue-queue-heading" className="flex min-w-0 flex-col gap-3">
-                <div className="flex flex-wrap items-end gap-x-5 gap-y-3 border-b border-hairline pb-3">
-                  <label className="flex min-w-[15rem] flex-1 flex-col gap-1 text-sm sm:max-w-xl">
-                    <span className="text-status-neutral">Dataset</span>
-                    <select value={dataset} onChange={(event) => setDataset(event.target.value)} className="min-w-0 rounded-base border border-border bg-bg px-3 py-2 text-sm font-medium">
-                      <option value="">All datasets</option>
-                      {datasetOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-                    </select>
-                  </label>
+                <div className="flex min-w-0 flex-wrap items-end gap-x-4 gap-y-3 border-b border-hairline pb-3">
                   <div className="flex flex-col gap-1">
                     <span className="text-sm text-status-neutral">Severity</span>
-                    <div className="flex rounded-base border border-border p-0.5" role="group" aria-label="Filter by severity">
-                      <button type="button" onClick={() => setSeverity("")} aria-pressed={!severity} className={`rounded-sm px-2.5 py-1.5 text-sm ${!severity ? "bg-surface font-medium" : "text-status-neutral hover:text-fg"}`}>All</button>
-                      {SEVERITIES.map((option) => <button key={option} type="button" onClick={() => setSeverity(option)} aria-pressed={severity === option} className={`rounded-sm px-2.5 py-1.5 text-sm ${severity === option ? "bg-surface font-medium" : "text-status-neutral hover:text-fg"}`}>{SEVERITY_LABEL[option]}</button>)}
-                    </div>
+                    <SegmentedControl
+                      label="Filter by severity"
+                      value={severity}
+                      onChange={setSeverity}
+                      options={[
+                        { value: "", label: "All" },
+                        ...SEVERITIES.map((option) => ({
+                          value: option,
+                          label: SEVERITY_LABEL[option],
+                        })),
+                      ]}
+                    />
                   </div>
                   <details className="relative">
                     <summary className="cursor-pointer list-none rounded-base border border-border px-3 py-2 text-sm font-medium hover:bg-surface">Issue types <span className="tabular text-status-neutral">· {selectedCodes?.size ?? codeOptions.length}</span></summary>
-                    <fieldset className="absolute right-0 z-20 mt-1 flex max-h-64 w-72 flex-col gap-1 overflow-y-auto rounded-base border border-border bg-bg p-2 shadow-lg text-sm">
+                    <fieldset className="absolute right-0 z-30 mt-1 flex max-h-72 w-72 flex-col gap-1 overflow-y-auto rounded-base border border-border bg-surface p-2 shadow-overlay text-sm">
                       <legend className="sr-only">Code type</legend>
+                      <div className="mb-1 flex items-center justify-between border-b border-hairline pb-1">
+                        <span className="text-xs text-status-neutral">Issue types</span>
+                        <span className="flex items-center gap-2">
+                          <button type="button" onClick={() => setCodesParam("")} className="text-xs font-medium text-primary hover:underline">Select all</button>
+                          <button type="button" onClick={() => setCodesParam("none")} className="text-xs font-medium text-primary hover:underline">Clear</button>
+                        </span>
+                      </div>
                       {codeOptions.map((option) => (
                         <label key={option.code} className="flex items-center gap-2 rounded-sm px-1 py-1 hover:bg-surface">
                           <input type="checkbox" aria-label={`${option.code} (${option.count})`} checked={selectedCodes?.has(option.code) ?? true} onChange={() => toggleCode(option.code)} />
@@ -349,6 +372,6 @@ export function Component() {
           )}
         </>
       )}
-    </div>
+    </DataWorkspacePage>
   );
 }

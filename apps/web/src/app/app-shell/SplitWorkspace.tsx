@@ -244,6 +244,7 @@ function PaneRoutes({
           <Route path="trace" element={<TracePage />} />
           <Route path="report" element={<ReportPage />} />
           <Route path="artifacts" element={<ArtifactsPage />} />
+          <Route path="compare" element={<ComparePage />} />
           <Route path="skills" element={<SkillsPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="board" element={<BoardPage />} />

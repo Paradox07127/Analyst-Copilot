@@ -17,6 +17,7 @@ import {
   LoadingSkeleton,
   PartialState,
 } from "../../components/async-states";
+import { DataWorkspacePage } from "../../components/data-workspace";
 import {
   Badge,
   Card,
@@ -307,7 +308,7 @@ function DatasetOverviewRow({
           Preview
         </Link>
         <Link
-          to={sessionSectionPath(projectId, sessionId, "quality")}
+          to={`${sessionSectionPath(projectId, sessionId, "quality")}?dataset=${encodeURIComponent(dataset.dataset_id)}`}
           className="inline-flex items-center rounded-base border border-border bg-bg px-2.5 py-1.5 text-xs font-medium hover:border-primary hover:text-primary"
         >
           Review quality
@@ -411,12 +412,10 @@ export function Component() {
         : "loading";
 
   return (
-    <div className="mx-auto flex w-[95%] max-w-data min-w-0 flex-col gap-4 p-6">
-      <SectionHeader
-        level={1}
-        title="Data Map"
-        description="The tables available in this analysis, their shape and current health."
-      />
+    <DataWorkspacePage
+      title="Data Map"
+      description="The tables available in this analysis, their shape and current health."
+    >
       {run.isPending && <LoadingSkeleton lines={2} label="Loading session" />}
       {run.isError && <ErrorState error={run.error} onRetry={() => run.refetch()} />}
       {run.data && (
@@ -450,6 +449,6 @@ export function Component() {
           sessionId={sessionId}
         />
       ))}
-    </div>
+    </DataWorkspacePage>
   );
 }

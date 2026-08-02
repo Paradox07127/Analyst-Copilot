@@ -311,17 +311,22 @@ function datasetOptionLabel(
 function CustomChartForm({
   sessionId,
   projectId,
+  datasetId: controlledDatasetId,
 }: {
   sessionId: string;
   projectId: string;
+  datasetId?: string;
 }) {
   const datasets = useDatasets(sessionId);
-  const [datasetId, setDatasetId] = useState("");
+  const [localDatasetId, setLocalDatasetId] = useState("");
   const options = datasets.data ?? [];
+  const datasetId = controlledDatasetId ?? localDatasetId;
 
   useEffect(() => {
-    if (!datasetId && options.length > 0) setDatasetId(options[0]!.dataset_id);
-  }, [datasetId, options]);
+    if (!controlledDatasetId && !localDatasetId && options.length > 0) {
+      setLocalDatasetId(options[0]!.dataset_id);
+    }
+  }, [controlledDatasetId, localDatasetId, options]);
 
   if (datasets.isPending) {
     return <LoadingSkeleton lines={3} label="Loading datasets" />;
@@ -335,20 +340,26 @@ function CustomChartForm({
 
   return (
     <div className="flex flex-col gap-3 border-t border-hairline px-4 py-3">
-      <label className="flex min-w-0 flex-col gap-1 text-sm sm:max-w-sm">
-        <span className="text-status-neutral">Dataset</span>
-        <select
-          value={selected.dataset_id}
-          onChange={(event) => setDatasetId(event.target.value)}
-          className={selectClass}
-        >
-          {options.map((dataset) => (
-            <option key={dataset.dataset_id} value={dataset.dataset_id}>
-              {datasetOptionLabel(dataset, options)}
-            </option>
-          ))}
-        </select>
-      </label>
+      {controlledDatasetId ? (
+        <p className="text-xs text-status-neutral">
+          Building from <span className="font-medium text-text">{selected.display_name}</span>, the dataset selected above.
+        </p>
+      ) : (
+        <label className="flex min-w-0 flex-col gap-1 text-sm sm:max-w-sm">
+          <span className="text-status-neutral">Dataset</span>
+          <select
+            value={selected.dataset_id}
+            onChange={(event) => setLocalDatasetId(event.target.value)}
+            className={selectClass}
+          >
+            {options.map((dataset) => (
+              <option key={dataset.dataset_id} value={dataset.dataset_id}>
+                {datasetOptionLabel(dataset, options)}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {selected.row_count === 0 ? (
         <p className="text-sm text-status-neutral">
           The selected dataset has no rows or columns to chart.
@@ -368,9 +379,11 @@ function CustomChartForm({
 export function CustomChartBuilder({
   sessionId,
   projectId,
+  datasetId,
 }: {
   sessionId: string;
   projectId: string;
+  datasetId?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -398,7 +411,11 @@ export function CustomChartBuilder({
       </div>
       {expanded && (
         <div id="custom-chart-form">
-          <CustomChartForm sessionId={sessionId} projectId={projectId} />
+          <CustomChartForm
+            sessionId={sessionId}
+            projectId={projectId}
+            datasetId={datasetId}
+          />
         </div>
       )}
     </div>
