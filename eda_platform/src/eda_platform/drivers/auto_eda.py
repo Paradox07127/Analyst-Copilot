@@ -684,7 +684,22 @@ class SessionStatTestsStep:
                 )
             )
             return []
-        except ValueError:
+        except ValueError as exc:
+            ctx.emit_trace(
+                TraceEvent(
+                    session_id=ctx.session_id,
+                    event_type="stat_test_skipped",
+                    name=self.name,
+                    finished_at=datetime.now(UTC),
+                    summary={
+                        "dataset_id": self.loaded.record.dataset_id,
+                        "test_type": self.spec.test_type,
+                        "group_column": self.spec.group_column,
+                        "value_column": self.spec.value_column,
+                        "reason": str(exc),
+                    },
+                )
+            )
             return []
         result.warnings.append(
             StatWarning(

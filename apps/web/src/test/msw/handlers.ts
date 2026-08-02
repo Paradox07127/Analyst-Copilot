@@ -1341,6 +1341,7 @@ export function customChartView(
     row_count: 3,
     source_row_count: 3,
     truncated: false,
+    series_truncated: false,
     row_limit: 5000,
     spec: {
       $schema: "https://vega.github.io/schema/vega-lite/v6.json",

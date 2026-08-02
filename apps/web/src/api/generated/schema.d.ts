@@ -3371,6 +3371,11 @@ export interface components {
             source_row_count: number;
             /** Truncated */
             truncated: boolean;
+            /**
+             * Series Truncated
+             * @default false
+             */
+            series_truncated: boolean;
             /** Row Limit */
             row_limit: number;
             /** Spec */

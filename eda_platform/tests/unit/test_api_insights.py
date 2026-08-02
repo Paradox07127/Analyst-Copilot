@@ -446,6 +446,24 @@ def test_get_chart_condition_test_string_404(store: ArtifactStore) -> None:
     assert response.json()["error"]["code"] == "chart_not_found"
 
 
+def test_expression_gate_covers_transform_constructs() -> None:
+    """`ChartSpec.to_vegalite` drops a top-level transform, so this shape cannot
+    reach get_chart today — but the same gate guards the custom-chart builder
+    and the client mirror, where arbitrary spec dicts do flow."""
+    from eda_platform.application.services.insight_service import (
+        _contains_vega_expression,
+    )
+
+    assert _contains_vega_expression(
+        {"transform": [{"calculate": "datum.amount * 2", "as": "doubled"}]}
+    )
+    assert _contains_vega_expression({"transform": [{"filter": "datum.amount > 1"}]})
+    # A field predicate is data, not an expression, and must stay allowed.
+    assert not _contains_vega_expression(
+        {"transform": [{"filter": {"field": "amount", "gt": 1}}]}
+    )
+
+
 def test_get_chart_swapped_envelope_404(store: ArtifactStore) -> None:
     """The file behind the index row must be the artifact the row points at."""
     other_path = store.artifact_path(PROJECT, RUN, "chart_2")

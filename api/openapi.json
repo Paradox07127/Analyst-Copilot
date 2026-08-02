@@ -15963,6 +15963,11 @@
             "type": "boolean",
             "title": "Truncated"
           },
+          "series_truncated": {
+            "type": "boolean",
+            "title": "Series Truncated",
+            "default": false
+          },
           "row_limit": {
             "type": "integer",
             "title": "Row Limit"

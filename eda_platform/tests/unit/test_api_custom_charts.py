@@ -12,7 +12,10 @@ from data_operation_helpers import await_data_operation, operation_result_respon
 from fastapi.testclient import TestClient
 
 from eda_platform.api.main import create_app
-from eda_platform.application.chart_builder import CUSTOM_CHART_ROW_LIMIT
+from eda_platform.application.chart_builder import (
+    CUSTOM_CHART_GROUP_LIMIT,
+    CUSTOM_CHART_ROW_LIMIT,
+)
 from eda_platform.application.dto import CustomChartRequest
 from eda_platform.application.services.dataset_service import DatasetService
 from eda_platform.application.services.insight_service import (
@@ -238,6 +241,54 @@ def test_histogram_drop_outliers_fences_x_without_a_y_column(client: TestClient)
     assert body["row_count"] == CSV_ROWS - 1
 
 
+def test_numeric_aggregate_over_a_text_y_is_422(client: TestClient) -> None:
+    """`to_numeric(errors="coerce")` used to turn a text Y into all-NaN and
+    return a 200 chart of zeros."""
+    response = _post(client, x_column="amount", y_column="label", aggregate="sum")
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "custom_chart_invalid"
+    assert "label" in body["error"]["message"]
+
+
+def test_numeric_aggregate_over_numeric_strings_still_works(store: ArtifactStore) -> None:
+    """The gate mirrors what the aggregation can coerce, so a column stored as
+    text but holding plain numbers still charts."""
+    source = store.project_dir(PROJECT) / "uploads" / DATASET / "v1" / CSV_NAME
+    # The stray "unknown" is what makes pandas read the column as object.
+    source.write_text(
+        "amount,label,day\n"
+        "1000,a,2024-01-01\n"
+        "2000,a,2024-01-02\n"
+        "unknown,a,2024-01-03\n",
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(store.root))
+
+    response = _post(client, x_column="label", y_column="amount", aggregate="sum")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["spec"]["data"]["values"] == [{"label": "a", "amount": 3000.0}]
+
+
+def test_group_cap_rejects_an_unrenderable_number_of_groups(store: ArtifactStore) -> None:
+    """An unbounded group dict is the OOM path; a chart of that many marks is
+    unreadable anyway, so it is refused rather than silently sampled."""
+    source = store.project_dir(PROJECT) / "uploads" / DATASET / "v1" / CSV_NAME
+    rows = ["amount,label,day"] + [
+        f"{index},label_{index},2024-01-01" for index in range(CUSTOM_CHART_GROUP_LIMIT + 5)
+    ]
+    source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    client = TestClient(create_app(store.root))
+
+    response = _post(client, x_column="label", y_column=None, aggregate="count")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "custom_chart_invalid"
+    assert str(CUSTOM_CHART_GROUP_LIMIT) in body["error"]["message"]
+
+
 def test_drop_missing_removes_null_rows(store: ArtifactStore) -> None:
     source = store.project_dir(PROJECT) / "uploads" / DATASET / "v1" / CSV_NAME
     source.write_text(CSV_BODY + ",d,2024-01-06\n", encoding="utf-8")
@@ -311,8 +362,38 @@ def test_inline_data_is_capped_by_byte_budget(
         datasets=datasets,
     ).model_dump()
     assert body["truncated"] is True
+    assert body["series_truncated"] is False
     assert 0 < body["row_count"] < CSV_ROWS
     assert body["source_row_count"] == CSV_ROWS
+
+
+def test_byte_capped_aggregate_reports_dropped_groups_not_dropped_rows(
+    store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aggregated chart keeps row_count at the observation count, so a byte
+    cap left the client saying "showing 5 of 5 rows"."""
+    import eda_platform.application.services.insight_service as insight_service_module
+
+    monkeypatch.setattr(insight_service_module, "MAX_INLINE_DATA_BYTES", 30)
+    datasets = DatasetService(
+        store,
+        TrustedFileQueryEngine([store.root / "projects"]),
+    )
+    body = InsightService(store).build_custom_chart(
+        RUN,
+        CustomChartRequest(
+            dataset_id=DATASET,
+            chart_type="bar",
+            x_column="label",
+            y_column="amount",
+            aggregate="sum",
+        ),
+        datasets=datasets,
+    ).model_dump()
+    assert body["truncated"] is True
+    assert body["series_truncated"] is True
+    assert body["row_count"] == body["source_row_count"] == CSV_ROWS
+    assert len(body["spec"]["data"]["values"]) < 3  # three label groups exist
 
 
 def test_vega_expression_in_spec_is_rejected(

@@ -20,6 +20,44 @@ const noExternalLoader = {
   file: rejectExternal,
 };
 
+/* Second half of that threat model: vega evaluates expression strings in the
+ * spec. The server's get_chart rejects them, but ChatPage renders a raw
+ * artifact payload from the generic artifact endpoint, which never passes
+ * through that gate — so the check also lives at the render seam, where every
+ * caller crosses. Key set mirrors insight_service._EXPRESSION_KEYS and
+ * _STRING_EXPRESSION_KEYS; `filter` is only an expression in its string form,
+ * a field predicate is data. Data values are keyed by column name, so scanning
+ * them would reject a dataset with a column called "expr" without adding
+ * safety — vega evaluates expressions in the spec, not in the data. */
+const EXPRESSION_KEYS = new Set(["expr", "labelExpr", "signal", "calculate"]);
+const STRING_EXPRESSION_KEYS = new Set(["filter"]);
+
+export function containsVegaExpression(node: unknown, inData = false): boolean {
+  if (Array.isArray(node)) {
+    return node.some((item) => containsVegaExpression(item, inData));
+  }
+  if (typeof node !== "object" || node === null) return false;
+  for (const [key, value] of Object.entries(node)) {
+    if (inData) continue;
+    if (EXPRESSION_KEYS.has(key)) return true;
+    if (STRING_EXPRESSION_KEYS.has(key) && typeof value === "string") return true;
+    if (key === "condition") {
+      const conditions = Array.isArray(value) ? value : [value];
+      for (const condition of conditions) {
+        if (
+          typeof condition === "object" &&
+          condition !== null &&
+          typeof (condition as Record<string, unknown>)["test"] === "string"
+        ) {
+          return true;
+        }
+      }
+    }
+    if (containsVegaExpression(value, key === "data")) return true;
+  }
+  return false;
+}
+
 /* Only the local PNG/SVG download stays on. "Open in Vega Editor" POSTs the
  * whole spec — data included — to vega.github.io, and source/compiled open
  * new windows rendering the same untrusted spec, so all three stay off. */
@@ -127,6 +165,9 @@ export function VegaChart({
     let result: EmbedResult | null = null;
     (async () => {
       try {
+        if (containsVegaExpression(spec)) {
+          throw new Error("spec rejected by the expression safety check");
+        }
         const { default: embed } = await import("vega-embed");
         if (disposed || !container.current) return;
         const embedSpec = {
@@ -135,7 +176,7 @@ export function VegaChart({
           height: CHART_HEIGHT,
           config: vegaThemeConfig(),
         };
-        result = (await embed(
+        const embedded = (await embed(
           container.current,
           embedSpec as unknown as Parameters<typeof embed>[1],
           {
@@ -145,6 +186,13 @@ export function VegaChart({
             tooltip: tooltipOptions(),
           },
         )) as EmbedResult;
+        /* Unmounting mid-embed used to leave the resolved view unfinalized:
+         * cleanup had already run against a null `result`. */
+        if (disposed) {
+          embedded.view.finalize();
+          return;
+        }
+        result = embedded;
       } catch (cause) {
         if (!disposed) {
           setError(cause instanceof Error ? cause.message : "Chart failed to render");

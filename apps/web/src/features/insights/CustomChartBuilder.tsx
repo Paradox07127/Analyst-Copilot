@@ -38,8 +38,17 @@ function errorText(error: unknown): string {
 }
 
 /* Both the 5,000-row cap and a 2 MB inline-byte budget can truncate a
- * response, so the copy reports what came back instead of naming a cause. */
-function truncationNotice(rowCount: number, sourceRowCount: number): string {
+ * response, so the copy reports what came back instead of naming a cause. An
+ * aggregated chart keeps every observation in row_count and loses whole
+ * groups/bins instead, which the row wording misreported as "N of N rows". */
+function truncationNotice(
+  rowCount: number,
+  sourceRowCount: number,
+  seriesTruncated: boolean,
+): string {
+  if (seriesTruncated) {
+    return "Chart preview is truncated: some groups were dropped to fit the size limit, but every row is counted in the ones shown.";
+  }
   return `Chart preview is truncated: showing ${rowCount.toLocaleString()} of ${sourceRowCount.toLocaleString()} rows.`;
 }
 
@@ -254,6 +263,7 @@ function ChartControls({
                     {truncationNotice(
                       buildChart.data.row_count,
                       buildChart.data.source_row_count,
+                      buildChart.data.series_truncated,
                     )}
                   </p>
                 )}

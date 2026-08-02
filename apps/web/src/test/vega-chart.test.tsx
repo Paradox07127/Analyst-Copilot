@@ -1,7 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Handler } from "vega-tooltip";
 import { compile } from "vega-lite";
+import { render, screen } from "@testing-library/react";
 import {
+  VegaChart,
+  containsVegaExpression,
   formatTooltipAsText,
   tooltipOptions,
   vegaThemeConfig,
@@ -226,5 +229,81 @@ describe("linked chart split spec", () => {
         { filter: { param: LINKED_SELECTION_NAME, empty: true } },
       ]),
     );
+  });
+});
+
+/* The server's get_chart applies the same gate, but ChatPage renders a raw
+ * ChartSpec/RawChartSpec artifact payload straight from the artifact endpoint,
+ * so the render seam has to hold the line too. Key set mirrors
+ * insight_service._EXPRESSION_KEYS / _STRING_EXPRESSION_KEYS. */
+describe("containsVegaExpression", () => {
+  it("finds expression constructs at any depth", () => {
+    expect(containsVegaExpression({ encoding: { x: { expr: "alert(1)" } } })).toBe(true);
+    expect(
+      containsVegaExpression({ encoding: { x: { axis: { labelExpr: "datum.a" } } } }),
+    ).toBe(true);
+    expect(containsVegaExpression({ signal: "width" })).toBe(true);
+    expect(
+      containsVegaExpression({ transform: [{ calculate: "datum.a * 2", as: "b" }] }),
+    ).toBe(true);
+    expect(containsVegaExpression({ transform: [{ filter: "datum.a > 1" }] })).toBe(true);
+    expect(
+      containsVegaExpression({
+        encoding: { color: { condition: { test: "datum.a > 1", value: "red" } } },
+      }),
+    ).toBe(true);
+  });
+
+  it("leaves data and field predicates alone", () => {
+    expect(
+      containsVegaExpression({
+        mark: "bar",
+        encoding: { x: { field: "expr", type: "nominal" } },
+        transform: [{ filter: { field: "amount", gt: 1 } }],
+        data: { values: [{ expr: "not an expression", signal: 3 }] },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("VegaChart expression guard", () => {
+  it("refuses to embed a spec carrying an expression", async () => {
+    render(
+      <VegaChart
+        spec={{ mark: "bar", transform: [{ calculate: "datum.a", as: "b" }] }}
+        label="hostile"
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /expression safety check/i,
+    );
+    expect(screen.queryByRole("img", { name: "hostile" })).not.toBeInTheDocument();
+  });
+});
+
+describe("VegaChart teardown", () => {
+  it("finalizes a view that resolves after unmount", async () => {
+    const finalize = vi.fn();
+    let release: (value: { view: { finalize: () => void } }) => void = () => {};
+    const embed = vi.fn(
+      () =>
+        new Promise<{ view: { finalize: () => void } }>((resolve) => {
+          release = resolve;
+        }),
+    );
+    vi.doMock("vega-embed", () => ({ default: embed }));
+
+    const { VegaChart: Fresh } = await import("../features/insights/VegaChart");
+    const view = render(<Fresh spec={{ mark: "bar" }} label="pending" />);
+    await vi.waitFor(() => expect(embed).toHaveBeenCalled());
+
+    /* Unmount while the embed promise is still in flight: cleanup runs against
+     * a null result, so the view has to finalize itself on arrival. */
+    view.unmount();
+    release({ view: { finalize } });
+
+    await vi.waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
+    vi.doUnmock("vega-embed");
   });
 });

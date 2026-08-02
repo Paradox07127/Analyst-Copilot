@@ -1036,6 +1036,37 @@ describe("Custom chart builder", () => {
     expect(screen.getByText(/12,000/)).toBeInTheDocument();
   });
 
+  it("says groups were dropped, not rows, when an aggregate is byte-capped", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("/api/v1/sessions/:sessionId/charts/custom", ({ params }) =>
+        queueDataOperation(String(params["sessionId"]), "job_chart_series", {
+          session_id: String(params["sessionId"]),
+          dataset_id: "sample",
+          chart_type: "bar",
+          aggregate: "sum",
+          /* An aggregated chart counts every observation, so the row wording
+           * would read "showing 12,000 of 12,000 rows". */
+          row_count: 12000,
+          source_row_count: 12000,
+          truncated: true,
+          series_truncated: true,
+          row_limit: 5000,
+          spec: { mark: "bar", encoding: {}, data: { values: [] } },
+        }),
+      ),
+    );
+
+    renderAppAt(chartsUrl);
+    await openBuilder(user);
+    await user.click(screen.getByRole("button", { name: "Build chart" }));
+
+    expect(
+      await screen.findByText(/some groups were dropped to fit the size limit/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/12,000 of 12,000 rows/)).not.toBeInTheDocument();
+  });
+
   it("shows the empty state instead of a blank chart when row_count is 0", async () => {
     const user = userEvent.setup();
     server.use(

@@ -2284,6 +2284,10 @@ class CustomChartView(BaseModel):
     source_row_count: int
     """Rows after the cleaning switches, before the inline cap."""
     truncated: bool
+    series_truncated: bool = False
+    """True when the byte budget dropped whole groups or bins from an aggregated
+    chart. `row_count` still counts every observation, so the client must not
+    describe this as missing rows."""
     row_limit: int
     spec: dict[str, Any]
 

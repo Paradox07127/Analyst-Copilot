@@ -174,6 +174,43 @@ def test_auto_eda_skips_ml_baseline_when_target_has_too_few_rows(tmp_path) -> No
     )
 
 
+def test_auto_eda_traces_a_skipped_stat_test(tmp_path) -> None:
+    """A ValueError out of run_stat_test used to return [] silently, so an
+    auto-selected comparison could vanish with nothing in the trace."""
+    csv_path = tmp_path / "customers.csv"
+    frame = pd.DataFrame(
+        {
+            "segment": ["A"] * 40 + ["B"] * 40,
+            "spend": [float(i % 20) for i in range(80)],
+            "visits": [i % 6 + 1 for i in range(80)],
+            "churned": [1 if i % 5 in {0, 1} else 0 for i in range(80)],
+        }
+    )
+    # Group B has no numeric spend at all, so the two-group test loses a group.
+    frame.loc[frame["segment"] == "B", "spend"] = None
+    frame.to_csv(csv_path, index=False)
+
+    result = run_auto_eda(
+        [csv_path],
+        workspace=tmp_path / "workspace",
+        project_id="project_demo",
+        session_id="run_skip",
+    )
+    store = ArtifactStore(tmp_path / "workspace")
+    events = store.list_trace_events(project_id="project_demo", session_id="run_skip")
+
+    assert not any(
+        artifact.type is ArtifactType.STAT_TEST_RESULT for artifact in result.artifacts
+    )
+    assert any(
+        event.event_type == "stat_test_skipped"
+        and event.name == "run_stat_tests"
+        and event.summary.get("group_column") == "segment"
+        and "exactly two groups" in str(event.summary.get("reason", ""))
+        for event in events
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Adversarial regression tests for the M5 part-1 leakage-guard findings (ML-1..ML-7).
 # Each test fails on the pre-fix code (commit cb4fb1f) and passes after the fix.

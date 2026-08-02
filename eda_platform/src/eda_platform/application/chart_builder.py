@@ -8,6 +8,14 @@ import pandas as pd
 
 ROW_COUNT_Y = "Row count"
 CUSTOM_CHART_ROW_LIMIT = 5_000
+# An aggregated chart accumulates one state per group while it streams, so a
+# high-cardinality X (or X x color) is the unbounded-memory path. A plot with
+# this many marks is unreadable anyway, so the request is refused rather than
+# silently sampled down.
+CUSTOM_CHART_GROUP_LIMIT = 1_000
+# Median is the one aggregate that cannot be folded incrementally; it keeps
+# every value. Bound the total retained across all groups.
+CUSTOM_CHART_MEDIAN_VALUE_LIMIT = 1_000_000
 
 
 def default_custom_agg(frame: pd.DataFrame, y_column: str) -> str:

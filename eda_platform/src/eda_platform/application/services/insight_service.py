@@ -14,6 +14,8 @@ from typing import Any, cast
 import pandas as pd
 
 from eda_platform.application.chart_builder import (
+    CUSTOM_CHART_GROUP_LIMIT,
+    CUSTOM_CHART_MEDIAN_VALUE_LIMIT,
     CUSTOM_CHART_ROW_LIMIT,
     ROW_COUNT_Y,
     apply_outlier_bounds,
@@ -335,6 +337,8 @@ class InsightService:
         # report what the spec does rather than what was asked for.
         if y_column is None or options.chart_type == "histogram":
             aggregate = "count"
+        if aggregate in _NUMERIC_AGGREGATES and y_column is not None:
+            _require_numeric_y(capped, y_column, aggregate)
         full_aggregate = options.chart_type == "histogram" or aggregate != "none"
         if options.chart_type == "histogram":
             chart_frame, spec = _full_histogram_chart(
@@ -414,6 +418,9 @@ class InsightService:
             source_row_count=source_row_count,
             truncated=(not full_aggregate and source_row_count > CUSTOM_CHART_ROW_LIMIT)
             or size_capped,
+            # What the byte cap drops from an aggregated chart is groups/bins,
+            # never observations — row_count stays whole, so say so explicitly.
+            series_truncated=full_aggregate and size_capped,
             row_limit=CUSTOM_CHART_ROW_LIMIT,
             spec=spec,
         )
@@ -514,6 +521,23 @@ def _inside_projects(path: Path, root: Path) -> bool:
         return False
 
 
+_NUMERIC_AGGREGATES = frozenset({"sum", "mean", "median"})
+
+
+def _require_numeric_y(frame: pd.DataFrame, y_column: str, aggregate: str) -> None:
+    """Reject a numeric aggregate over a column no value parses from. The
+    aggregation coerces with ``errors="coerce"``, which used to answer 200 with a
+    chart of zeros instead of saying the column cannot be summed."""
+    values = cast("pd.Series", frame[y_column]).dropna()
+    if values.empty:
+        return
+    if cast("pd.Series", pd.to_numeric(values, errors="coerce")).notna().any():
+        return
+    raise CustomChartValidationError(
+        f"{aggregate} needs a numeric Y column; no value in {y_column} parses as a number."
+    )
+
+
 def _stream_chart_frame(
     source: Path,
     *,
@@ -591,6 +615,7 @@ def _stream_grouped_chart(
 
     def consume(chunks: Iterator[pd.DataFrame]) -> pd.DataFrame:
         states: dict[tuple[object, ...], dict[str, Any]] = {}
+        retained_values = 0
         for chunk in chunks:
             if cancel_check is not None:
                 cancel_check()
@@ -612,6 +637,12 @@ def _stream_grouped_chart(
                     None if cast("bool", pd.isna(value)) else value
                     for value in key_values
                 )
+                if key not in states and len(states) >= CUSTOM_CHART_GROUP_LIMIT:
+                    raise CustomChartValidationError(
+                        f"Grouping by {' and '.join(key_columns)} produces more than "
+                        f"{CUSTOM_CHART_GROUP_LIMIT} groups. Filter the data or "
+                        "group by a coarser column."
+                    )
                 state = states.setdefault(key, {"rows": 0, "sum": 0.0, "count": 0, "values": []})
                 state["rows"] += len(group)
                 if y_column is None:
@@ -620,6 +651,13 @@ def _stream_grouped_chart(
                 state["sum"] += float(numeric.sum())
                 state["count"] += len(numeric)
                 if aggregate == "median":
+                    retained_values += len(numeric)
+                    if retained_values > CUSTOM_CHART_MEDIAN_VALUE_LIMIT:
+                        raise CustomChartValidationError(
+                            "A median needs every value in memory and this chart "
+                            f"exceeds {CUSTOM_CHART_MEDIAN_VALUE_LIMIT} of them. "
+                            "Filter the data, or chart the mean instead."
+                        )
                     state["values"].extend(float(value) for value in numeric)
         rows: list[dict[str, Any]] = []
         for key, state in states.items():
@@ -777,7 +815,10 @@ def _inline_values(frame: pd.DataFrame) -> tuple[list[dict[str, Any]], bool]:
     return values, False
 
 
-_EXPRESSION_KEYS = frozenset({"expr", "labelExpr", "signal"})
+_EXPRESSION_KEYS = frozenset({"expr", "labelExpr", "signal", "calculate"})
+# `filter` is the one construct with two shapes: a string is an expression, a
+# dict/list is a field predicate and stays allowed.
+_STRING_EXPRESSION_KEYS = frozenset({"filter"})
 
 
 def _contains_vega_expression(node: object) -> bool:
@@ -785,6 +826,8 @@ def _contains_vega_expression(node: object) -> bool:
     if isinstance(node, dict):
         for key, value in node.items():
             if key in _EXPRESSION_KEYS:
+                return True
+            if key in _STRING_EXPRESSION_KEYS and isinstance(value, str):
                 return True
             if key == "condition":
                 conditions = value if isinstance(value, list) else [value]
