@@ -677,6 +677,22 @@ def _agent_qexec_artifact(
         "tool_names": list(agent_result.tool_names),
         "evidence_artifact_ids": evidence_ids,
     }
+    if agent_result.status == "answer_unverified":
+        # The loop ran and produced evidence, but the answer failed the exit
+        # gate twice. Abstaining keeps unverified prose out of the fact layer.
+        return _failed_qexec_artifact(
+            question_id=candidate.question_id,
+            question=candidate.question_en,
+            origin=candidate.origin,
+            project_id=project_id,
+            session_id=session_id,
+            parent_ids=[*parent_ids, *evidence_ids],
+            error=agent_result.error or "The agent answer could not be verified.",
+            outcome="abstained",
+            abstention_code="agent_answer_unverified",
+            exploratory=candidate.exploratory,
+            **common,
+        )
     if agent_result.status != "completed":
         return _failed_qexec_artifact(
             question_id=candidate.question_id,
@@ -758,9 +774,11 @@ def _agent_qexec_artifact(
         status="succeeded",
         outcome="answered",
         interpretation=agent_result.answer.strip(),
-        # The answer is evidence-backed but not rewritten by the legacy
-        # single-SQL interpretation validator.
-        interpretation_status="fallback",
+        # Reaching here means the answer passed the agent exit gate: every
+        # figure resolved against a persisted tool payload. "fallback" used to
+        # be stamped here, but on the legacy path that value means "the
+        # validator rejected it", which the UI renders identically.
+        interpretation_status="validated",
         exploratory=candidate.exploratory,
         limitations=list(candidate.risks),
     )

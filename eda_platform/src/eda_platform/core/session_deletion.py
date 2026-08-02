@@ -401,9 +401,7 @@ class SessionDeletionCoordinator:
                     ),
                 ).fetchone()
                 if active_job is not None:
-                    raise SessionDeletionBusyError(
-                        operation.session_id, str(active_job["job_id"])
-                    )
+                    raise SessionDeletionBusyError(operation.session_id, str(active_job["job_id"]))
 
                 conn.execute(
                     "delete from artifacts where project_id = ? and session_id = ?",
@@ -492,7 +490,11 @@ class SessionDeletionCoordinator:
             self._block(operation.op_id, f"committed audit event is invalid: {exc}")
 
         trace_relative = str(
-            PurePosixPath("projects") / operation.project_id / "sessions" / AUDIT_SESSION_ID / "trace.jsonl"
+            PurePosixPath("projects")
+            / operation.project_id
+            / "sessions"
+            / AUDIT_SESSION_ID
+            / "trace.jsonl"
         )
         try:
             trace_path = self._safe_path(trace_relative, create_parent=True)
@@ -538,9 +540,7 @@ class SessionDeletionCoordinator:
         except OSError as exc:
             raise SessionDeletionRetryableError(operation.op_id, str(exc)) from exc
 
-    def _purge_page_indexes(
-        self, conn: sqlite3.Connection, operation: _DeletionOperation
-    ) -> None:
+    def _purge_page_indexes(self, conn: sqlite3.Connection, operation: _DeletionOperation) -> None:
         """Drop the run's cached pagination projections.
 
         These tables are keyed by run scope and by workspace-relative file path,
@@ -661,9 +661,7 @@ class SessionDeletionCoordinator:
         *,
         persist: bool = True,
     ) -> None:
-        for source_relative in _source_relative_paths(
-            operation.project_id, operation.session_id
-        ):
+        for source_relative in _source_relative_paths(operation.project_id, operation.session_id):
             source = self._safe_path(source_relative)
             if os.path.lexists(source):
                 reason = f"source reappeared during deletion: {source_relative}"
@@ -873,7 +871,9 @@ def _artifact_count(items: tuple[_DeletionItem, ...]) -> int:
         payload = json.loads(items[0].payload)
         return int(payload.get("artifact_count", 0))
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise SessionDeletionBlockedError("unknown", "delete operation metadata is invalid") from exc
+        raise SessionDeletionBlockedError(
+            "unknown", "delete operation metadata is invalid"
+        ) from exc
 
 
 def _audit_event_key(op_id: str) -> str:
@@ -919,7 +919,9 @@ def _jsonl_event_payloads(payload: bytes, event_key: str) -> tuple[bytes, ...]:
         try:
             event = TraceEvent.model_validate_json(raw_line)
         except ValueError as exc:
-            raise SessionDeletionBlockedError("unknown", "audit trace contains invalid JSON") from exc
+            raise SessionDeletionBlockedError(
+                "unknown", "audit trace contains invalid JSON"
+            ) from exc
         if event.summary.get("event_key") == event_key:
             matching.append(
                 json.dumps(
@@ -950,7 +952,9 @@ def _assert_safe_parents(root: Path, parent: Path) -> None:
     for part in relative.parts:
         current /= part
         if current.is_symlink():
-            raise SessionDeletionBlockedError("unknown", f"path parent is a symlink: {current.name}")
+            raise SessionDeletionBlockedError(
+                "unknown", f"path parent is a symlink: {current.name}"
+            )
         if current.exists() and not current.is_dir():
             raise SessionDeletionBlockedError(
                 "unknown", f"path parent is not a directory: {current.name}"

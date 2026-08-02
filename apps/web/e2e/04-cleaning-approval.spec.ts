@@ -33,7 +33,9 @@ async function waitForOperationResult<T>(
 test("cleaning approval cannot be applied twice", async ({ page, request }) => {
   const { projectId, sessionId } = readSeed();
   await page.goto(`/projects/${projectId}/sessions/${sessionId}/cleaning`);
-  await expect(page.getByRole("heading", { name: "Cleaning" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Cleaning", exact: true }),
+  ).toBeVisible();
 
   const previewResponse = page.waitForResponse(
     (response) =>
@@ -79,7 +81,7 @@ test("cleaning approval cannot be applied twice", async ({ page, request }) => {
   await waitForRunCompleted(request, applied.new_session_id);
 
   /* Second apply — same approval, different idempotency key, via the UI. */
-  await page.getByRole("button", { name: "Apply & analyze" }).click();
+  await page.getByRole("button", { name: "Review and confirm" }).click();
   const dialog = page.getByRole("alertdialog", { name: "Confirm cleaning" });
   await expect(dialog).toBeVisible();
 
@@ -88,7 +90,7 @@ test("cleaning approval cannot be applied twice", async ({ page, request }) => {
       response.url().includes("/cleaning/apply") &&
       response.request().method() === "POST",
   );
-  await dialog.getByRole("button", { name: "Confirm apply" }).click();
+  await dialog.getByRole("button", { name: "Apply and start run" }).click();
   const replay = await replayResponse;
   expect(replay.status()).toBe(202);
 

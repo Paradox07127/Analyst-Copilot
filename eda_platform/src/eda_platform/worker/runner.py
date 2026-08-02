@@ -15,11 +15,13 @@ import re
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
 from typing import Any, cast, get_args
 
 from eda_platform.application.ports import TERMINAL_JOB_STATUSES
+from eda_platform.core.budget import SessionBudgetPolicy
 from eda_platform.core.cancellation import (
     CancellationError,
     CancellationToken,
@@ -372,6 +374,19 @@ def _preclean_options(params: dict) -> dict[str, Any] | None:
     }
 
 
+# A runaway fuse, not a calibrated tier. The agent loop bounds steps and tool
+# calls but nothing stops one question from burning tokens inside them, and the
+# job used to run on an empty policy where every ceiling was None. Measured cost
+# is ~32k tokens / $0.0066 per question, so these sit far above a healthy run
+# and only fire on a loop that has genuinely lost control. Per-tier limits
+# belong in settings once real sessions have been measured.
+QUESTION_AGENT_BUDGET_FUSE = SessionBudgetPolicy(
+    max_total_tokens=500_000,
+    max_cost_usd=Decimal("2.00"),
+    max_wall_seconds=1_800.0,
+)
+
+
 def _run_question_exec_job(
     store: ArtifactStore,
     workspace: str,
@@ -399,6 +414,7 @@ def _run_question_exec_job(
         code_backend=(
             None if params.get("llm") == "offline" else _safe_question_code_backend(store, job)
         ),
+        budget_policy=QUESTION_AGENT_BUDGET_FUSE,
         cancel_check=cancel_check,
     )
     _checkpoint(cancel_check)

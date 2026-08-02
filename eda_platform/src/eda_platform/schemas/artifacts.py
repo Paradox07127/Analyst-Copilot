@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 
 class ArtifactType(StrEnum):
@@ -69,7 +69,8 @@ class Artifact(BaseModel):
     id: str
     type: ArtifactType
     project_id: str
-    session_id: str
+    # Accept artifacts persisted before runs were renamed to sessions.
+    session_id: str = Field(validation_alias=AliasChoices("session_id", "run_id"))
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     parents: list[str] = Field(default_factory=list)
     payload: dict[str, Any]

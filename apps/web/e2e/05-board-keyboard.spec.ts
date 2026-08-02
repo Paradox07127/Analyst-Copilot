@@ -60,7 +60,10 @@ test("board cards can be reordered with the keyboard and the order persists", as
   expect(added).toHaveLength(2);
   const [first, second] = added;
 
-  const handle = page.getByRole("button", { name: `${HANDLE_PREFIX}${first}` });
+  const handle = page.getByRole("button", {
+    name: `${HANDLE_PREFIX}${first}`,
+    exact: true,
+  });
   await tabTo(page, handle);
   await page.keyboard.press("Enter");
   await expect(handle).toHaveAttribute("aria-pressed", "true");

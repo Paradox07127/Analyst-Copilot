@@ -104,10 +104,14 @@ def test_list_artifacts_of_types_skips_unrelated_payload_files(tmp_path: Path) -
     read_paths: list[str] = []
     original_read = Path.read_text
 
-    def tracking_read(self: Path, *args: object, **kwargs: object) -> str:
+    def tracking_read(
+        self: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
         if self.suffix == ".json" and "artifacts" in self.parts:
             read_paths.append(self.name)
-        return original_read(self, *args, **kwargs)
+        return original_read(self, encoding=encoding, errors=errors)
 
     Path.read_text = tracking_read  # type: ignore[method-assign]
     try:

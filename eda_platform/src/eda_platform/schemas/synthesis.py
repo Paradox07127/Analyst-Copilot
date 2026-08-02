@@ -30,8 +30,7 @@ class SynthesisBrief(BaseModel):
     project_id: str
     business_context: str = Field(
         default="",
-        description="Unverified user framing; labeled in the UI, never a claim "
-        "or number source",
+        description="Unverified user framing; labeled in the UI, never a claim or number source",
     )
     selected_finding_artifact_ids: list[str] = Field(min_length=1)
     selected_finding_session_ids: dict[str, str] = Field(default_factory=dict)
@@ -61,7 +60,9 @@ class SynthesisBrief(BaseModel):
     @field_validator("selected_finding_session_ids")
     @classmethod
     def _finding_session_ids_are_non_empty(cls, value: dict[str, str]) -> dict[str, str]:
-        if all(artifact_id.strip() and session_id.strip() for artifact_id, session_id in value.items()):
+        if all(
+            artifact_id.strip() and session_id.strip() for artifact_id, session_id in value.items()
+        ):
             return value
         raise ValueError("selected_finding_session_ids must contain non-empty ids.")
 
@@ -76,11 +77,7 @@ class SynthesisBrief(BaseModel):
                 "selected_finding_session_ids contains artifacts that were not selected."
             )
         if self.report_eligible and self.report_readiness == "not_eligible":
-            raise ValueError(
-                "report_eligible=True contradicts report_readiness='not_eligible'."
-            )
+            raise ValueError("report_eligible=True contradicts report_readiness='not_eligible'.")
         if not self.report_eligible and self.report_readiness != "not_eligible":
-            raise ValueError(
-                "report_eligible=False requires report_readiness='not_eligible'."
-            )
+            raise ValueError("report_eligible=False requires report_readiness='not_eligible'.")
         return self

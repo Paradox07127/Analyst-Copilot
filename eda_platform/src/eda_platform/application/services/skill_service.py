@@ -145,11 +145,7 @@ class SkillService:
         project_id = self._project_for_run(session_id)
         scope = f"skills:{project_id}:{session_id}"
         version = self._skills_source_version(project_id, session_id)
-        offset = (
-            decode_bound_cursor(cursor, scope=scope, source_version=version)
-            if cursor
-            else 0
-        )
+        offset = decode_bound_cursor(cursor, scope=scope, source_version=version) if cursor else 0
         index = ResourcePageIndex(self._store.db_path)
         if not index.is_current(scope, version):
             handles = self._datasets.list_datasets(session_id)
@@ -166,42 +162,28 @@ class SkillService:
                 version,
                 {
                     "skills": [item.model_dump_json() for item in summaries],
-                    "datasets": [
-                        _target_dataset(item).model_dump_json() for item in handles
-                    ],
+                    "datasets": [_target_dataset(item).model_dump_json() for item in handles],
                     "plans": [item.model_dump_json() for item in plans],
                 },
             )
             if self._skills_source_version(project_id, session_id) != version:
                 raise InvalidCursorError
-        skill_rows = index.page(
-            scope, version, "skills", offset=offset, limit=limit + 1
-        )
-        dataset_rows = index.page(
-            scope, version, "datasets", offset=offset, limit=limit + 1
-        )
-        plan_rows = index.page(
-            scope, version, "plans", offset=offset, limit=limit + 1
-        )
+        skill_rows = index.page(scope, version, "skills", offset=offset, limit=limit + 1)
+        dataset_rows = index.page(scope, version, "datasets", offset=offset, limit=limit + 1)
+        plan_rows = index.page(scope, version, "plans", offset=offset, limit=limit + 1)
         if self._skills_source_version(project_id, session_id) != version:
             raise InvalidCursorError
-        has_more = any(
-            len(rows) > limit for rows in (skill_rows, dataset_rows, plan_rows)
-        )
+        has_more = any(len(rows) > limit for rows in (skill_rows, dataset_rows, plan_rows))
         consumed = offset + limit
         return SkillsView(
             session_id=session_id,
             project_id=project_id,
-            skills=[
-                SkillSummary.model_validate_json(item) for item in skill_rows[:limit]
-            ],
+            skills=[SkillSummary.model_validate_json(item) for item in skill_rows[:limit]],
             datasets=[
-                SkillTargetDataset.model_validate_json(item)
-                for item in dataset_rows[:limit]
+                SkillTargetDataset.model_validate_json(item) for item in dataset_rows[:limit]
             ],
             savable_plans=[
-                SkillPlanCandidate.model_validate_json(item)
-                for item in plan_rows[:limit]
+                SkillPlanCandidate.model_validate_json(item) for item in plan_rows[:limit]
             ],
             next_cursor=(
                 encode_bound_cursor(
@@ -309,9 +291,7 @@ class SkillService:
         _validated_sql(instantiated)
         project_dir = self._store.project_dir(project_id)
         try:
-            skill = import_seed(
-                project_dir, seed, relation_name=relations[0], bindings=bindings
-            )
+            skill = import_seed(project_dir, seed, relation_name=relations[0], bindings=bindings)
         except (ToolGuardError, ValueError) as exc:
             raise SkillBindingInvalidError(str(exc)) from exc
         if name and name != skill.name:
@@ -440,8 +420,8 @@ class SkillService:
         if idempotency_key:
             existing = self._store.find_by_idempotency_key(idempotency_key)
             if existing is not None:
-                _payload, replay_payload_digest, _status = (
-                    self._approvals.inspect_payload(action_hash, session_id=session_id)
+                _payload, replay_payload_digest, _status = self._approvals.inspect_payload(
+                    action_hash, session_id=session_id
                 )
                 self._jobs.assert_idempotent_replay(
                     existing,
@@ -459,6 +439,7 @@ class SkillService:
                     existing, session_id=session_id, skill_id=skill_id, action_hash=action_hash
                 )
                 return self._replayed(session_id, skill_id, existing)
+
         def validate(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             if str(payload.get("skill_id", "")) != skill_id:
                 raise SkillValidationError(
@@ -481,9 +462,7 @@ class SkillService:
         )
         with self._approvals.compensate_on_failure(action_hash, session_id=session_id):
             skill, dataset_ids = validated
-            execution_session_id = generate_replay_session_id(
-                session_id, skill_id, dataset_ids
-            )
+            execution_session_id = generate_replay_session_id(session_id, skill_id, dataset_ids)
             job = self._jobs.create_skill_replay_job(
                 execution_session_id,
                 project_id=project_id,
@@ -543,7 +522,9 @@ class SkillService:
         for dataset_id in dataset_ids:
             handle = by_id.get(dataset_id)
             if handle is None:
-                raise SkillBindingInvalidError(f"Dataset {dataset_id} is not part of run {session_id}.")
+                raise SkillBindingInvalidError(
+                    f"Dataset {dataset_id} is not part of run {session_id}."
+                )
             if dataset_id in seen:
                 raise SkillBindingInvalidError(f"Dataset {dataset_id} was selected twice.")
             seen.add(dataset_id)
@@ -582,7 +563,9 @@ class SkillService:
                 f"Idempotency key already used by job {job_id} for a different skill.",
             )
         dataset_ids = [str(item) for item in payload.get("dataset_ids", [])]
-        expected_suffix = generate_replay_session_id(session_id, skill_id, dataset_ids).rsplit("_", 1)[-1]
+        expected_suffix = generate_replay_session_id(session_id, skill_id, dataset_ids).rsplit(
+            "_", 1
+        )[-1]
         if not str(job_row["session_id"]).endswith(f"_{expected_suffix}"):
             raise JobConflictError(
                 job_id,
@@ -608,12 +591,18 @@ class SkillService:
         return str(row["project_id"])
 
 
-def generate_replay_session_id(source_session_id: str, skill_id: str, dataset_ids: list[str]) -> str:
+def generate_replay_session_id(
+    source_session_id: str, skill_id: str, dataset_ids: list[str]
+) -> str:
     """Derived run id for one replay; the suffix is deterministic so an
     idempotent retry can prove a job really came from this request."""
     stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     suffix = stable_hash(
-        {"source_session_id": source_session_id, "skill_id": skill_id, "dataset_ids": list(dataset_ids)},
+        {
+            "source_session_id": source_session_id,
+            "skill_id": skill_id,
+            "dataset_ids": list(dataset_ids),
+        },
         length=6,
     )
     return f"{REPLAY_SESSION_PREFIX}{stamp}_{suffix}"

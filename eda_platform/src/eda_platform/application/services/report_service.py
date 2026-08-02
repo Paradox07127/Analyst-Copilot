@@ -83,7 +83,9 @@ class ReportService:
         self, artifact_id: str, *, project_id: str, session_id: str
     ) -> Artifact | None:
         """Read an indexed artifact only if its resolved path stays in the workspace."""
-        row = self._store.artifact_index_row(artifact_id, project_id=project_id, session_id=session_id)
+        row = self._store.artifact_index_row(
+            artifact_id, project_id=project_id, session_id=session_id
+        )
         if row is None:
             return None
         path = row["path"]

@@ -140,9 +140,7 @@ def test_search_paginates(client: TestClient) -> None:
 def test_run_cursor_is_bound_to_project_search_and_derived_toggle(
     client: TestClient, workspace: Path
 ) -> None:
-    first = client.get(
-        "/api/v1/projects/demo/sessions", params={"q": "run", "limit": 1}
-    ).json()
+    first = client.get("/api/v1/projects/demo/sessions", params={"q": "run", "limit": 1}).json()
     cursor = first["next_cursor"]
     assert cursor
 
@@ -181,15 +179,11 @@ def test_run_cursor_is_bound_to_project_search_and_derived_toggle(
 def test_run_cursor_rejects_legacy_and_mutated_filter_binding(
     client: TestClient,
 ) -> None:
-    page = client.get(
-        "/api/v1/projects/demo/sessions", params={"limit": 1}
-    ).json()
+    page = client.get("/api/v1/projects/demo/sessions", params={"limit": 1}).json()
     cursor = page["next_cursor"]
     decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
     decoded["f"] = "0" * len(decoded["f"])
-    mutated = base64.urlsafe_b64encode(
-        json.dumps(decoded).encode("utf-8")
-    ).decode("ascii")
+    mutated = base64.urlsafe_b64encode(json.dumps(decoded).encode("utf-8")).decode("ascii")
     legacy = base64.urlsafe_b64encode(
         json.dumps({"c": decoded["c"], "r": decoded["r"]}).encode("utf-8")
     ).decode("ascii")
@@ -230,7 +224,9 @@ def test_delete_project_removes_its_workspace_and_index(
 
 def test_delete_writes_an_audit_event(client: TestClient, workspace: Path) -> None:
     client.delete("/api/v1/sessions/run_churn")
-    events = ArtifactStore(workspace).list_trace_events(project_id="demo", session_id=AUDIT_SESSION_ID)
+    events = ArtifactStore(workspace).list_trace_events(
+        project_id="demo", session_id=AUDIT_SESSION_ID
+    )
     deleted = [event for event in events if event.event_type == "session.deleted"]
     assert [event.name for event in deleted] == ["run_churn"]
     assert deleted[0].summary["project_id"] == "demo"
@@ -323,9 +319,7 @@ def test_startup_preserves_and_logs_nonterminal_delete_outcomes(
 ) -> None:
     crash = _CrashOnce("after_reserve")
     with pytest.raises(InjectedCrash):
-        SessionDeletionCoordinator(
-            ArtifactStore(workspace), fault_hook=crash
-        ).delete("run_churn")
+        SessionDeletionCoordinator(ArtifactStore(workspace), fault_hook=crash).delete("run_churn")
     assert crash.op_id is not None
 
     def fail_recovery(_coordinator: SessionDeletionCoordinator, _op_id: str) -> None:
@@ -428,4 +422,6 @@ def test_delete_traversal_id_is_rejected_without_touching_disk(
 ) -> None:
     before = sorted(p.name for p in (workspace / "projects" / "demo" / "sessions").iterdir())
     assert client.delete("/api/v1/sessions/..%2F..%2Fuploads").status_code == 404
-    assert sorted(p.name for p in (workspace / "projects" / "demo" / "sessions").iterdir()) == before
+    assert (
+        sorted(p.name for p in (workspace / "projects" / "demo" / "sessions").iterdir()) == before
+    )

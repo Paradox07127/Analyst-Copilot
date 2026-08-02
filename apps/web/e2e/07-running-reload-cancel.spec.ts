@@ -5,7 +5,7 @@
 import { expect, test } from "@playwright/test";
 import { PROJECT_ID } from "./support/seed";
 
-function slowCsv(rowCount = 250_000): Buffer {
+function slowCsv(rowCount = 1_000_000): Buffer {
   const rows = ["id,segment,region,amount,units,discount,score,event_date"];
   for (let index = 1; index <= rowCount; index += 1) {
     rows.push(
@@ -21,30 +21,36 @@ test("a running job survives reload and can be cancelled from Activity", async (
   request,
 }) => {
   await page.goto(`/projects/${PROJECT_ID}/new-session`);
-  await page.setInputFiles("#launchpad-files", {
+  await page.getByLabel("Data files (.csv)").setInputFiles({
     name: "reload_cancel.csv",
     mimeType: "text/csv",
     buffer: slowCsv(),
   });
   await expect(page.getByText(/^Ready · ds_/)).toBeVisible({ timeout: 60_000 });
-  await page.selectOption("#launchpad-llm", "offline");
+  const startedResponse = page.waitForResponse(
+    (response) =>
+      /\/api\/v1\/sessions\/[^/]+\/jobs$/.test(response.url()) &&
+      response.request().method() === "POST",
+  );
   await page.getByRole("button", { name: "Run analysis" }).click();
+  const started = await (await startedResponse).json();
+  const jobId = String(started.job_id);
+  const sessionId = String(started.session_id);
 
-  await expect(page).toHaveURL(/\/sessions\/sess_[^/]+\/data-map$/);
-  const sessionId = new URL(page.url()).pathname.split("/sessions/")[1].split("/")[0];
+  await expect(page).toHaveURL(new RegExp(`/sessions/${sessionId}/data-map$`));
   await page.getByRole("button", { name: "Open activity" }).click();
   const drawer = page.getByRole("dialog", { name: "Activity" });
-  const tracking = drawer.getByText(/Tracking job_[^ ]+ · session run_/);
-  await expect(tracking).toBeVisible();
-  const trackingText = await tracking.textContent();
-  const jobId = trackingText?.match(/Tracking (job_[^ ]+)/)?.[1];
-  expect(jobId).toBeDefined();
+  await expect(
+    drawer.getByText(`Selected ${jobId} · session ${sessionId}`),
+  ).toBeVisible();
   await expect(drawer.getByRole("button", { name: "Cancel job" })).toBeVisible();
 
   await page.reload();
 
   await expect(page).toHaveURL(new RegExp(`/sessions/${sessionId}/data-map$`));
-  await expect(drawer.getByText(new RegExp(`Tracking ${jobId}`))).toBeVisible();
+  await expect(
+    drawer.getByText(`Selected ${jobId} · session ${sessionId}`),
+  ).toBeVisible();
   await drawer.getByRole("button", { name: "Cancel job" }).click();
   await page.getByRole("button", { name: "Confirm cancel" }).click();
   await expect(drawer.getByText("Cancelled", { exact: true })).toBeVisible({

@@ -270,3 +270,157 @@ def test_a_refused_tools_payload_is_not_recorded_as_one_failed_question(
             artifacts=[],
             store=store,
         )
+
+
+def _sql_response(call_id: str) -> LLMToolResponse:
+    return LLMToolResponse(
+        tool_calls=[
+            LLMToolCall(
+                call_id=call_id,
+                name="run_sql",
+                arguments={
+                    "purpose": "Compare total amount by region.",
+                    "sql": (
+                        "SELECT region, SUM(amount) AS total "
+                        "FROM orders GROUP BY region ORDER BY total DESC"
+                    ),
+                },
+            )
+        ]
+    )
+
+
+def test_a_fabricated_figure_is_sent_back_and_the_rewrite_is_admitted(
+    tmp_path: Path,
+) -> None:
+    """West totals 20 in the fixture; 999 exists only in the model's prose."""
+    store, dataset = _context(tmp_path)
+    llm = _ScriptedQuestionLLM(
+        [
+            _sql_response("sql_1"),
+            LLMToolResponse(content="West leads with 999 in total amount."),
+            LLMToolResponse(content="West leads with 20 in total amount."),
+        ]
+    )
+
+    result = run_question_agent(
+        "Which region has the highest total amount?",
+        candidate_context={"target_datasets": ["orders.csv"]},
+        datasets=[dataset],
+        project_id="project_demo",
+        session_id="question_run",
+        llm=llm,  # type: ignore[arg-type]
+        artifacts=[],
+        store=store,
+    )
+
+    assert result.status == "completed"
+    assert result.answer == "West leads with 20 in total amount."
+
+
+def test_a_twice_fabricated_answer_abstains_instead_of_being_persisted(
+    tmp_path: Path,
+) -> None:
+    store, dataset = _context(tmp_path)
+    llm = _ScriptedQuestionLLM(
+        [
+            _sql_response("sql_1"),
+            LLMToolResponse(content="West leads with 999 in total amount."),
+            LLMToolResponse(content="West leads with 998 in total amount."),
+        ]
+    )
+
+    result = run_question_agent(
+        "Which region has the highest total amount?",
+        candidate_context={"target_datasets": ["orders.csv"]},
+        datasets=[dataset],
+        project_id="project_demo",
+        session_id="question_run",
+        llm=llm,  # type: ignore[arg-type]
+        artifacts=[],
+        store=store,
+    )
+
+    assert result.status == "answer_unverified"
+    assert result.answer == ""
+
+    artifact = _agent_qexec_artifact(
+        _candidate(),
+        agent_result=result,
+        project_id="project_demo",
+        session_id="question_run",
+        parent_ids=[],
+    )
+    persisted = QuestionExecutionResult.model_validate(artifact.payload)
+
+    assert persisted.outcome == "abstained"
+    assert persisted.abstention_code == "agent_answer_unverified"
+    assert "999" not in persisted.interpretation
+    assert "998" not in persisted.interpretation
+
+
+def test_a_verified_agent_answer_is_stamped_validated() -> None:
+    """`fallback` on the legacy path means "the validator rejected this"."""
+    sql_artifact = Artifact(
+        id=make_artifact_id("sql", {"seed": "verified"}),
+        type=ArtifactType.SQL_RESULT,
+        project_id="project_demo",
+        session_id="question_run",
+        payload={
+            "sql": "SELECT region, SUM(amount) AS total FROM orders GROUP BY region",
+            "columns": ["region", "total"],
+            "dtypes": {"region": "object", "total": "int64"},
+            "units": {},
+            "rows_preview": [{"region": "West", "total": 20}],
+            "row_count": 1,
+            "truncated": False,
+        },
+    )
+    artifact = _agent_qexec_artifact(
+        _candidate(),
+        agent_result=AgentRunResult(
+            status="completed",
+            answer="West leads with 20 in total amount.",
+            artifacts=[sql_artifact],
+            tool_calls=1,
+            tool_names=["run_sql"],
+        ),
+        project_id="project_demo",
+        session_id="question_run",
+        parent_ids=[],
+    )
+    persisted = QuestionExecutionResult.model_validate(artifact.payload)
+
+    assert persisted.outcome == "answered"
+    assert persisted.interpretation_status == "validated"
+
+
+def _candidate() -> QuestionCandidate:
+    return QuestionCandidate(
+        question_id="question_1",
+        question_en="Which region has the highest total amount?",
+        origin="llm",
+        target_datasets=["orders.csv"],
+        score=QuestionScore(
+            data_availability=1.0,
+            statistical_signal=0.5,
+            quality_risk=0.0,
+            join_risk=0.0,
+            deterministic_score=0.75,
+        ),
+    )
+
+
+def test_the_question_batch_job_never_runs_without_a_hard_budget() -> None:
+    """An agent loop with only step counts has no ceiling on tokens or dollars.
+
+    The tier values still need calibration against real sessions; this is the
+    runaway fuse, set far above the measured ~32k tokens / $0.0066 per question
+    so it cannot fire on a healthy run.
+    """
+    from eda_platform.worker.runner import QUESTION_AGENT_BUDGET_FUSE
+
+    assert QUESTION_AGENT_BUDGET_FUSE.max_total_tokens is not None
+    assert QUESTION_AGENT_BUDGET_FUSE.max_cost_usd is not None
+    assert QUESTION_AGENT_BUDGET_FUSE.max_wall_seconds is not None
+    assert QUESTION_AGENT_BUDGET_FUSE.max_total_tokens >= 100_000

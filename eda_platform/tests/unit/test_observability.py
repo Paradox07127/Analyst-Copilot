@@ -33,7 +33,9 @@ def _clean_observability_state() -> Iterator[None]:
     observability.reset()
 
 
-def _event(event_type: str, name: str, *, session_id: str = "run_x", **summary: object) -> TraceEvent:
+def _event(
+    event_type: str, name: str, *, session_id: str = "run_x", **summary: object
+) -> TraceEvent:
     return TraceEvent(
         session_id=session_id,
         event_type=event_type,

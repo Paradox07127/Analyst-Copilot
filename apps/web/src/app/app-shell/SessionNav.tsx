@@ -1,6 +1,6 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Link, useLocation, useParams } from "react-router";
-import { useDatasets } from "../../api/hooks";
+import { useDatasets, useEdaHandoff, useSessionDetail } from "../../api/hooks";
 import { readBaseline } from "../../features/compare/baseline-storage";
 import {
   projectComparePath,
@@ -20,13 +20,39 @@ interface NavPage {
 interface NavGroup {
   title: string;
   pages: NavPage[];
+  state?: StageState;
 }
+
+type StageState = "ready" | "running" | "waiting";
+
+const FINISHED_SESSION_STATUSES = new Set([
+  "complete",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+const STAGE_LABEL: Record<StageState, string> = {
+  ready: "Ready",
+  running: "Running",
+  waiting: "Waiting",
+};
+
+const STAGE_DOT: Record<StageState, string> = {
+  ready: "bg-status-ok",
+  running: "animate-breathe bg-status-warn",
+  waiting: "bg-status-neutral/45",
+};
 
 /* Three stages of work, in the order a session moves through them. Board sits
  * with the investigation pages because it is the kanban over them; Trace & cost
  * and Artifacts sit together because both answer "where did this number come
  * from". */
-function useNavGroups(projectId: string, sessionId: string): NavGroup[] {
+function useNavGroups(
+  projectId: string,
+  sessionId: string,
+  readiness: { data: StageState; agent: StageState },
+): NavGroup[] {
   const datasets = useDatasets(sessionId);
   const firstDatasetId = datasets.data?.[0]?.dataset_id;
   const at = (section: string) => sessionSectionPath(projectId, sessionId, section);
@@ -39,6 +65,7 @@ function useNavGroups(projectId: string, sessionId: string): NavGroup[] {
   return [
     {
       title: "Understand the data",
+      state: readiness.data,
       pages: [
         { label: "Data map", icon: "dashboard", to: at("data-map") },
         ...(firstDatasetId
@@ -66,6 +93,7 @@ function useNavGroups(projectId: string, sessionId: string): NavGroup[] {
     },
     {
       title: "Investigate with the agent",
+      state: readiness.agent,
       pages: [
         { label: "Questions", icon: "quiz", to: at("questions") },
         { label: "Deep analysis", icon: "analytics", to: at("deep-analysis") },
@@ -95,6 +123,38 @@ function useNavGroups(projectId: string, sessionId: string): NavGroup[] {
   ];
 }
 
+/* A handoff is more trustworthy than a session's coarse lifecycle status:
+ * auto-EDA publishes it when the data surfaces are safe to browse, while the
+ * agent can still be drafting questions and the report afterwards. */
+function usePipelineReadiness(sessionId: string): {
+  data: StageState;
+  agent: StageState;
+  active: boolean;
+} {
+  const session = useSessionDetail(sessionId);
+  const edaHandoff = useEdaHandoff(sessionId);
+  const status = session.data?.status?.toLowerCase();
+  const finished = status ? FINISHED_SESSION_STATUSES.has(status) : false;
+  const completed = status === "complete" || status === "completed";
+  const dataReady = Boolean(edaHandoff.data) || completed;
+  const active = Boolean(status && !finished);
+
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => {
+      void session.refetch();
+      void edaHandoff.refetch();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [active, edaHandoff.refetch, session.refetch]);
+
+  return {
+    data: dataReady ? "ready" : active ? "running" : "waiting",
+    agent: completed ? "ready" : dataReady && active ? "running" : "waiting",
+    active,
+  };
+}
+
 /* Header of the centre column, not of the window: it sits inside the main
  * panel so the session rail and the Inspector keep their full height, and the
  * rail stays a session switcher rather than competing with 17 page links. */
@@ -115,6 +175,21 @@ function matchesPath(pathname: string, to: string): boolean {
 
 function pageMatches(pathname: string, page: NavPage): boolean {
   return matchesPath(pathname, page.activePath ?? page.to);
+}
+
+function unavailableReason(
+  groupTitle: string,
+  readiness: { data: StageState; agent: StageState },
+): string | undefined {
+  if (groupTitle === "Understand the data" && readiness.data !== "ready") {
+    return "EDA is still preparing this workspace.";
+  }
+  if (groupTitle !== "Investigate with the agent" || readiness.agent === "ready") {
+    return undefined;
+  }
+  return readiness.agent === "waiting"
+    ? "Agent work begins after EDA publishes the data workspace."
+    : "The agent is still preparing this analysis.";
 }
 
 /* Deliberately no step numbers: the three stages are an order of work, not a
@@ -146,12 +221,50 @@ function StageButton({
       }`}
     >
       {group.title}
+      {group.state && (
+        <span
+          aria-hidden
+          title={STAGE_LABEL[group.state]}
+          className="ml-0.5 flex items-center gap-1 text-[10px] font-medium text-status-neutral"
+        >
+          <span className={`size-1.5 rounded-full ${STAGE_DOT[group.state]}`} />
+          {STAGE_LABEL[group.state]}
+        </span>
+      )}
       {/* Only when the two diverge: looking ahead at another stage must not
        * make the bar forget which stage the open page belongs to. */}
       {current && !selected && (
         <span aria-hidden className="size-1.5 rounded-full bg-primary" />
       )}
     </button>
+  );
+}
+
+function ProgressNotice({
+  data,
+  agent,
+}: {
+  data: StageState;
+  agent: StageState;
+}) {
+  return (
+    <div
+      role="status"
+      className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-base bg-status-warn/10 px-2 py-1.5 text-xs text-status-neutral"
+    >
+      <span className="font-medium text-text">Analysis is still running</span>
+      <span className="flex items-center gap-1">
+        <span aria-hidden className={`size-1.5 rounded-full ${STAGE_DOT[data]}`} />
+        EDA {STAGE_LABEL[data].toLowerCase()}
+      </span>
+      <span className="flex items-center gap-1">
+        <span aria-hidden className={`size-1.5 rounded-full ${STAGE_DOT[agent]}`} />
+        Agent {STAGE_LABEL[agent].toLowerCase()}
+      </span>
+      <span className="text-status-neutral/80">
+        Live progress is in the floating button at bottom right.
+      </span>
+    </div>
   );
 }
 
@@ -162,7 +275,8 @@ function SessionNavGroups({
   projectId: string;
   sessionId: string;
 }) {
-  const groups = useNavGroups(projectId, sessionId);
+  const readiness = usePipelineReadiness(sessionId);
+  const groups = useNavGroups(projectId, sessionId, readiness);
   const { pathname } = useLocation();
   const panelId = useId();
   /* Stamped with the route it was chosen on, and compared during render rather
@@ -199,6 +313,9 @@ function SessionNavGroups({
           </div>
         ))}
       </div>
+      {readiness.active && (
+        <ProgressNotice data={readiness.data} agent={readiness.agent} />
+      )}
       <ul
         id={panelId}
         aria-label={selected.title}
@@ -206,16 +323,28 @@ function SessionNavGroups({
       >
         {selected.pages.map((page) => {
           const active = pageMatches(pathname, page);
+          const reason = unavailableReason(selected.title, readiness);
           return (
             <li key={page.to}>
-              <Link
-                to={page.to}
-                aria-current={active ? "page" : undefined}
-                className={itemClass({ isActive: active })}
-              >
-                <NavIcon name={page.icon} />
-                {page.label}
-              </Link>
+              {reason ? (
+                <span
+                  aria-disabled="true"
+                  title={reason}
+                  className="flex cursor-not-allowed items-center gap-1.5 rounded-base px-2 py-1 text-sm text-status-neutral/50"
+                >
+                  <NavIcon name={page.icon} />
+                  {page.label}
+                </span>
+              ) : (
+                <Link
+                  to={page.to}
+                  aria-current={active ? "page" : undefined}
+                  className={itemClass({ isActive: active })}
+                >
+                  <NavIcon name={page.icon} />
+                  {page.label}
+                </Link>
+              )}
             </li>
           );
         })}

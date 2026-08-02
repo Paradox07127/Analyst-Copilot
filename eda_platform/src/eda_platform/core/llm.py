@@ -580,8 +580,12 @@ class AnthropicLLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> LLMToolResponse:
-        if agent_model_profile(self.settings.provider, self.settings.model) is None:
-            raise ValueError("Model is not verified for the Agent tool loop.")
+        # No profile means unverified, not unusable — the same rule the
+        # OpenAI-compatible client follows. A local refusal both hid every model
+        # newer than the catalog and raised a type the batch fallback in
+        # question_exec does not catch, turning one degrade into per-question
+        # failures. Let the endpoint decide; an unsupported tools payload comes
+        # back as ToolCallingUnsupportedError from _post_json.
         system, provider_messages = _anthropic_agent_messages(messages)
         body: dict[str, Any] = {
             "model": self.settings.model,

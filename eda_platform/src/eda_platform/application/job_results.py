@@ -8,10 +8,10 @@ import tempfile
 from pathlib import Path
 
 from eda_platform.core.config import require_absolute_workspace
-from eda_platform.core.store import JOB_RESULTS_DIRNAME
+from eda_platform.core.store import session_results_relative_path
 
 MAX_JOB_RESULT_BYTES = 8 * 1024 * 1024
-_SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,160}$")
+_SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_.-]{1,160}$")
 
 
 class JobResultError(Exception):
@@ -26,15 +26,23 @@ class JobResultTooLargeError(JobResultError):
     error_code = "job_result_too_large"
 
 
-def _require_safe(*identifiers: str) -> None:
-    if any(_SAFE_ID.fullmatch(item) is None for item in identifiers):
+def _require_safe_job_id(job_id: str) -> None:
+    if _SAFE_JOB_ID.fullmatch(job_id) is None:
         raise JobResultError("Invalid job result identity.")
 
 
-def _path(workspace: Path | str, project_id: str, session_id: str, job_id: str) -> Path:
-    _require_safe(project_id, session_id, job_id)
+def _directory_path(workspace: Path | str, project_id: str, session_id: str) -> Path:
     root = require_absolute_workspace(workspace)
-    return root / JOB_RESULTS_DIRNAME / project_id / session_id / f"{job_id}.json"
+    try:
+        relative = session_results_relative_path(project_id, session_id)
+    except ValueError as exc:
+        raise JobResultError("Invalid job result identity.") from exc
+    return root / relative
+
+
+def _path(workspace: Path | str, project_id: str, session_id: str, job_id: str) -> Path:
+    _require_safe_job_id(job_id)
+    return _directory_path(workspace, project_id, session_id) / f"{job_id}.json"
 
 
 def write_job_result(
@@ -90,9 +98,8 @@ def read_job_result(
 def _result_directory(
     workspace: Path | str, project_id: str, session_id: str, *, create: bool
 ) -> Path:
-    _require_safe(project_id, session_id)
     root = require_absolute_workspace(workspace).resolve()
-    directory = root / JOB_RESULTS_DIRNAME / project_id / session_id
+    directory = _directory_path(root, project_id, session_id)
     # Every level, not just the leaf: a symlinked project or run directory would
     # otherwise redirect the whole tree past the containment check below.
     for level in (directory.parent.parent, directory.parent, directory):

@@ -736,9 +736,7 @@ def test_question_batch_budget_failure_marks_run_failed(tmp_path: Path) -> None:
         for artifact in source.artifacts
         if artifact.type is ArtifactType.QUESTION_CANDIDATE_SET
     )
-    candidate = QuestionCandidateSet.model_validate(
-        candidate_artifact.payload
-    ).candidates[0]
+    candidate = QuestionCandidateSet.model_validate(candidate_artifact.payload).candidates[0]
 
     with pytest.raises(BudgetExceeded):
         run_question_batch(
@@ -757,8 +755,7 @@ def test_question_batch_budget_failure_marks_run_failed(tmp_path: Path) -> None:
         session_id="batch_budget_exhausted",
     )
     assert any(
-        event.event_type == "step_failed" and event.name == "question_batch"
-        for event in events
+        event.event_type == "step_failed" and event.name == "question_batch" for event in events
     )
 
 
@@ -871,7 +868,8 @@ def _base_artifacts(datasets: list[LoadedDataset]) -> dict[str, list[Artifact]]:
         for dataset in datasets
     ]
     quality = [
-        scan_quality(profile, project_id="project_demo", session_id="run_demo") for profile in profiles
+        scan_quality(profile, project_id="project_demo", session_id="run_demo")
+        for profile in profiles
     ]
     analysis = [
         artifact

@@ -8,11 +8,22 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from eda_platform.core.budget import BudgetExceeded
-from eda_platform.core.claim_language import implies_causation
+from eda_platform.core.claim_language import (
+    MODEL_ASSERTION_TERMS,
+    asserts_model_capability,
+    implies_causation,
+)
 from eda_platform.core.llm import LLMClient, is_offline_client
 from eda_platform.core.semantic import SemanticSeeds, pinned_context_block
+from eda_platform.schemas.artifacts import Artifact, ArtifactType, SqlResult
 from eda_platform.schemas.questions import QuestionFinding
-from eda_platform.tools.report_validator import extract_numbers
+from eda_platform.schemas.reports import ReportBundle, ReportClaim, ReportSection
+from eda_platform.tools.evidence import build_evidence_pack
+from eda_platform.tools.report_validator import (
+    extract_numbers,
+    full_coverage_evidence_refs,
+    validate_report_bundle,
+)
 
 _TASK = "di4_l1_interpretation"
 
@@ -119,15 +130,97 @@ def validate_interpretation_text(
 
 
 def _allowed_numbers(findings: Sequence[QuestionFinding]) -> list[tuple[float, bool]]:
-    """Return evidence-backed numbers, preserving raw-versus-percent units."""
+    """Return evidence-backed numbers, preserving raw-versus-percent units.
+
+    Finding text is not a source. Every reducer-written figure carries a paired
+    EvidenceRef, but each finding text also opens with `question_en`, which is
+    model-authored for LLM-origin candidates — admitting its digits let a model
+    approve its own interpretation by first writing the number into the question.
+    The cost is that an interpretation quoting a parameter from the question
+    itself now falls back; discarding text is the safe direction.
+    """
     allowed: list[tuple[float, bool]] = []
     for finding in findings:
         for reference in finding.evidence:
             value = reference.value
             if isinstance(value, int | float) and not isinstance(value, bool):
                 allowed.append((float(value), reference.unit == "percent"))
-        allowed.extend(extract_numbers(finding.text))
     return allowed
+
+
+# An agent answer summarises several tool calls, so it needs more room than the
+# single-SQL interpretation gate allows.
+_MAX_AGENT_ANSWER_CHARS = 2_000
+
+
+def validate_agent_answer(
+    answer: str,
+    evidence_artifacts: Sequence[Artifact],
+) -> tuple[bool, str]:
+    """Gate a tool-loop answer against the typed parse of its own evidence.
+
+    The bounded agent loop has no planned SQL to validate against, so the pool
+    is rebuilt here from persisted tool payloads only. The answer never
+    contributes to the set of numbers that may verify it.
+    """
+    text = answer.strip()
+    if not text:
+        return False, "empty_answer"
+    if len(text) > _MAX_AGENT_ANSWER_CHARS:
+        return False, f"too_long: {len(text)} > {_MAX_AGENT_ANSWER_CHARS} chars"
+    if implies_causation(text):
+        return False, "causal_language: answer asserts causation"
+    if not evidence_artifacts:
+        return False, "no_evidence: the answer cites no tool-produced artifact"
+    has_model_card = any(
+        artifact.type is ArtifactType.MODEL_CARD for artifact in evidence_artifacts
+    )
+    if not has_model_card and asserts_model_capability(text, terms=MODEL_ASSERTION_TERMS):
+        return False, "unsupported_model_claim: no ModelCard artifact in evidence"
+    return _agent_number_gate(text, evidence_artifacts)
+
+
+def _agent_number_gate(
+    text: str,
+    evidence_artifacts: Sequence[Artifact],
+) -> tuple[bool, str]:
+    """Run the answer through the report validator's F0-F2 numeric chain."""
+    bundle = ReportBundle(
+        project_id="agent_answer_gate",
+        session_id="agent_answer_gate",
+        sections=[
+            ReportSection(
+                title="answer",
+                claims=[
+                    ReportClaim(
+                        text=text,
+                        evidence=full_coverage_evidence_refs(evidence_artifacts),
+                    )
+                ],
+            )
+        ],
+    )
+    sql_results = {
+        artifact.id: SqlResult.model_validate(artifact.payload)
+        for artifact in evidence_artifacts
+        if artifact.type is ArtifactType.SQL_RESULT
+    }
+    validate_report_bundle(
+        bundle,
+        build_evidence_pack(list(evidence_artifacts)),
+        sql_results=sql_results,
+    )
+    claim = bundle.sections[0].claims[0]
+    if claim.numeric_rollup in {"number_verified", "no_numbers"}:
+        return True, ""
+    unverified = [
+        status for status in claim.numeric_statuses if status.status != "number_verified"
+    ]
+    listed = ", ".join(
+        f"{status.number:.10g}%" if status.is_percent else f"{status.number:.10g}"
+        for status in unverified[:5]
+    )
+    return False, f"unsupported_number: {listed} not traceable to tool evidence"
 
 
 def _matches_any(

@@ -289,6 +289,9 @@ describe("Activity center with job SSE", () => {
       source.emit("step_completed", frame("step_completed", "profile_dataset")),
     );
 
+    expect(screen.getByTestId("activity-working-orbit")).toHaveClass(
+      "animate-orbit",
+    );
     expect(
       screen.getByRole("button", {
         name: "Close activity from floating button",

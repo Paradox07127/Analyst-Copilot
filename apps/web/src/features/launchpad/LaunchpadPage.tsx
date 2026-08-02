@@ -483,32 +483,9 @@ export function NewSessionPanel({
       : projectChoice === "existing"
         ? selectedProjectId
         : newProjectId;
-  const isUnfiled = projectChoice === "unfiled";
-  const unfiledProject = useMutation({
-    mutationFn: () =>
-      api.createProject(
-        { project_id: UNFILED_PROJECT_ID, name: "Unfiled sessions" },
-        "unfiled-sessions-v1",
-      ),
-  });
-
-  useEffect(() => {
-    if (
-      isUnfiled &&
-      !unfiledProject.isSuccess &&
-      !unfiledProject.isPending &&
-      !unfiledProject.isError
-    ) {
-      unfiledProject.mutate();
-    }
-    // The private bucket is idempotently provisioned once per mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isUnfiled]);
-
-  const workspacePending = isUnfiled
-    ? !unfiledProject.isSuccess
-    : projectId === "";
-  const projectReady = !workspacePending && projectId !== null;
+  // The API provisions the hidden unfiled bucket during startup, so every
+  // destination represented here is ready without a client-side create race.
+  const projectReady = projectId !== "" && projectId !== null;
   const activeProjectId = projectId ?? UNFILED_PROJECT_ID;
   /* Files already uploaded belong to the chosen project, so moving the session
    * elsewhere afterwards would orphan them. */
@@ -554,6 +531,9 @@ export function NewSessionPanel({
         const result = await api.createUpload(activeProjectId, file);
         if (result.status === "completed" && result.dataset) {
           updateEntry(id, { status: "completed", dataset: result.dataset });
+          await queryClient.invalidateQueries({
+            queryKey: queryKeys.projectUploads(activeProjectId),
+          });
         } else {
           updateEntry(id, {
             status: "failed",
@@ -733,6 +713,9 @@ export function NewSessionPanel({
             dataset: result.dataset,
           });
         }
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.projectUploads(activeProjectId),
+        });
         datasets = [...datasets, ...uploaded];
       }
       const created = await api.createJob(
@@ -803,9 +786,7 @@ export function NewSessionPanel({
       : "Checking the LLM connection…"
     : llmConnection === "incomplete"
       ? "Add an API key in Settings to start."
-      : unfiledProject.isError && isUnfiled
-        ? "Could not prepare private storage."
-        : !projectReady
+      : !projectReady
           ? projectChoice === "new"
             ? "Name the new project to start."
             : "Choose a project to start."
@@ -1004,22 +985,6 @@ export function NewSessionPanel({
               Existing projects could not be loaded. You can still start without
               a project.
             </p>
-          )}
-          {unfiledProject.isError && isUnfiled && (
-            <div
-              role="alert"
-              className="flex flex-wrap items-center gap-2 text-xs text-status-critical"
-            >
-              <span>Private storage could not be prepared.</span>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => unfiledProject.mutate()}
-                disabled={unfiledProject.isPending}
-              >
-                Retry
-              </Button>
-            </div>
           )}
         </section>
 

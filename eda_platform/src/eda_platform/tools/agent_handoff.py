@@ -17,14 +17,20 @@ from eda_platform.schemas.handoff import (
     AgentHandoffV3,
     AgentReadiness,
     ArtifactCatalogEntry,
+    CatalogPriority,
+    CatalogRole,
+    CatalogSensitivity,
+    CatalogStage,
     DatasetQualitySummary,
     DatasetReadiness,
+    HandoffCapabilities,
     HandoffContextPolicy,
     HandoffGate,
     HandoffNextAction,
     HandoffQuestionResult,
     HandoffReport,
     HandoffRun,
+    ReadinessStatus,
     RelationshipReadiness,
 )
 from eda_platform.schemas.questions import QuestionExecutionResult
@@ -525,7 +531,7 @@ def _overall_readiness(
     relationship: RelationshipReadiness,
     report_gate: HandoffGate,
     artifacts: Sequence[Artifact],
-) -> tuple[str, list[str]]:
+) -> tuple[ReadinessStatus, list[str]]:
     reasons: list[str] = []
     resource_preflight_status = _resource_preflight_status(artifacts)
     if not datasets:
@@ -571,7 +577,7 @@ def _artifact_sensitivity(
     *,
     profiles: Sequence[tuple[Artifact, DatasetProfile]],
     raw_to_clean: dict[str, str],
-) -> dict[str, str]:
+) -> dict[str, CatalogSensitivity]:
     pii_clean_ids = {profile.dataset_id for _, profile in profiles if profile.pii_columns}
     pii_dataset_ids = {
         *pii_clean_ids,
@@ -601,7 +607,7 @@ def _artifact_sensitivity(
                 continue
             tainted_ids.add(artifact.id)
             changed = True
-    sensitivity: dict[str, str] = {}
+    sensitivity: dict[str, CatalogSensitivity] = {}
     for artifact in artifacts:
         if artifact.type is ArtifactType.PII_REPORT:
             sensitivity[artifact.id] = "sensitive"
@@ -618,7 +624,7 @@ def _catalog_entry(
     artifact: Artifact,
     *,
     raw_to_clean: dict[str, str],
-    sensitivity_by_id: dict[str, str],
+    sensitivity_by_id: dict[str, CatalogSensitivity],
     source_session_id: str,
     fetch_session_id: str,
 ) -> ArtifactCatalogEntry:
@@ -674,7 +680,7 @@ def _bounded_catalog(
     artifacts: Sequence[Artifact],
     *,
     raw_to_clean: dict[str, str],
-    sensitivity_by_id: dict[str, str],
+    sensitivity_by_id: dict[str, CatalogSensitivity],
     source_session_id: str,
     fetch_session_id: str,
 ) -> list[ArtifactCatalogEntry]:
@@ -744,7 +750,9 @@ def _bounded_catalog(
     return sorted(chosen, key=sort_key)
 
 
-def _catalog_semantics(artifact_type: ArtifactType) -> tuple[str, str, str]:
+def _catalog_semantics(
+    artifact_type: ArtifactType,
+) -> tuple[CatalogStage, CatalogRole, CatalogPriority]:
     if artifact_type.value == "ResourcePreflight":
         return "ingest", "gate", "critical"
     if artifact_type in {ArtifactType.DATASET_PROFILE, ArtifactType.RAW_DATASET_PROFILE}:
@@ -1027,7 +1035,7 @@ def _capabilities(
     relationship: RelationshipReadiness,
     *,
     resource_preflight_status: str | None,
-) -> dict[str, str]:
+) -> HandoffCapabilities:
     types = {artifact.type for artifact in artifacts}
     relationship_status = (
         "not_applicable"
@@ -1060,4 +1068,4 @@ def _capabilities(
             "report",
         ):
             capabilities[capability] = "deferred"
-    return capabilities
+    return HandoffCapabilities.model_validate(capabilities)

@@ -45,6 +45,40 @@ SAFE_CAUSAL_DISCLAIMERS: tuple[str, ...] = (
 )
 
 
+# Model/prediction assertions an answer may only make when a ModelCard is in
+# evidence. Phrases, not bare words: a substring scan for "model" also fires on
+# "the data model", and a gate that noisy gets ignored rather than tightened.
+# Deliberately narrow — under-reporting is recoverable, a false rejection
+# silently discards a correct answer.
+MODEL_ASSERTION_TERMS: tuple[str, ...] = (
+    "model produced",
+    "model predicts",
+    "model predicted",
+    "model achieved",
+    "model scored",
+    "model classified",
+    "model was trained",
+    "built a model",
+    "fitted a model",
+    "trained a model",
+    "predictive model",
+    "classifier",
+    "classified as",
+    "was predicted",
+    "were predicted",
+    "prediction accuracy",
+    "training accuracy",
+)
+
+SAFE_MODEL_DISCLAIMERS: tuple[str, ...] = (
+    "no model was trained",
+    "no model was built",
+    "without building a model",
+    "no predictive model",
+    "not a predictive model",
+)
+
+
 def contains_causal_phrase(
     text: str,
     *,
@@ -53,6 +87,18 @@ def contains_causal_phrase(
     """Raw phrase scan (no disclaimer stripping) over the given phrase family."""
     lowered = text.lower()
     return any(phrase in lowered for phrase in phrases)
+
+
+def asserts_model_capability(
+    text: str,
+    *,
+    terms: Iterable[str] = MODEL_ASSERTION_TERMS,
+) -> bool:
+    """True when ``text`` claims a model exists, after removing safe disclaimers."""
+    lowered = text.lower()
+    for disclaimer in SAFE_MODEL_DISCLAIMERS:
+        lowered = lowered.replace(disclaimer, " ")
+    return any(term in lowered for term in terms)
 
 
 def implies_causation(text: str) -> bool:

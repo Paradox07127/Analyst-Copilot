@@ -8,9 +8,12 @@ and, for chunked/lying clients, aborts while counting the actual stream.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
 import json
 import re
+import secrets
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
@@ -83,12 +86,13 @@ _UPLOAD_PATH = re.compile(r"^/api/v1/projects/[^/]+/uploads$")
 
 
 class DeploymentSecurityMiddleware:
-    """Remote-only CSRF and trusted-client upload-rate boundary."""
+    """Remote authentication, CSRF, and trusted-client upload-rate boundary."""
 
     def __init__(
         self,
         app: Callable[..., Awaitable[None]],
         *,
+        auth_token: str,
         allowed_origins: tuple[str, ...],
         trusted_proxy_ips: tuple[str, ...],
         rate_limit: int | None,
@@ -96,6 +100,7 @@ class DeploymentSecurityMiddleware:
         rate_checker: Callable[..., tuple[bool, int]],
     ) -> None:
         self.app = app
+        self.auth_token = auth_token
         self.allowed_origins = frozenset(origin.rstrip("/") for origin in allowed_origins)
         self.trusted_proxy_ips = frozenset(trusted_proxy_ips)
         self.rate_limit = rate_limit
@@ -108,6 +113,18 @@ class DeploymentSecurityMiddleware:
             return
         method = str(scope.get("method", "GET")).upper()
         headers = _headers(scope)
+        if not _basic_auth_matches(headers.get("authorization"), self.auth_token):
+            await _send_error(
+                send,
+                401,
+                "authentication_required",
+                "Remote access requires valid workspace credentials.",
+                headers=[
+                    (b"www-authenticate", b'Basic realm="EDA Workbench", charset="UTF-8"'),
+                    (b"cache-control", b"no-store"),
+                ],
+            )
+            return
         if method in _UNSAFE_METHODS:
             source = headers.get("origin")
             if source is None:
@@ -145,6 +162,24 @@ class DeploymentSecurityMiddleware:
                 )
                 return
         await self.app(scope, receive, send)
+
+
+def _basic_auth_matches(header: str | None, expected_token: str) -> bool:
+    if header is None:
+        return False
+    scheme, separator, encoded = header.partition(" ")
+    if separator != " " or scheme.casefold() != "basic" or not encoded:
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    username, separator, token = decoded.partition(":")
+    return (
+        separator == ":"
+        and secrets.compare_digest(username, "eda")
+        and secrets.compare_digest(token, expected_token)
+    )
 
 
 def _content_length(scope: Scope) -> int | None:

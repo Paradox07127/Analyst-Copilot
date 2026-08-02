@@ -166,6 +166,17 @@ def test_create_project_allows_spaces_in_id(client: TestClient) -> None:
     assert response.json()["project_id"] == "Brazilian E-Commerce"
 
 
+def test_fresh_app_provisions_hidden_unfiled_bucket(client: TestClient) -> None:
+    response = client.get("/api/v1/projects/unfiled-sessions/sessions")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert all(
+        project["project_id"] != "unfiled-sessions"
+        for project in client.get("/api/v1/projects").json()
+    )
+
+
 def test_create_existing_project_is_idempotent(client: TestClient) -> None:
     """Same id twice returns the live project at 200 — never 409, and never a
     rename of the project the caller already has."""

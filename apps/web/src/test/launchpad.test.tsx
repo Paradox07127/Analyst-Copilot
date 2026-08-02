@@ -140,44 +140,42 @@ describe("Launchpad", () => {
     expect(screen.getByText("Locked after adding data.")).toBeInTheDocument();
   });
 
-  it("recovers when private storage cannot be provisioned", async () => {
-    let attempts = 0;
+  it("uses the server-provisioned private bucket without creating it", async () => {
+    let createAttempts = 0;
     server.use(
-      http.post("/api/v1/projects", async ({ request }) => {
-        const body = (await request.json()) as {
-          project_id: string;
-          name: string;
-        };
-        if (body.project_id === "unfiled-sessions") {
-          attempts += 1;
-          if (attempts === 1) {
-            return HttpResponse.json(
-              { error: { code: "internal", message: "No storage." } },
-              { status: 500 },
-            );
-          }
-        }
+      http.post("/api/v1/projects", () => {
+        createAttempts += 1;
+        return HttpResponse.json({ error: { code: "unexpected" } }, { status: 500 });
+      }),
+    );
+    renderAppAt("/new-session");
+
+    expect(await screen.findByLabelText("Data files (.csv)")).toBeEnabled();
+    expect(createAttempts).toBe(0);
+  });
+
+  it("refreshes project data after a successful upload", async () => {
+    let listAttempts = 0;
+    server.use(
+      http.get("/api/v1/projects/p1/uploads", () => {
+        listAttempts += 1;
         return HttpResponse.json(
-          { ...body, session_count: 0 },
-          { status: 201 },
+          listAttempts === 1
+            ? []
+            : [{ ...existing, dataset_id: "ds_orders", display_name: "orders.csv" }],
         );
       }),
     );
     const user = userEvent.setup();
-    renderAppAt("/new-session");
+    renderAppAt("/projects/p1/new-session");
 
-    expect(
-      await screen.findByText("Private storage could not be prepared."),
-    ).toBeInTheDocument();
-    expect(screen.getByLabelText("Data files (.csv)")).toBeDisabled();
+    await user.upload(await screen.findByLabelText("Data files (.csv)"), csvFile());
 
-    await user.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() =>
-      expect(
-        screen.queryByText("Private storage could not be prepared."),
-      ).not.toBeInTheDocument(),
-    );
-    expect(screen.getByLabelText("Data files (.csv)")).toBeEnabled();
+    const inspector = screen.getByRole("complementary", {
+      name: "Context Inspector",
+    });
+    expect(await within(inspector).findByText("orders.csv")).toBeInTheDocument();
+    expect(listAttempts).toBeGreaterThanOrEqual(2);
   });
 
   it("uploads a CSV, starts an idempotent job and hands off to activity", async () => {

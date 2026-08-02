@@ -29,6 +29,7 @@ from eda_platform.core.budget import (
 from eda_platform.core.dev_log import InstrumentedLLMClient, read_llm_debug
 from eda_platform.core.llm import (
     CancellableLLMClient,
+    LLMProvider,
     LLMResultMetadata,
     LLMSettings,
     LLMUsage,
@@ -195,7 +196,11 @@ def test_meter_does_not_stack_a_second_debug_wrapper(tmp_path: Path) -> None:
 def test_cancellation_seam_keeps_provider_pricing_reachable() -> None:
     """Every worker job goes through CancellableLLMClient; when it swallowed
     .settings the ledger priced a metered call as cost-unknown."""
-    settings = LLMSettings(provider="openai", model="gpt-4o-mini", api_key="k")
+    settings = LLMSettings(
+        provider=LLMProvider.OPENAI,
+        model="gpt-4o-mini",
+        api_key="k",
+    )
     inner = OpenAICompatibleLLMClient(settings)
     seam = CancellableLLMClient(cast(Any, inner), cast(Any, _PassthroughCancellation()))
 

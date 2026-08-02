@@ -72,9 +72,7 @@ class _TaskDispatchLLM:
         if task == "l2_followup_generation":
             if isinstance(self._followup, Exception):
                 raise self._followup
-            response = (
-                self._followup.pop(0) if isinstance(self._followup, list) else self._followup
-            )
+            response = self._followup.pop(0) if isinstance(self._followup, list) else self._followup
             return schema.model_validate(response)
         raise RuntimeError(f"task {task!r} is not served by this test double")
 
@@ -159,9 +157,7 @@ def _setup(tmp_path: Path) -> tuple[ArtifactStore, Path]:
         question_en=_BASE_QUESTION,
         origin="template",
         template_id="agg_by_category",
-        sql_template=(
-            "SELECT region, SUM(revenue) AS total_revenue FROM orders GROUP BY region"
-        ),
+        sql_template=("SELECT region, SUM(revenue) AS total_revenue FROM orders GROUP BY region"),
         target_datasets=["orders.csv"],
         score=_score(),
     )
@@ -284,7 +280,9 @@ def _seed_execution_results(
         )
         store.save_artifact(
             Artifact(
-                id=make_artifact_id("qexec", {"session_id": _PLAN_RUN, "question": "q_unresolvable"}),
+                id=make_artifact_id(
+                    "qexec", {"session_id": _PLAN_RUN, "question": "q_unresolvable"}
+                ),
                 type=ArtifactType.QUESTION_EXECUTION_RESULT,
                 project_id=_PROJECT,
                 session_id=_PLAN_RUN,
@@ -360,7 +358,9 @@ def _verifiable_followup_batch(
         row_count=1,
     )
     sql_artifact = Artifact(
-        id=make_artifact_id("sqlres", {"session_id": session_id, "question": candidate.question_id}),
+        id=make_artifact_id(
+            "sqlres", {"session_id": session_id, "question": candidate.question_id}
+        ),
         type=ArtifactType.SQL_RESULT,
         project_id=_PROJECT,
         session_id=session_id,
@@ -555,9 +555,7 @@ def test_all_pruned_followups_exit_no_new_information(tmp_path: Path) -> None:
     llm = _TaskDispatchLLM(
         {
             "concluded": False,
-            "proposals": [
-                {"question_text": _BASE_QUESTION, "parent_finding_id": _BASE_FINDING_ID}
-            ],
+            "proposals": [{"question_text": _BASE_QUESTION, "parent_finding_id": _BASE_FINDING_ID}],
         }
     )
     result = _run(workspace, llm)
@@ -566,9 +564,7 @@ def test_all_pruned_followups_exit_no_new_information(tmp_path: Path) -> None:
     assert result.ledger.rounds[0].disposition == "keep"  # the bridge still admitted one
 
 
-def test_round_cap_is_the_default_bound(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_round_cap_is_the_default_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Depth 2 caps at one round: a productive round still ends at the cap.
     store, workspace = _setup(tmp_path)
     _seed_execution_results(store)
@@ -726,9 +722,7 @@ def test_depth3_bridges_every_round_including_the_third(
     responses = [
         {
             "concluded": False,
-            "proposals": [
-                {"question_text": text, "parent_finding_id": _BASE_FINDING_ID}
-            ],
+            "proposals": [{"question_text": text, "parent_finding_id": _BASE_FINDING_ID}],
         }
         for text in (
             "Why does region A lead total revenue?",
@@ -766,9 +760,7 @@ def test_bridge_discards_no_number_findings_without_resolvable_evidence(
             QuestionFinding(
                 text="Region B trails the pack.",
                 evidence=[
-                    EvidenceRef(
-                        kind="sql", artifact_id="sqlres_missing", locator="rows[0].region"
-                    )
+                    EvidenceRef(kind="sql", artifact_id="sqlres_missing", locator="rows[0].region")
                 ],
             )
         ],
@@ -866,8 +858,7 @@ def test_round_tokens_and_cost_come_from_retry_ledger_delta(
     usage_events = [
         event
         for event in store.list_trace_events(project_id=_PROJECT, session_id=_PLAN_RUN)
-        if event.event_type == "llm_usage"
-        and event.summary.get("task") == "l2_followup_generation"
+        if event.event_type == "llm_usage" and event.summary.get("task") == "l2_followup_generation"
     ]
     assert len(usage_events) == 2
     assert sum(int(event.summary["total_tokens"]) for event in usage_events) == 30

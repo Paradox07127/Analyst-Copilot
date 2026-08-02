@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import pytest
@@ -296,7 +296,8 @@ def test_custom_chart_outlier_fence_matches_full_frame(
     reference = select_chart_columns(
         _chart_frame(), ["idx", "amount"], drop_missing=True
     )
-    bounds = iqr_bounds(pd.to_numeric(reference["amount"], errors="coerce"))
+    numeric_amount = cast(pd.Series, pd.to_numeric(reference["amount"], errors="coerce"))
+    bounds = iqr_bounds(numeric_amount)
     assert bounds is not None
     reference = apply_outlier_bounds(reference, "amount", bounds)
     body = _build(chart_store, drop_outliers=True)

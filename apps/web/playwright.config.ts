@@ -28,8 +28,8 @@ process.env.E2E_WORKSPACE ??= mkdtempSync(path.join(tmpdir(), "eda-e2e-"));
 const PORT = Number(process.env.E2E_PORT);
 const WORKSPACE = process.env.E2E_WORKSPACE;
 
-/* Projects are rows in the workspace DB with no create endpoint yet, so the
- * fresh workspace is registered here — before the server or any spec starts. */
+/* Register the shared E2E project before the server or any spec starts. The
+ * product create flow is covered separately; direct setup keeps this seed deterministic. */
 if (firstLoad) {
   execFileSync(
     "uv",

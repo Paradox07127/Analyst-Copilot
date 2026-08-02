@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
+import pytest
 from pydantic import BaseModel, ConfigDict
 
 from eda_platform.agents.runtime import AgentRuntime, AgentTool, AgentToolResult
+from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.cancellation import (
+    CancellationCause,
+    CancellationError,
+    CancellationSnapshot,
+    KillFenceState,
+)
 from eda_platform.core.llm import (
     LLMToolCall,
     LLMToolResponse,
@@ -165,4 +173,148 @@ def test_offline_exclusion_survives_client_decoration() -> None:
         def tool_call(self, **kwargs: Any) -> Any:  # pragma: no cover - never run
             return self.inner.tool_call(**kwargs)
 
-    assert not supports_tool_calling(_Wrapper(_Wrapper(OfflineLLMClient())))
+    assert not supports_tool_calling(
+        cast(Any, _Wrapper(_Wrapper(OfflineLLMClient())))
+    )
+
+
+class _CountingToolLLM(_ScriptedToolLLM):
+    """Scripted client that also records the tool observations fed back to it."""
+
+    def tool_call(
+        self,
+        *,
+        task: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> LLMToolResponse:
+        self.messages.append([dict(message) for message in messages])
+        return self.responses.pop(0)
+
+
+def test_a_budget_error_inside_a_tool_stops_the_loop() -> None:
+    """Budget and cancellation are terminal: replaying the call would keep spending."""
+
+    def _overspend(_args: BaseModel) -> AgentToolResult:
+        raise BudgetExceeded("token budget exhausted")
+
+    llm = _CountingToolLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[LLMToolCall(call_id="call_1", name="inspect", arguments={})]
+            ),
+            LLMToolResponse(content="Recovered without the tool."),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm=llm,  # type: ignore[arg-type]
+        tools=[
+            AgentTool(
+                name="inspect",
+                description="Inspect the catalog.",
+                args_schema=_NoArgs,
+                execute=_overspend,
+            )
+        ],
+    )
+
+    with pytest.raises(BudgetExceeded):
+        runtime.run(system_prompt="Use tools.", user_message="Inspect it.")
+
+
+def test_a_cancelled_tool_stops_the_loop() -> None:
+    def _cancelled(_args: BaseModel) -> AgentToolResult:
+        raise CancellationError(
+            CancellationSnapshot(
+                cause=CancellationCause.CANCEL_REQUESTED,
+                reason="the user cancelled the run",
+                deadline=None,
+                shield_depth=0,
+                kill_fence_state=KillFenceState.ELIGIBLE,
+            )
+        )
+
+    llm = _CountingToolLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[LLMToolCall(call_id="call_1", name="inspect", arguments={})]
+            ),
+            LLMToolResponse(content="Recovered without the tool."),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm=llm,  # type: ignore[arg-type]
+        tools=[
+            AgentTool(
+                name="inspect",
+                description="Inspect the catalog.",
+                args_schema=_NoArgs,
+                execute=_cancelled,
+            )
+        ],
+    )
+
+    with pytest.raises(CancellationError):
+        runtime.run(system_prompt="Use tools.", user_message="Inspect it.")
+
+
+def test_a_rejected_answer_is_returned_to_the_model_once() -> None:
+    """The rewrite feedback carries the reason, never the rejected answer itself."""
+    llm = _CountingToolLLM(
+        [
+            LLMToolResponse(content="Revenue was 999."),
+            LLMToolResponse(content="Revenue was 42."),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm=llm,  # type: ignore[arg-type]
+        tools=[
+            AgentTool(
+                name="inspect",
+                description="Inspect the catalog.",
+                args_schema=_NoArgs,
+                execute=lambda _args: AgentToolResult(content={"ok": True}),
+            )
+        ],
+        answer_validator=lambda answer, _artifacts: (
+            ("42" in answer),
+            "unsupported_number: 999 not traceable to tool evidence",
+        ),
+    )
+
+    result = runtime.run(system_prompt="Use tools.", user_message="How much revenue?")
+
+    assert result.status == "completed"
+    assert result.answer == "Revenue was 42."
+    feedback = llm.messages[1][-1]
+    assert feedback["role"] == "user"
+    assert "unsupported_number" in str(feedback["content"])
+    assert "Revenue was 999." not in str(feedback["content"])
+
+
+def test_a_twice_rejected_answer_is_never_returned() -> None:
+    llm = _CountingToolLLM(
+        [
+            LLMToolResponse(content="Revenue was 999."),
+            LLMToolResponse(content="Revenue was 998."),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm=llm,  # type: ignore[arg-type]
+        tools=[
+            AgentTool(
+                name="inspect",
+                description="Inspect the catalog.",
+                args_schema=_NoArgs,
+                execute=lambda _args: AgentToolResult(content={"ok": True}),
+            )
+        ],
+        answer_validator=lambda _answer, _artifacts: (False, "unsupported_number: fabricated"),
+    )
+
+    result = runtime.run(system_prompt="Use tools.", user_message="How much revenue?")
+
+    assert result.status == "answer_unverified"
+    assert result.answer == ""
+    assert result.error is not None
+    assert "unsupported_number" in result.error

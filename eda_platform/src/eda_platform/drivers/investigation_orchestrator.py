@@ -45,9 +45,9 @@ from eda_platform.core.loop_ledger import (
     keep_or_discard,
     record_round,
 )
-from eda_platform.core.session_metrics import persist_run_metrics
 from eda_platform.core.semantic import SemanticSeeds
 from eda_platform.core.semantic_resources import load_semantic_seeds_safe
+from eda_platform.core.session_metrics import persist_run_metrics
 from eda_platform.core.store import ArtifactStore
 from eda_platform.core.tool_guard import (
     ToolGuardError,
@@ -549,9 +549,7 @@ def _execute_investigation_plans(
                 plan=plan,
             )
         execution_guard = (
-            loop_journal.execution_lock()
-            if loop_journal is not None
-            else nullcontext()
+            loop_journal.execution_lock() if loop_journal is not None else nullcontext()
         )
         with execution_guard:
             primary_checkpoint = (
@@ -1681,9 +1679,7 @@ def _build_plan(
         source_artifact_ids=_unique([source_qcand_id, *candidate.source_artifact_ids]),
         source_artifact_session_ids={
             artifact_id: source_session_id
-            for artifact_id in _unique(
-                [source_qcand_id, *candidate.source_artifact_ids]
-            )
+            for artifact_id in _unique([source_qcand_id, *candidate.source_artifact_ids])
         },
         allowed_relationship_references=candidate.required_relations,
         method_family=method_selection.method_family,
@@ -2051,9 +2047,7 @@ def _load_primary_checkpoint(
             for item in outcome_entries
         ]
     except (KeyError, OSError, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"Deep investigation primary checkpoint is invalid: {path}."
-        ) from exc
+        raise ValueError(f"Deep investigation primary checkpoint is invalid: {path}.") from exc
     return execution, outcomes
 
 
@@ -2086,9 +2080,7 @@ def _write_primary_checkpoint(
             "execution_artifacts": [
                 _checkpoint_artifact_entry(item) for item in execution_artifacts
             ],
-            "outcome_artifacts": [
-                _checkpoint_artifact_entry(item) for item in outcome_artifacts
-            ],
+            "outcome_artifacts": [_checkpoint_artifact_entry(item) for item in outcome_artifacts],
         },
     )
 
@@ -2339,7 +2331,11 @@ def _deep_investigation_artifact(
     return Artifact(
         id=make_artifact_id(
             "deepinv",
-            {"session_id": session_id, "investigation_id": result.investigation_id, "deep": payload},
+            {
+                "session_id": session_id,
+                "investigation_id": result.investigation_id,
+                "deep": payload,
+            },
         ),
         type=ArtifactType.DEEP_INVESTIGATION_RESULT,
         project_id=project_id,
@@ -2450,7 +2446,9 @@ def _unknown_question_record(
         next_action="Choose a Question Card from the current run.",
         source_artifact_ids=parent_ids,
     )
-    return _record_artifact(record, project_id=project_id, session_id=session_id, parent_ids=parent_ids)
+    return _record_artifact(
+        record, project_id=project_id, session_id=session_id, parent_ids=parent_ids
+    )
 
 
 def _executing_marker_record(plan: InvestigationPlan) -> InvestigationRecord:
@@ -2587,7 +2585,8 @@ def _record_artifact(
 ) -> Artifact:
     payload = record.model_dump(mode="json")
     return Artifact(
-        id=artifact_id or make_artifact_id("irecord", {"session_id": session_id, "record": payload}),
+        id=artifact_id
+        or make_artifact_id("irecord", {"session_id": session_id, "record": payload}),
         type=ArtifactType.INVESTIGATION_RECORD,
         project_id=project_id,
         session_id=session_id,
@@ -2800,7 +2799,8 @@ def preauthorize_macro_loop(
     if profile.rounds == 0:
         raise ValueError("Macro-loop pre-authorization requires depth >= 2.")
     approval = InvestigationApproval(
-        approval_id="appr_" + stable_hash({"macro_loop": plan_session_id, "depth": depth}, length=12),
+        approval_id="appr_"
+        + stable_hash({"macro_loop": plan_session_id, "depth": depth}, length=12),
         investigation_id=_macro_preauth_investigation_id(plan_session_id),
         plan_fingerprint=_macro_preauth_fingerprint(
             plan_session_id, depth=depth, rounds_cap=profile.rounds
@@ -2843,8 +2843,6 @@ def _find_macro_preauthorization(
     return None
 
 
-
-
 # Audit findings that mean the probe claim's evidence cannot be resolved (§8.2
 # "evidence must resolve"); no_numbers claims are only admissible without them.
 _PROBE_EVIDENCE_FINDING_CODES = frozenset({"missing_evidence", "missing_evidence_artifact"})
@@ -2878,9 +2876,7 @@ def _probe_claim_verifiable(
     return not any(item.code in _PROBE_EVIDENCE_FINDING_CODES for item in audit.findings)
 
 
-def _qexec_fingerprint(
-    qexec: QuestionExecutionResult, artifact_types: Mapping[str, str]
-) -> str:
+def _qexec_fingerprint(qexec: QuestionExecutionResult, artifact_types: Mapping[str, str]) -> str:
     """Content fingerprint (§8.1): evidence value set first, normalized text fallback."""
     values: list[tuple[str, str, float]] = []
     for finding in qexec.findings:
@@ -3014,7 +3010,9 @@ def _execute_followup_round(
     Both derived runs carry the INTERNAL_SESSION_MARKER so history/coverage skip them.
     """
     raise_if_cancelled(cancel_check, operation="macro loop follow-up")
-    followup_source_session_id = f"{plan_session_id}_macro_r{round_id}_source{INTERNAL_SESSION_MARKER}"
+    followup_source_session_id = (
+        f"{plan_session_id}_macro_r{round_id}_source{INTERNAL_SESSION_MARKER}"
+    )
     store.start_session(project_id, followup_source_session_id)
     store.write_manifest(
         SessionManifest(
@@ -3046,7 +3044,9 @@ def _execute_followup_round(
     for artifact in source_artifacts:
         raise_if_cancelled(cancel_check, operation="macro loop follow-up")
         if artifact.type in _FOLLOWUP_SOURCE_COPY_TYPES:
-            store.save_artifact(_copy_artifact_to_session(artifact, session_id=followup_source_session_id))
+            store.save_artifact(
+                _copy_artifact_to_session(artifact, session_id=followup_source_session_id)
+            )
     store.mark_session_status(project_id, followup_source_session_id, "completed")
 
     planned = create_investigation_plans(
@@ -3333,9 +3333,7 @@ def run_macro_loop(
                         )
                         raise_if_cancelled(cancel_check, operation="macro loop")
                         executed_session_ids.extend(round_session_ids)
-                        record = record.model_copy(
-                            update={"executed_questions": executed_count}
-                        )
+                        record = record.model_copy(update={"executed_questions": executed_count})
                         # Question fingerprints register only after the round
                         # executed, so a crashed half-round leaves no dead
                         # fingerprints that would block a retry.

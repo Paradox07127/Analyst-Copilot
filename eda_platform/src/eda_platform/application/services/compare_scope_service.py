@@ -796,14 +796,15 @@ class CompareScopeService:
                 )
             )
         order = {"changed": 0, "added": 1, "removed": 2, "same": 3, "unavailable": 4}
-        return sorted(
-            items,
-            key=lambda item: (
+        def sort_key(item: CompareScopeItem) -> tuple[int, str, str]:
+            record = item.left if item.left is not None else item.right
+            return (
                 order[item.change],
-                (item.left or item.right).title if item.left or item.right else "",
+                record.title if record is not None else "",
                 item.match_key,
-            ),
-        )
+            )
+
+        return sorted(items, key=sort_key)
 
 
 _EXECUTION_METRICS = (

@@ -46,7 +46,9 @@ def _usage_event(session_id: str, *, when: datetime, tokens: int, cost: float) -
     )
 
 
-def _start_run(store: ArtifactStore, project_id: str, session_id: str, *, created_at: datetime) -> None:
+def _start_run(
+    store: ArtifactStore, project_id: str, session_id: str, *, created_at: datetime
+) -> None:
     """A run as the pipeline leaves it: started, with a manifest carrying the
     created_at the session lists and the activity window read."""
     store.start_session(project_id, session_id)
@@ -55,7 +57,9 @@ def _start_run(store: ArtifactStore, project_id: str, session_id: str, *, create
     store.refresh_session_index(project_id, session_id)
 
 
-def _price(store: ArtifactStore, project_id: str, session_id: str, *, tokens: int, cost: float) -> None:
+def _price(
+    store: ArtifactStore, project_id: str, session_id: str, *, tokens: int, cost: float
+) -> None:
     """The SessionMetrics artifact a finished run persists. The rollup reads only
     these — see TraceService.workspace_usage."""
     store.save_artifact(
@@ -174,7 +178,10 @@ def test_usage_agrees_with_the_run_metrics_endpoint_after_a_later_call(
 ) -> None:
     """Usage recorded after the metrics artifact was written must land in both
     the per-run figure and the workspace total, or two screens disagree."""
-    later = NOW + timedelta(minutes=5)
+    # Must beat the metrics artifact's created_at, which is real wall clock at
+    # fixture time: module-level NOW freezes at collection, and a full-suite run
+    # reaches this test more than five minutes later.
+    later = datetime.now(UTC) + timedelta(minutes=5)
     store.append_trace(PROJECT, _usage_event("run_a", when=later, tokens=250, cost=0.004))
 
     per_run = client.get("/api/v1/sessions/run_a/metrics").json()
@@ -188,9 +195,7 @@ def test_usage_buckets_sessions_by_utc_day_within_the_window(client: TestClient)
     body = client.get("/api/v1/usage?days=7").json()
 
     assert len(body["daily"]) == 7
-    assert [day["date"] for day in body["daily"]] == sorted(
-        day["date"] for day in body["daily"]
-    )
+    assert [day["date"] for day in body["daily"]] == sorted(day["date"] for day in body["daily"])
     today = NOW.date().isoformat()
     by_date = {day["date"]: day["sessions"] for day in body["daily"]}
     assert by_date[today] == 3

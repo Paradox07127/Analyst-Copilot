@@ -16,10 +16,19 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.cancellation import CancellationError
 from eda_platform.core.llm import LLMToolCall, ToolCallingLLM
 
 TraceSink = Callable[[str, str, dict[str, Any]], None]
 ToolExecutor = Callable[[BaseModel], "AgentToolResult"]
+# (admitted, reason) over the answer and the artifacts the run produced.
+AnswerValidator = Callable[[str, list[Any]], tuple[bool, str]]
+
+# Replaying a call that overran the budget or lost a cancellation race spends
+# more of the resource that just ran out, so these two never become an
+# observation the model is invited to retry.
+_TERMINAL_TOOL_ERRORS = (BudgetExceeded, CancellationError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +84,14 @@ class AgentRuntime:
         max_steps: int = 8,
         max_tool_calls: int = 12,
         max_observation_chars: int = 12_000,
+        answer_validator: AnswerValidator | None = None,
+        max_answer_rewrites: int = 1,
         trace: TraceSink | None = None,
     ) -> None:
         if max_steps < 1 or max_tool_calls < 1:
             raise ValueError("Agent runtime limits must be positive.")
+        if max_answer_rewrites < 0:
+            raise ValueError("Agent answer rewrites cannot be negative.")
         names = [tool.name for tool in tools]
         if len(names) != len(set(names)):
             raise ValueError("Agent tool names must be unique.")
@@ -88,6 +101,8 @@ class AgentRuntime:
         self._max_steps = max_steps
         self._max_tool_calls = max_tool_calls
         self._max_observation_chars = max_observation_chars
+        self._answer_validator = answer_validator
+        self._max_answer_rewrites = max_answer_rewrites
         self._trace = trace
 
     def run(self, *, system_prompt: str, user_message: str) -> AgentRunResult:
@@ -98,6 +113,8 @@ class AgentRuntime:
         all_artifacts: list[Any] = []
         tool_calls = 0
         tool_names: list[str] = []
+        answer_rewrites = 0
+        last_rejection = ""
 
         for step in range(1, self._max_steps + 1):
             response = self._llm.tool_call(
@@ -107,25 +124,66 @@ class AgentRuntime:
             )
             if not response.tool_calls:
                 answer = response.content.strip()
-                if answer:
-                    self._emit(
-                        "agent_completed",
-                        "agent_runtime",
-                        {"step": step, "tool_calls": tool_calls},
-                    )
+                if not answer:
                     return AgentRunResult(
-                        status="completed",
-                        answer=answer,
+                        status="failed",
                         artifacts=_unique_artifacts(all_artifacts),
                         tool_calls=tool_calls,
                         tool_names=tool_names,
+                        error=(
+                            "The model ended the agent turn without an answer or a tool call."
+                        ),
                     )
+                evidence = _unique_artifacts(all_artifacts)
+                if self._answer_validator is not None:
+                    admitted, reason = self._answer_validator(answer, evidence)
+                    if not admitted:
+                        last_rejection = reason
+                        self._emit(
+                            "agent_answer_rejected",
+                            "agent_runtime",
+                            {
+                                "step": step,
+                                "rewrite": answer_rewrites,
+                                "reason": reason[:800],
+                            },
+                        )
+                        if answer_rewrites >= self._max_answer_rewrites:
+                            return AgentRunResult(
+                                status="answer_unverified",
+                                artifacts=evidence,
+                                tool_calls=tool_calls,
+                                tool_names=tool_names,
+                                error=(
+                                    "The answer could not be verified against the "
+                                    f"evidence it cites: {reason}"
+                                ),
+                            )
+                        answer_rewrites += 1
+                        # Feedback carries the reason only. Replaying the rejected
+                        # text invites the model to defend it instead of rewriting.
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Validation feedback:\n{reason}\n"
+                                    "Every figure must come from a tool result in this "
+                                    "session. Fix the errors and try again."
+                                ),
+                            }
+                        )
+                        continue
+                self._emit(
+                    "agent_completed",
+                    "agent_runtime",
+                    {"step": step, "tool_calls": tool_calls},
+                )
                 return AgentRunResult(
-                    status="failed",
-                    artifacts=_unique_artifacts(all_artifacts),
+                    status="completed",
+                    answer=answer,
+                    artifacts=evidence,
                     tool_calls=tool_calls,
                     tool_names=tool_names,
-                    error="The model ended the agent turn without an answer or a tool call.",
                 )
 
             if tool_calls + len(response.tool_calls) > self._max_tool_calls:
@@ -173,6 +231,18 @@ class AgentRuntime:
                     }
                 )
 
+        if last_rejection:
+            # The step cap is the symptom; the answer failing its gate is the cause.
+            return AgentRunResult(
+                status="answer_unverified",
+                artifacts=_unique_artifacts(all_artifacts),
+                tool_calls=tool_calls,
+                tool_names=tool_names,
+                error=(
+                    "The agent ran out of reasoning steps while rewriting an answer "
+                    f"that could not be verified: {last_rejection}"
+                ),
+            )
         self._emit(
             "agent_limit_reached",
             "agent_runtime",
@@ -236,6 +306,13 @@ class AgentRuntime:
             return observation, []
         try:
             result = tool.execute(args)
+        except _TERMINAL_TOOL_ERRORS:
+            self._emit(
+                "tool_failed",
+                tool.name,
+                {"call_id": call.call_id, "step": step, "error": "run_terminated"},
+            )
+            raise
         except Exception as exc:  # tool errors are repairable observations
             observation = {
                 "ok": False,

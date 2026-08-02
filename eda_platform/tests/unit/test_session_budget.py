@@ -103,7 +103,9 @@ def test_protected_reservation_does_not_double_reduce_normal_capacity() -> None:
 
 
 def test_settlement_replaces_reservation_with_actual_usage() -> None:
-    state = SessionBudgetState(SessionBudgetPolicy(max_requests=2, max_total_tokens=100, max_cost_usd=1))
+    state = SessionBudgetState(
+        SessionBudgetPolicy(max_requests=2, max_total_tokens=100, max_cost_usd=1)
+    )
     state.reserve(
         "call-1",
         input_tokens=40,
@@ -158,7 +160,9 @@ def test_unknown_price_rejected_when_cost_limit_is_configured() -> None:
 
 
 def test_strict_unknown_usage_policy_rejects_incomplete_settlement() -> None:
-    state = SessionBudgetState(SessionBudgetPolicy(max_total_tokens=100, unknown_usage_policy="reject"))
+    state = SessionBudgetState(
+        SessionBudgetPolicy(max_total_tokens=100, unknown_usage_policy="reject")
+    )
     state.reserve("call-1", total_tokens=50)
 
     with pytest.raises(BudgetUsageUncertain) as caught:

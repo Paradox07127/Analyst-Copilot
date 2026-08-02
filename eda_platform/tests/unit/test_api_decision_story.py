@@ -348,9 +348,7 @@ def test_create_draft_requires_exact_run_for_duplicate_finding_id(
     ],
 )
 def test_create_draft_invalid_body_is_422(client: TestClient, payload: dict) -> None:
-    response = client.post(
-        f"/api/v1/sessions/{VIEW_RUN}/decision-story/drafts", json=payload
-    )
+    response = client.post(f"/api/v1/sessions/{VIEW_RUN}/decision-story/drafts", json=payload)
     assert response.status_code == 422, response.text
     assert response.json()["error"]["code"] == "validation_error"
 
@@ -469,10 +467,7 @@ def test_persisted_decision_report_read_failures_are_typed(
         )
     tampered_identifier = client.get(endpoint)
     assert tampered_identifier.status_code == 500
-    assert (
-        tampered_identifier.json()["error"]["code"]
-        == "decision_report_identity_invalid"
-    )
+    assert tampered_identifier.json()["error"]["code"] == "decision_report_identity_invalid"
     assert str(workspace) not in tampered_identifier.text
 
 
@@ -503,9 +498,7 @@ def test_generate_report_requires_exact_run_for_duplicate_brief_id(
     )
     duplicate_run = "synthesis_duplicate"
     store.start_session(PROJECT, duplicate_run)
-    store.save_artifact(
-        original.model_copy(update={"session_id": duplicate_run})
-    )
+    store.save_artifact(original.model_copy(update={"session_id": duplicate_run}))
 
     ambiguous = _generate_report(client, brief_artifact_id)
     assert ambiguous.status_code == 404, ambiguous.text
@@ -544,9 +537,7 @@ def test_generate_report_idempotency_key_replays_the_same_job(
     assert replay.json()["job"]["job_id"] == first.json()["job"]["job_id"]
 
 
-def test_a_second_draft_is_refused_while_one_is_active(
-    client: TestClient, workspace: Path
-) -> None:
+def test_a_second_draft_is_refused_while_one_is_active(client: TestClient, workspace: Path) -> None:
     """Two decision-story jobs would race on the same project-level story, so a
     second submission without an idempotency key is refused, not queued."""
     store = ArtifactStore(workspace)
@@ -579,7 +570,9 @@ def test_derived_lifecycle_runs_stay_out_of_the_run_list(client: TestClient) -> 
         item["session_id"]
         for item in client.get(f"/api/v1/projects/{PROJECT}/sessions").json()["items"]
     ]
-    assert not [session_id for session_id in listed if session_id.startswith(("sbsess_", "drsess_"))]
+    assert not [
+        session_id for session_id in listed if session_id.startswith(("sbsess_", "drsess_"))
+    ]
     assert VIEW_RUN in listed
 
     # They are still real, deep-linkable runs when explicitly asked for.

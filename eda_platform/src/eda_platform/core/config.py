@@ -33,6 +33,7 @@ class DeploymentConfig:
     mode: str
     allowed_hosts: tuple[str, ...]
     allowed_origins: tuple[str, ...]
+    remote_auth_token: str | None
     trusted_proxy_ips: tuple[str, ...]
     project_file_quota: int
     project_byte_quota: int
@@ -59,6 +60,7 @@ def deployment_config(*, repo_root: Path | None = None) -> DeploymentConfig:
     if mode == "local":
         hosts = ("localhost", "127.0.0.1", "testserver")
         origins: tuple[str, ...] = ()
+        remote_auth_token = None
         default_files, default_bytes, default_concurrent = 10_000, 1 << 40, 8
         default_rate: int | None = None
     else:
@@ -69,6 +71,7 @@ def deployment_config(*, repo_root: Path | None = None) -> DeploymentConfig:
             raise DeploymentConfigError(
                 "Remote mode requires EDA_ALLOWED_HOSTS and EDA_ALLOWED_ORIGINS."
             )
+        remote_auth_token = _remote_auth_token(values)
         for host in hosts:
             if (
                 "://" in host
@@ -89,7 +92,7 @@ def deployment_config(*, repo_root: Path | None = None) -> DeploymentConfig:
                     "EDA_ALLOWED_ORIGINS entries must be exact http(s) origins."
                 ) from exc
             if (
-                parsed.scheme.lower() not in {"http", "https"}
+                parsed.scheme.lower() != "https"
                 or not parsed.hostname
                 or parsed.username is not None
                 or parsed.password is not None
@@ -100,7 +103,7 @@ def deployment_config(*, repo_root: Path | None = None) -> DeploymentConfig:
                 or (port is not None and not 1 <= port <= 65535)
             ):
                 raise DeploymentConfigError(
-                    "EDA_ALLOWED_ORIGINS entries must be exact http(s) origins."
+                    "EDA_ALLOWED_ORIGINS entries must be exact HTTPS origins."
                 )
             # Browsers omit the scheme's default port when serializing Origin,
             # so keeping ':443' here would reject every request from that host.
@@ -135,6 +138,7 @@ def deployment_config(*, repo_root: Path | None = None) -> DeploymentConfig:
         mode=mode,
         allowed_hosts=hosts,
         allowed_origins=origins,
+        remote_auth_token=remote_auth_token,
         trusted_proxy_ips=trusted_proxy_ips,
         project_file_quota=_positive_env(
             "EDA_PROJECT_UPLOAD_FILE_QUOTA", default_files, values
@@ -154,6 +158,17 @@ def deployment_config(*, repo_root: Path | None = None) -> DeploymentConfig:
             "EDA_UPLOAD_RATE_WINDOW_SECONDS", 60, values
         ),
     )
+
+
+def _remote_auth_token(values: Mapping[str, str]) -> str:
+    token = values.get("EDA_REMOTE_AUTH_TOKEN", "").strip()
+    if len(token) < 32 or any(
+        ord(character) < 33 or ord(character) == 127 for character in token
+    ):
+        raise DeploymentConfigError(
+            "Remote mode requires EDA_REMOTE_AUTH_TOKEN with at least 32 visible characters."
+        )
+    return token
 
 
 def _csv_env(name: str, values: Mapping[str, str]) -> tuple[str, ...]:

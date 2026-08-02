@@ -154,7 +154,9 @@ def test_backfill_prune_never_touches_artifacts_or_trace_events(tmp_path: Path) 
     backfill_sessions_index(tmp_path)
 
     with sqlite3.connect(tmp_path / "state.sqlite") as conn:
-        runs = conn.execute("select count(*) from sessions where session_id='run_gone'").fetchone()[0]
+        runs = conn.execute("select count(*) from sessions where session_id='run_gone'").fetchone()[
+            0
+        ]
         traces = conn.execute(
             "select count(*) from trace_events where session_id='run_gone'"
         ).fetchone()[0]

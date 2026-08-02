@@ -113,7 +113,9 @@ def test_get_preview_pages(client: TestClient) -> None:
 
 
 def test_preview_limit_validation_422(client: TestClient) -> None:
-    response = client.get(f"/api/v1/sessions/{RUN}/datasets/{DATASET}/preview", params={"limit": 5000})
+    response = client.get(
+        f"/api/v1/sessions/{RUN}/datasets/{DATASET}/preview", params={"limit": 5000}
+    )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
 

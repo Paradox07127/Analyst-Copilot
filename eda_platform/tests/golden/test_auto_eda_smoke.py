@@ -15,10 +15,7 @@ def test_auto_eda_does_not_expose_m2_enable_switch() -> None:
 def test_auto_eda_creates_manifest_artifacts_and_trace(tmp_path) -> None:
     csv_path = tmp_path / "orders.csv"
     csv_path.write_text(
-        "order_id,amount,region\n"
-        "1,10,East\n"
-        "2,,West\n"
-        "3,,East\n",
+        "order_id,amount,region\n1,10,East\n2,,West\n3,,East\n",
         encoding="utf-8",
     )
     workspace = tmp_path / "workspace"
@@ -83,14 +80,10 @@ def test_auto_eda_dirty_dataset_surfaces_quality_rules(tmp_path) -> None:
         session_id="dirty_run",
     )
     quality_artifacts = [
-        artifact
-        for artifact in result.artifacts
-        if artifact.type is ArtifactType.QUALITY_ISSUE_SET
+        artifact for artifact in result.artifacts if artifact.type is ArtifactType.QUALITY_ISSUE_SET
     ]
     issue_codes = {
-        issue["code"]
-        for artifact in quality_artifacts
-        for issue in artifact.payload["issues"]
+        issue["code"] for artifact in quality_artifacts for issue in artifact.payload["issues"]
     }
 
     assert {"high_missing", "duplicate_rows", "constant_column", "mixed_type_string"}.issubset(
@@ -123,9 +116,7 @@ def test_auto_eda_time_series_dataset_creates_trend_chart(tmp_path) -> None:
 def test_auto_eda_blank_run_id_creates_fresh_runs_for_same_input(tmp_path) -> None:
     csv_path = tmp_path / "time_series_sales.csv"
     csv_path.write_text(
-        "order_date,amount,region\n"
-        "2026-01-01,10,East\n"
-        "2026-01-02,20,West\n",
+        "order_date,amount,region\n2026-01-01,10,East\n2026-01-02,20,West\n",
         encoding="utf-8",
     )
     workspace = tmp_path / "workspace"
@@ -143,7 +134,9 @@ def test_auto_eda_blank_run_id_creates_fresh_runs_for_same_input(tmp_path) -> No
 
     assert first.session_id != second.session_id
     assert (workspace / f"projects/project_demo/sessions/{first.session_id}/manifest.json").exists()
-    assert (workspace / f"projects/project_demo/sessions/{second.session_id}/manifest.json").exists()
+    assert (
+        workspace / f"projects/project_demo/sessions/{second.session_id}/manifest.json"
+    ).exists()
 
 
 def test_auto_eda_multi_dataset_run_creates_relationship_artifacts(tmp_path) -> None:

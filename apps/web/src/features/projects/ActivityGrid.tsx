@@ -46,7 +46,11 @@ export function ActivityGrid({ days }: { days: UsageDay[] }) {
         className="grid w-full grid-flow-col auto-cols-fr gap-[3px] pb-1"
       >
         {weeks.map((week) => (
-          <div key={week[0]?.date} className="flex min-w-0 flex-col gap-[3px]">
+          <div
+            key={week[0]?.date}
+            aria-hidden="true"
+            className="flex min-w-0 flex-col gap-[3px]"
+          >
             {week.map((day) => (
               <span
                 key={day.date}

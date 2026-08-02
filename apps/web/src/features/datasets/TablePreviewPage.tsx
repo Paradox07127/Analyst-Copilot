@@ -603,7 +603,7 @@ export function Component() {
               displayedRows={displayedRows}
               showAllColumns={showAllColumns}
             />
-            <footer className="flex shrink-0 items-center gap-3">
+            <footer className="relative z-20 flex shrink-0 items-center gap-3 bg-bg">
               <button
                 type="button"
                 onClick={() => goToOffset(offset - PREVIEW_PAGE_SIZE)}

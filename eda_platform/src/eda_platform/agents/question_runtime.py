@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from eda_platform.agents.data_tools import DataToolContext, build_data_tools
+from eda_platform.agents.interpretation import validate_agent_answer
 from eda_platform.agents.runtime import AgentRunResult, AgentRuntime
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.llm import ToolCallingLLM, ToolCallingUnsupportedError
@@ -95,6 +96,12 @@ def run_question_agent(
             ),
         )
 
+    def check_answer(answer: str, evidence: list[Any]) -> tuple[bool, str]:
+        return validate_agent_answer(
+            answer,
+            [artifact for artifact in evidence if isinstance(artifact, Artifact)],
+        )
+
     tools = build_data_tools(context)
     runtime = AgentRuntime(
         llm=llm,
@@ -102,6 +109,7 @@ def run_question_agent(
         task="question_agent_tool_loop",
         max_steps=10,
         max_tool_calls=16,
+        answer_validator=check_answer,
         trace=emit,
     )
     user_message = json.dumps(

@@ -555,3 +555,32 @@ def test_socket_timeout_becomes_actionable_runtime_error(monkeypatch) -> None:
 
 def test_default_timeout_is_generous_out_of_box() -> None:
     assert LLMSettings(provider=LLMProvider.OFFLINE).timeout_seconds == 180.0
+
+
+def test_an_unlisted_anthropic_model_still_reaches_the_endpoint() -> None:
+    """A capability catalog that predates a model must not make it unreachable.
+
+    Refusing locally also raised the wrong type: the batch-level fallback only
+    catches ToolCallingUnsupportedError, so each question failed on its own
+    instead of the batch degrading once to the deterministic pipeline.
+    """
+    settings = LLMSettings(
+        provider=LLMProvider.ANTHROPIC, api_key="sk", model="claude-not-yet-catalogued"
+    )
+    client = _FakeAnthropic(
+        settings,
+        {
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 3},
+        },
+    )
+
+    response = client.tool_call(
+        task="tool_calling_probe",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+    )
+
+    assert response.content == "done"
+    assert client.captured["model"] == "claude-not-yet-catalogued"

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from data_operation_helpers import await_data_operation, operation_result_response
 from fastapi.testclient import TestClient
-from httpx import Response
+from httpx2 import Response
 
 from eda_platform.api.main import create_app
 from eda_platform.core.store import ArtifactStore

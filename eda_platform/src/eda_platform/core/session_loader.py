@@ -48,7 +48,9 @@ def load_run(project_id: str, session_id: str, *, workspace: Path | str) -> Load
             ok=False,
             datasets_available=False,
         )
-    artifacts, artifact_warnings = store.list_artifacts_safe(project_id=project_id, session_id=session_id)
+    artifacts, artifact_warnings = store.list_artifacts_safe(
+        project_id=project_id, session_id=session_id
+    )
     warnings.extend(artifact_warnings)
     manifest_data = _safe_manifest(store, project_id, session_id)
 
@@ -128,9 +130,7 @@ def _manifest_input_hashes(manifest_data: dict[str, object]) -> dict[str, str]:
     if not isinstance(raw_hashes, dict):
         return {}
     return {
-        str(name): value
-        for name, value in raw_hashes.items()
-        if isinstance(value, str) and value
+        str(name): value for name, value in raw_hashes.items() if isinstance(value, str) and value
     }
 
 

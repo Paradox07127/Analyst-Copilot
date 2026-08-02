@@ -41,8 +41,8 @@ from eda_platform.application.services.approval_service import (
 )
 from eda_platform.application.services.dataset_service import DatasetService
 from eda_platform.application.services.job_service import JobConflictError, JobService
-from eda_platform.application.services.session_service import SessionNotFoundError
 from eda_platform.application.services.semantic_service import SemanticService
+from eda_platform.application.services.session_service import SessionNotFoundError
 from eda_platform.core.ids import INTERNAL_SESSION_MARKER, stable_hash
 from eda_platform.core.semantic import JoinWhitelistEntry, load_join_whitelist
 from eda_platform.core.store import ArtifactStore
@@ -285,9 +285,7 @@ class RelationshipService:
         label = candidate.pair.label()
         existing = self._validations(project_id, session_id)[0].get(label)
         if existing is not None and existing.verified:
-            raise RelationshipNotValidatableError(
-                relationship_id, "it is already fully validated"
-            )
+            raise RelationshipNotValidatableError(relationship_id, "it is already fully validated")
         if candidate.confidence not in VALIDATABLE_CONFIDENCES:
             raise RelationshipNotValidatableError(
                 relationship_id,
@@ -365,8 +363,8 @@ class RelationshipService:
         if idempotency_key:
             existing = self._store.find_by_idempotency_key(idempotency_key)
             if existing is not None:
-                _payload, replay_payload_digest, _status = (
-                    self._approvals.inspect_payload(action_hash, session_id=session_id)
+                _payload, replay_payload_digest, _status = self._approvals.inspect_payload(
+                    action_hash, session_id=session_id
                 )
                 self._jobs.assert_idempotent_replay(
                     existing,
@@ -388,11 +386,11 @@ class RelationshipService:
                 )
                 return self._replayed(session_id, relationship_id, existing)
         self._require_relationship_lane_free(project_id, session_id)
+
         def validate(payload: dict[str, Any]) -> tuple[Any, str]:
             if str(payload.get("relationship_id", "")) != relationship_id:
                 raise RelationshipValidationRequestError(
-                    "The approval was prepared for a different relationship "
-                    "than the request path."
+                    "The approval was prepared for a different relationship than the request path."
                 )
             candidate = self._require_candidate(project_id, session_id, relationship_id)
             fingerprint = candidate_fingerprint(candidate)
@@ -452,9 +450,7 @@ class RelationshipService:
             label=label,
             left=left,
             right=right,
-            cardinality=(
-                validation.cardinality if validation is not None else None
-            ),
+            cardinality=(validation.cardinality if validation is not None else None),
             source_session_id=session_id,
             expected_version=expected_version,
         )
@@ -465,9 +461,7 @@ class RelationshipService:
     ) -> RelationshipEdge:
         project_id = self._project_for_run(session_id)
         label = self._require_candidate(project_id, session_id, relationship_id).pair.label()
-        self._semantic.revoke_whitelist_join(
-            session_id, label, expected_version=expected_version
-        )
+        self._semantic.revoke_whitelist_join(session_id, label, expected_version=expected_version)
         return self._edge_now(session_id, relationship_id)
 
     def _edge_now(self, session_id: str, relationship_id: str) -> RelationshipEdge:
@@ -669,7 +663,9 @@ class RelationshipService:
                 job_id,
                 f"Idempotency key already used by job {job_id} for a different relationship.",
             )
-        expected_suffix = generate_validate_session_id(session_id, relationship_id).rsplit("_", 1)[-1]
+        expected_suffix = generate_validate_session_id(session_id, relationship_id).rsplit("_", 1)[
+            -1
+        ]
         if not str(job_row["session_id"]).endswith(f"_{expected_suffix}"):
             raise JobConflictError(
                 job_id,

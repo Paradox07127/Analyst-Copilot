@@ -35,6 +35,11 @@ test.describe("core visual regression", () => {
       `/projects/${projectId}/sessions/${sessionId}/table/${datasetId}?offset=100`,
     );
     await expect(page.getByText("Rows 101–122")).toBeVisible();
+    /* Distribution data is computed asynchronously. Waiting for its first bin
+     * keeps the baseline independent of whether an earlier spec warmed the
+     * shared E2E workspace. */
+    await expect(page.getByTestId("header-distribution-bin").first())
+      .toBeVisible();
 
     await expect(page.getByRole("main")).toHaveScreenshot(
       "table-preview-offset.png",

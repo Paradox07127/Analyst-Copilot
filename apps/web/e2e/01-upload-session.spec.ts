@@ -5,24 +5,16 @@
 import { expect, test } from "@playwright/test";
 import { FIXTURE_CSV, FIXTURE_ROW_COUNT, PROJECT_ID } from "./support/seed";
 
-function kpiValue(page: import("@playwright/test").Page, label: string) {
-  return page
-    .getByRole("main")
-    .getByText(label, { exact: true })
-    .locator("xpath=..");
-}
-
 test("upload → offline run → Activity progress → Data Map shows the run's numbers", async ({
   page,
   request,
 }) => {
   await page.goto(`/projects/${PROJECT_ID}/new-session`);
-  await expect(page.getByRole("heading", { name: "New run" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "New session" })).toBeVisible();
 
-  await page.setInputFiles("#launchpad-files", FIXTURE_CSV);
+  await page.getByLabel("Data files (.csv)").setInputFiles(FIXTURE_CSV);
   await expect(page.getByText(/^Ready · ds_/)).toBeVisible();
 
-  await page.selectOption("#launchpad-llm", "offline");
   await page
     .getByLabel("Business context")
     .fill("Playwright end-to-end smoke run.");
@@ -51,15 +43,22 @@ test("upload → offline run → Activity progress → Data Map shows the run's 
   expect(detail.status).toBe("completed");
   expect(detail.artifact_count).toBeGreaterThan(0);
 
-  await expect(kpiValue(page, "Datasets")).toContainText("1");
-  await expect(kpiValue(page, "Artifacts")).toContainText(
-    String(detail.artifact_count),
+  const main = page.getByRole("main");
+  await expect(main.getByText("Tables", { exact: true }).locator("..")).toContainText(
+    "1",
   );
-  await expect(kpiValue(page, "Report")).toContainText(detail.report_status);
+  await expect(main.getByText("Rows", { exact: true }).locator("..")).toContainText(
+    String(FIXTURE_ROW_COUNT),
+  );
+  await expect(
+    main.getByText("Columns", { exact: true }).locator(".."),
+  ).toContainText("4");
+  const inspector = page.getByRole("complementary", {
+    name: "Context Inspector",
+  });
+  await expect(inspector).toContainText(`${detail.artifact_count} artifacts`);
+  await expect(inspector).toContainText(`Report: ${detail.report_status}`);
   await expect(
     page.getByRole("heading", { name: "e2e_sales.csv" }),
   ).toBeVisible();
-  await expect(page.getByRole("main")).toContainText(
-    `${FIXTURE_ROW_COUNT} rows · 4 cols`,
-  );
 });

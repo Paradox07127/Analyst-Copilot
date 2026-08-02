@@ -15,13 +15,17 @@ const idsPy = path.resolve(
 describe("unfiled bucket id", () => {
   it("matches INTERNAL_PROJECT_IDS in core/ids.py", () => {
     const source = readFileSync(idsPy, "utf8");
+    const pythonId = source.match(
+      /UNFILED_PROJECT_ID\s*=\s*"([^"]+)"/,
+    )?.[1];
     const declared = source.match(
       /INTERNAL_PROJECT_IDS\s*=\s*frozenset\(\{([^}]*)\}\)/,
     )?.[1];
+    expect(pythonId, "UNFILED_PROJECT_ID not found in core/ids.py").toBe(
+      UNFILED_PROJECT_ID,
+    );
     expect(declared, "INTERNAL_PROJECT_IDS not found in core/ids.py").toBeDefined();
-
-    const ids = [...(declared ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-    expect(ids).toContain(UNFILED_PROJECT_ID);
+    expect(declared).toMatch(/\bUNFILED_PROJECT_ID\b/);
   });
 
   it("labels the bucket rather than leaking its id", () => {

@@ -106,7 +106,8 @@ DERIVED_SESSION_PREFIXES = (
 # back a feature that has no project. They are never user projects. Named here
 # rather than inline so the project list and the usage rollup cannot drift into
 # disagreeing about what the workspace contains.
-INTERNAL_PROJECT_IDS = frozenset({"unfiled-sessions"})
+UNFILED_PROJECT_ID = "unfiled-sessions"
+INTERNAL_PROJECT_IDS = frozenset({UNFILED_PROJECT_ID})
 
 
 def is_internal_project_id(project_id: str) -> bool:

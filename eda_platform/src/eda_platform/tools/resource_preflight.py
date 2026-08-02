@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from eda_platform.schemas.resource_metrics import (
+    DatasetRole,
     EdaDatasetEstimate,
     EdaResourcePolicy,
     EdaResourcePreflight,
@@ -53,7 +54,7 @@ def estimate_frame_bytes(
 def estimate_csv_resource(
     path: Path | str,
     *,
-    role: str = "analysis",
+    role: DatasetRole = "analysis",
     sample_rows: int = 10_000,
     safety_factor: float = 1.25,
     cancel_check: Callable[[], object] | None = None,
@@ -114,7 +115,7 @@ def estimate_csv_resource(
 def inspect_csv_resources(
     file_paths: Sequence[Path | str],
     *,
-    role: str = "analysis",
+    role: DatasetRole = "analysis",
     policy: EdaResourcePolicy | None = None,
     cancel_check: Callable[[], object] | None = None,
 ) -> list[EdaDatasetEstimate]:

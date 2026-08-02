@@ -47,7 +47,6 @@ from eda_platform.core.meaning_proposals import (
     MeaningProposals,
     apply_proposal_to_seeds,
 )
-from eda_platform.core.session_fence import session_key_lock
 from eda_platform.core.semantic import (
     EntityNote,
     FieldMeaning,
@@ -67,6 +66,7 @@ from eda_platform.core.semantic_resources import (
     SemanticSeedsRepository,
     SemanticSnapshot,
 )
+from eda_platform.core.session_fence import session_key_lock
 from eda_platform.core.storage_operations import (
     ResourceDigestMismatchError,
     ResourceOperationInProgressError,

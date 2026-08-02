@@ -63,11 +63,16 @@ describe("Project list with real API", () => {
     expect(recent).toContainElement(
       screen.getByRole("heading", { name: "Projects" }),
     );
+    const activity = screen.getByRole("img", {
+      name: /Active sessions per day over the last 180 days/,
+    });
+    expect(activity).toHaveClass("grid", "w-full", "auto-cols-fr");
+    expect(activity.querySelectorAll("[title]")).not.toHaveLength(0);
     expect(
-      screen.getByRole("img", {
-        name: /Active sessions per day over the last 180 days/,
-      }),
-    ).toHaveClass("grid", "w-full", "auto-cols-fr");
+      Array.from(activity.querySelectorAll("[title]")).every((node) =>
+        node.closest('[aria-hidden="true"]'),
+      ),
+    ).toBe(true);
     expect(screen.queryByText(/last 180 days/)).not.toBeInTheDocument();
     expect(screen.queryByText(/no recorded cost/)).not.toBeInTheDocument();
   });

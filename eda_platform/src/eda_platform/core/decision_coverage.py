@@ -87,7 +87,9 @@ def persist_decision_coverage(store: ArtifactStore, project_id: str, session_id:
     """Assess and persist one idempotent DECISION_COVERAGE artifact per run."""
     coverage = assess_decision_coverage(store, project_id)
     artifact = Artifact(
-        id=make_artifact_id("decision_coverage", {"project_id": project_id, "session_id": session_id}),
+        id=make_artifact_id(
+            "decision_coverage", {"project_id": project_id, "session_id": session_id}
+        ),
         type=ArtifactType.DECISION_COVERAGE,
         project_id=project_id,
         session_id=session_id,

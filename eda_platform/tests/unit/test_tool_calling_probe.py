@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from eda_platform.core.llm import (
     LLMSettings,
     LLMToolResponse,
     OfflineLLMClient,
+    StructuredLLM,
     ToolCallingUnsupportedError,
 )
 from eda_platform.core.store import ArtifactStore
@@ -35,7 +37,7 @@ VERIFIED = LLMSettings(
 
 
 @pytest.fixture(autouse=True)
-def _clean_cache() -> None:
+def _clean_cache() -> Iterator[None]:
     forget_probe_results()
     yield
     forget_probe_results()
@@ -163,7 +165,7 @@ class _RefusesAfterTheProbe(_Client):
         raise ToolCallingUnsupportedError("tools rejected once a schema is attached")
 
 
-def _run_help_turn(store: ArtifactStore, llm: object) -> Any:
+def _run_help_turn(store: ArtifactStore, llm: StructuredLLM) -> Any:
     return run_chat_turn(
         "help",  # routes to meta_help deterministically on the legacy path
         datasets=[],

@@ -10,6 +10,7 @@ ResourceLimitAction = Literal["limited", "reject"]
 ResourcePreflightStatus = Literal["accepted", "limited", "rejected"]
 ResourceComputeMode = Literal["exact_in_memory", "metadata_only"]
 ResourceMeasurement = Literal["exact", "estimated", "unavailable"]
+DatasetRole = Literal["analysis", "raw_lineage"]
 PeakRssMethod = Literal[
     "getrusage_ru_maxrss",
     "get_process_memory_info_peak_working_set",
@@ -49,7 +50,7 @@ class EdaResourcePolicy(_StrictModel):
 class EdaDatasetEstimate(_StrictModel):
     """Bounded-sample estimate for one source without retaining sample data."""
 
-    role: Literal["analysis", "raw_lineage"] = "analysis"
+    role: DatasetRole = "analysis"
     name: str
     file_bytes: int = Field(ge=0)
     columns: int = Field(ge=0)

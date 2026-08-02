@@ -74,7 +74,9 @@ class SessionBudgetExceeded(BudgetExceeded):
         self.call_id = call_id
         self.stage = stage
         call_suffix = f" for call {call_id!r}" if call_id is not None else ""
-        super().__init__(f"Session {dimension} budget exhausted{call_suffix}: {attempted} > {limit}.")
+        super().__init__(
+            f"Session {dimension} budget exhausted{call_suffix}: {attempted} > {limit}."
+        )
 
 
 class BudgetReservationConflict(ValueError):

@@ -78,9 +78,7 @@ def convert_workflow_eval_spec(
     )
     resolved_environment = environment or WorkflowEvalEnvironment()
     case_fingerprint = stable_hash(case.model_dump(mode="json"), length=32)
-    environment_fingerprint = stable_hash(
-        resolved_environment.model_dump(mode="json"), length=32
-    )
+    environment_fingerprint = stable_hash(resolved_environment.model_dump(mode="json"), length=32)
     resolved_trial_id = trial_id or stable_hash(
         {
             "case_fingerprint": case_fingerprint,
@@ -257,8 +255,7 @@ def grade_workflow_step_dag(
         failed_dependencies = [
             dependency
             for dependency in step.depends_on
-            if dependency in nodes_by_id
-            and nodes_by_id[dependency].status in {"failed", "skipped"}
+            if dependency in nodes_by_id and nodes_by_id[dependency].status in {"failed", "skipped"}
         ]
         if step.status == "succeeded" and failed_dependencies:
             failures.append(
@@ -281,17 +278,10 @@ def grade_workflow_step_dag(
             )
         )
 
-    depended_on = {
-        dependency for step in step_dag.steps for dependency in step.depends_on
-    }
-    terminal_steps = [
-        step for step in step_dag.steps if step.node_id not in depended_on
-    ]
+    depended_on = {dependency for step in step_dag.steps for dependency in step.depends_on}
+    terminal_steps = [step for step in step_dag.steps if step.node_id not in depended_on]
     if step_dag.steps and not any(
-        (
-            step.status == "succeeded"
-            and step.kind in {"finding", "report_claim", "validation"}
-        )
+        (step.status == "succeeded" and step.kind in {"finding", "report_claim", "validation"})
         or (step.status == "abstained" and step.kind == "question")
         for step in terminal_steps
     ):
@@ -386,9 +376,7 @@ def reconcile_workflow_usage(
             "budget_rejected_calls": usage.budget_rejected_calls,
             "budget_uncertain_calls": usage.budget_uncertain_calls,
         }
-        if any(
-            value is None for value in budget_status_fields.values()
-        ):
+        if any(value is None for value in budget_status_fields.values()):
             failures.append(
                 _eval_failure(
                     "__usage__",
@@ -481,7 +469,9 @@ def evaluate_workflow_run(
     ]
     session_id = artifact_list[0].session_id if artifact_list else ""
     metrics = (
-        SessionMetrics.model_validate(max(metrics_artifacts, key=lambda item: item.created_at).payload)
+        SessionMetrics.model_validate(
+            max(metrics_artifacts, key=lambda item: item.created_at).payload
+        )
         if metrics_artifacts
         else SessionMetrics(session_id=session_id)
     )
@@ -502,9 +492,7 @@ def evaluate_workflow_run(
         ],
         expected_count=len(spec.expected_answers),
     )
-    answer_precision = _precision(
-        answer_match_count, len(answered), spec.expected_answers
-    )
+    answer_precision = _precision(answer_match_count, len(answered), spec.expected_answers)
     answer_recall = _recall(answer_match_count, len(spec.expected_answers))
 
     abstention_match_count = _maximum_match_count(
@@ -525,9 +513,7 @@ def evaluate_workflow_run(
 
     dataset_names = {profile.name for profile in profiles}
     overview_coverage = _section_dataset_coverage(report, "Dataset Overview", dataset_names)
-    file_coverage = _section_dataset_coverage(
-        report, "File-by-File EDA Summary", dataset_names
-    )
+    file_coverage = _section_dataset_coverage(report, "File-by-File EDA Summary", dataset_names)
     report_dataset_coverage = min(overview_coverage, file_coverage)
     quality_dataset_coverage = _section_dataset_coverage(
         report, "Data Quality Findings", dataset_names
@@ -537,9 +523,7 @@ def evaluate_workflow_run(
     executive_matches = _matched_pattern_count(
         executive_texts, spec.required_executive_summary_patterns
     )
-    executive_recall = _recall(
-        executive_matches, len(spec.required_executive_summary_patterns)
-    )
+    executive_recall = _recall(executive_matches, len(spec.required_executive_summary_patterns))
 
     output_texts = _semantic_output_texts(answered, report)
     escapes = _semantic_escapes(output_texts, spec.forbidden_output_patterns)
@@ -551,12 +535,7 @@ def evaluate_workflow_run(
     signature = _semantic_signature(questions, report)
 
     gate_failures: list[str] = []
-    if (
-        spec.expected_dataset_count != 0
-        and not profiles
-        and not questions
-        and report is None
-    ):
+    if spec.expected_dataset_count != 0 and not profiles and not questions and report is None:
         gate_failures.append("workflow_outputs_missing")
     if not metrics_artifacts:
         gate_failures.append("run_metrics_missing")
@@ -586,9 +565,7 @@ def evaluate_workflow_run(
             "evaluation_profile_run_mismatch=" + ",".join(sorted(profile_session_ids))
         )
     if metrics_artifacts and metrics.session_id not in target_session_ids:
-        gate_failures.append(
-            f"run_metrics_payload_mismatch={metrics.session_id or '<empty>'}"
-        )
+        gate_failures.append(f"run_metrics_payload_mismatch={metrics.session_id or '<empty>'}")
     if spec.expected_dataset_count is not None and len(profiles) != spec.expected_dataset_count:
         gate_failures.append(
             f"dataset_count={len(profiles)} expected={spec.expected_dataset_count}"
@@ -635,9 +612,7 @@ def evaluate_workflow_run(
             f"semantic_escape_rate={escape_rate:.4f} max={spec.max_semantic_escape_rate:.4f}"
         )
     if metrics.failures_count > spec.max_failures:
-        gate_failures.append(
-            f"failures_count={metrics.failures_count} max={spec.max_failures}"
-        )
+        gate_failures.append(f"failures_count={metrics.failures_count} max={spec.max_failures}")
     if spec.max_tokens is not None and metrics.total_tokens > spec.max_tokens:
         gate_failures.append(f"total_tokens={metrics.total_tokens} max={spec.max_tokens}")
     if (
@@ -645,8 +620,7 @@ def evaluate_workflow_run(
         and metrics.duration_seconds > spec.max_duration_seconds
     ):
         gate_failures.append(
-            f"duration_seconds={metrics.duration_seconds:.4f} "
-            f"max={spec.max_duration_seconds:.4f}"
+            f"duration_seconds={metrics.duration_seconds:.4f} max={spec.max_duration_seconds:.4f}"
         )
 
     return WorkflowEvalResult(
@@ -749,8 +723,7 @@ def compare_workflow_evaluations(
     baseline_metrics = _suite_quality_metrics(baseline)
     current_metrics = _suite_quality_metrics(current)
     deltas = {
-        name: round(current_metrics[name] - baseline_metrics[name], 6)
-        for name in baseline_metrics
+        name: round(current_metrics[name] - baseline_metrics[name], 6) for name in baseline_metrics
     }
     policy = spec.baseline_policy
     for name in (
@@ -773,8 +746,7 @@ def compare_workflow_evaluations(
         )
     if deltas["failures_count"] > policy.max_failures_delta:
         failures.append(
-            f"failures_delta={deltas['failures_count']:.0f} "
-            f"max={policy.max_failures_delta}"
+            f"failures_delta={deltas['failures_count']:.0f} max={policy.max_failures_delta}"
         )
     stability_delta = current.stability_rate - baseline.stability_rate
     deltas["stability_rate"] = round(stability_delta, 6)
@@ -806,13 +778,10 @@ def compare_workflow_evaluations(
     deltas["tokens_max"] = float(tokens_max_delta)
     if tokens_mean_delta > policy.max_tokens_mean_increase:
         failures.append(
-            f"tokens_mean_delta={tokens_mean_delta:.2f} "
-            f"max={policy.max_tokens_mean_increase:.2f}"
+            f"tokens_mean_delta={tokens_mean_delta:.2f} max={policy.max_tokens_mean_increase:.2f}"
         )
     if tokens_max_delta > policy.max_tokens_max_increase:
-        failures.append(
-            f"tokens_max_delta={tokens_max_delta} max={policy.max_tokens_max_increase}"
-        )
+        failures.append(f"tokens_max_delta={tokens_max_delta} max={policy.max_tokens_max_increase}")
     return WorkflowEvalComparison(
         case_name=spec.name,
         spec_digest=expected_digest,
@@ -826,8 +795,7 @@ def compare_workflow_evaluations(
 
 def _matched_pattern_count(texts: list[str], patterns: list[str]) -> int:
     return sum(
-        any(re.search(pattern, text, re.IGNORECASE) for text in texts)
-        for pattern in patterns
+        any(re.search(pattern, text, re.IGNORECASE) for text in texts) for pattern in patterns
     )
 
 
@@ -955,9 +923,7 @@ def _artifact_id_aliases(questions: list[QuestionExecutionResult]) -> dict[str, 
     aliases: dict[str, str] = {}
     for question in sorted(questions, key=lambda item: (item.question, item.question_id)):
         for finding in sorted(question.findings, key=lambda item: item.text):
-            for evidence in sorted(
-                finding.evidence, key=lambda item: (item.kind, item.locator)
-            ):
+            for evidence in sorted(finding.evidence, key=lambda item: (item.kind, item.locator)):
                 artifact_id = evidence.artifact_id
                 if artifact_id and artifact_id not in aliases:
                     aliases[artifact_id] = f"artifact#{len(aliases)}"
@@ -1002,14 +968,10 @@ def _semantic_signature(
         if report is not None
         else []
     )
-    return stable_hash(
-        {"questions": question_payload, "report": report_payload}, length=32
-    )
+    return stable_hash({"questions": question_payload, "report": report_payload}, length=32)
 
 
-def _append_floor_failure(
-    failures: list[str], name: str, actual: float, minimum: float
-) -> None:
+def _append_floor_failure(failures: list[str], name: str, actual: float, minimum: float) -> None:
     if actual < minimum:
         failures.append(f"{name}={actual:.4f} min={minimum:.4f}")
 
@@ -1020,15 +982,9 @@ def _suite_quality_metrics(suite: WorkflowEvalSuiteResult) -> dict[str, float]:
         "answer_recall": min(run.answer_recall for run in suite.runs),
         "abstention_precision": min(run.abstention_precision for run in suite.runs),
         "abstention_recall": min(run.abstention_recall for run in suite.runs),
-        "report_dataset_coverage": min(
-            run.report_dataset_coverage for run in suite.runs
-        ),
-        "quality_dataset_coverage": min(
-            run.quality_dataset_coverage for run in suite.runs
-        ),
-        "executive_summary_recall": min(
-            run.executive_summary_recall for run in suite.runs
-        ),
+        "report_dataset_coverage": min(run.report_dataset_coverage for run in suite.runs),
+        "quality_dataset_coverage": min(run.quality_dataset_coverage for run in suite.runs),
+        "executive_summary_recall": min(run.executive_summary_recall for run in suite.runs),
         "semantic_escape_rate": max(run.semantic_escape_rate for run in suite.runs),
         "failures_count": float(max(run.failures_count for run in suite.runs)),
     }
@@ -1105,7 +1061,6 @@ def _usage_values_message(
     field_name: str,
 ) -> str:
     values = ", ".join(
-        f"{name}={getattr(totals, field_name)}"
-        for name, totals in sorted(sources.items())
+        f"{name}={getattr(totals, field_name)}" for name, totals in sorted(sources.items())
     )
     return f"Usage reconciliation mismatch: {values}."

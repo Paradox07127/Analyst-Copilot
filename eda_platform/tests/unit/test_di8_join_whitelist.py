@@ -12,7 +12,6 @@ from pydantic import BaseModel
 
 from eda_platform.agents.question_agent import propose_llm_question_candidates
 from eda_platform.core.query import DuckDBQueryEngine
-from eda_platform.core.session_metrics import summarize_session
 from eda_platform.core.semantic import (
     JoinWhitelist,
     confirm_join,
@@ -20,6 +19,7 @@ from eda_platform.core.semantic import (
     record_join_usage,
     save_join_whitelist,
 )
+from eda_platform.core.session_metrics import summarize_session
 from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.question_exec import execute_question_candidate
 from eda_platform.schemas.artifacts import Artifact, ArtifactType

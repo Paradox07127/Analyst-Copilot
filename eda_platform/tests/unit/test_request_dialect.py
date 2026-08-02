@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from typing import Any, Protocol
 from urllib import error
 
 import pytest
@@ -51,7 +53,7 @@ UNSUPPORTED_TEMPERATURE = json.dumps(
 
 
 @pytest.fixture(autouse=True)
-def _clean_memo() -> None:
+def _clean_memo() -> Iterator[None]:
     forget_learned_repairs()
     yield
     forget_learned_repairs()
@@ -109,7 +111,13 @@ def _settings(**overrides: object) -> LLMSettings:
     return LLMSettings(**base)  # type: ignore[arg-type]
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, endpoint: _Endpoint) -> None:
+class _EndpointLike(Protocol):
+    bodies: list[dict]
+
+    def __call__(self, req: Any, timeout: float = 0) -> Any: ...
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, endpoint: _EndpointLike) -> None:
     monkeypatch.setattr("eda_platform.core.llm.request.urlopen", endpoint)
 
 

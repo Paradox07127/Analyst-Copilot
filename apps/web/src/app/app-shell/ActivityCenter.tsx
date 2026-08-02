@@ -492,6 +492,25 @@ function Launcher({
       }}
       className={`pointer-events-auto absolute flex h-12 w-12 cursor-grab items-center justify-center rounded-full border bg-bg shadow-overlay transition-[transform,box-shadow] duration-200 hover:scale-105 active:cursor-grabbing focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${phase ? phaseTone(phase) : "border-primary/40 text-primary"}`}
     >
+      {active && (
+        <svg
+          aria-hidden="true"
+          data-testid="activity-working-orbit"
+          viewBox="0 0 56 56"
+          className="pointer-events-none absolute -inset-1 size-14 animate-orbit"
+        >
+          <circle
+            cx="28"
+            cy="28"
+            r="25"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray="18 139"
+          />
+        </svg>
+      )}
       <svg
         aria-hidden="true"
         viewBox="0 0 48 48"

@@ -18,8 +18,8 @@ from eda_platform.application.services.approval_service import (
     ApprovalNotFoundError,
     ApprovalService,
 )
-from eda_platform.application.services.session_service import SessionNotFoundError
 from eda_platform.application.services.semantic_service import SemanticService
+from eda_platform.application.services.session_service import SessionNotFoundError
 from eda_platform.core.finding_freshness import assess_finding_freshness
 from eda_platform.core.ids import INTERNAL_SESSION_MARKER
 from eda_platform.core.semantic import VerifiedAnswer

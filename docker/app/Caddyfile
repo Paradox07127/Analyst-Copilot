@@ -1,6 +1,6 @@
 # Example front proxy (compose profile "caddy"): gzip, upload cap, SSE-safe.
 # For public deployment replace :8080 with your domain so Caddy provisions TLS,
-# and configure the app's EDA_DEPLOYMENT_MODE/ALLOWED_HOSTS/ALLOWED_ORIGINS.
+# and configure the app's deployment mode, hosts, origins, and remote auth token.
 :8080 {
 	encode gzip
 

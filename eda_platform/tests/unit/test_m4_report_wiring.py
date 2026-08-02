@@ -127,7 +127,9 @@ def _base_artifacts(tmp_path: Path) -> list[Artifact]:
     profile = profile_dataset(loaded, project_id="project_demo", session_id="run_demo")
     quality = scan_quality(profile, project_id="project_demo", session_id="run_demo")
     charts = create_chart_specs(loaded, profile, project_id="project_demo", session_id="run_demo")
-    tables = create_analysis_tables(loaded, profile, project_id="project_demo", session_id="run_demo")
+    tables = create_analysis_tables(
+        loaded, profile, project_id="project_demo", session_id="run_demo"
+    )
     return [profile, quality, *charts, *tables]
 
 
@@ -151,9 +153,7 @@ def _sql_result_artifact(east_revenue: float = 40.0) -> Artifact:
     )
 
 
-def _qexec_artifacts(
-    *, finding_value: float = 40.0, exploratory: bool = False
-) -> list[Artifact]:
+def _qexec_artifacts(*, finding_value: float = 40.0, exploratory: bool = False) -> list[Artifact]:
     succeeded = QuestionExecutionResult(
         question_id="q_revenue_by_region",
         question="Which region drives the most revenue across the sales file?",
@@ -343,11 +343,11 @@ def test_llm_focus_claims_are_dropped_with_trace(
                     'the sales file?" (outcome: answered)'
                 ),
                 evidence=[
-                        EvidenceRef(
-                            kind="artifact",
-                            artifact_id="qexec_q_revenue_by_region",
-                            locator="rows",
-                        )
+                    EvidenceRef(
+                        kind="artifact",
+                        artifact_id="qexec_q_revenue_by_region",
+                        locator="rows",
+                    )
                 ],
             ),
             ReportPlanClaim(
@@ -380,12 +380,8 @@ def test_llm_focus_claims_are_dropped_with_trace(
     assert len(focus.focus_items) == 2
     assert [claim.id for claim in analysis.claims].count("qfind_q_revenue_by_region_0") == 1
     # The drop is traced, not silent.
-    assert any(
-        event.dropped_focus_claim_count == 1 for event in result.validation_events
-    )
-    assert any(
-        "Selected Analysis Focus" in note for note in result.audit.semantic_notes
-    )
+    assert any(event.dropped_focus_claim_count == 1 for event in result.validation_events)
+    assert any("Selected Analysis Focus" in note for note in result.audit.semantic_notes)
     assert result.bundle.status is ReportStatus.VALIDATED
 
 
@@ -663,8 +659,7 @@ def test_business_findings_fallback_injects_when_llm_returns_no_business_claims(
         assert claim.evidence
         assert claim.id.startswith("qbiz_")
     assert any(
-        "Injected" in note and "Business Findings" in note
-        for note in result.audit.semantic_notes
+        "Injected" in note and "Business Findings" in note for note in result.audit.semantic_notes
     )
     assert result.bundle.status is ReportStatus.VALIDATED
 
@@ -723,9 +718,7 @@ def test_truncated_report_attempt_raises_budget_and_shortens_retry(
     assert result.bundle.status is ReportStatus.VALIDATED
     assert llm.max_tokens_seen == [6000, 9000]
     assert llm.payloads[0]["payload"] != llm.payloads[1]["payload"]
-    assert llm.payloads[1]["payload"]["max_claims"] < llm.payloads[0]["payload"][
-        "max_claims"
-    ]
+    assert llm.payloads[1]["payload"]["max_claims"] < llm.payloads[0]["payload"]["max_claims"]
     assert "shorter" in llm.payloads[1]["payload"]["instructions"].lower()
     assert "truncat" in result.llm_events[0].error_type.lower()
 

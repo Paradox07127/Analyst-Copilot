@@ -201,6 +201,59 @@ def test_worker_files_the_result_under_the_source_run_not_the_job_run(
     )
 
 
+def test_worker_result_supports_a_valid_project_id_with_spaces(tmp_path: Path) -> None:
+    project_id = "Brazilian E-Commerce"
+    session_id = "run_project_with_spaces"
+    store = ArtifactStore(tmp_path)
+    store.ensure_project(project_id, name=project_id)
+    store.start_session(project_id, session_id)
+    store.write_manifest(
+        SessionManifest(
+            session_id=session_id,
+            project_id=project_id,
+            input_hashes={"orders.csv": "hash"},
+            code_version="test",
+        )
+    )
+    started = DataOperationService(store, JobService(store, _RecordingBackend())).start(
+        session_id,
+        kind="dataset_distributions",
+        params={"dataset_id": "ds_orders"},
+        idempotency_key="spaces-result",
+    )
+    expected = ColumnDistributionsView(
+        dataset_id="ds_orders",
+        session_id=session_id,
+        row_count=10,
+        sampled=False,
+        sample_rows=10,
+        sample_cap=10_000,
+        bins=20,
+        top_k=8,
+    )
+    row = store.get_job(started.job.job_id)
+    assert row is not None
+
+    _write_data_operation_result(store, row, expected)
+    store.mark_job_status(started.job.job_id, "completed")
+
+    assert (
+        DataOperationService(store, JobService(store, _RecordingBackend())).result(
+            started.job.job_id,
+            expected_kind="dataset_distributions",
+            model=ColumnDistributionsView,
+        )
+        == expected
+    )
+    assert (
+        tmp_path
+        / "_job_results"
+        / project_id
+        / session_id
+        / f"{started.job.job_id}.json"
+    ).is_file()
+
+
 def test_cleaning_apply_passes_session_llm_settings_only_to_worker_env(
     tmp_path: Path,
 ) -> None:

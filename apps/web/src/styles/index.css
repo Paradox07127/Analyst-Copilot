@@ -122,6 +122,7 @@
    * @theme keyframes for animations it sees used, and `.skeleton` references
    * `sweep` from plain CSS where that detection does not reach. */
   --animate-breathe: breathe 2s var(--ease-out-quart) infinite;
+  --animate-orbit: orbit 1.4s linear infinite;
   --animate-enter: rise-in var(--transition-duration-slow) var(--ease-out-quart) both;
   /* One token, not `animate-enter animate-land`: both utilities set the
    * `animation` shorthand, so the second would silently replace the first. */
@@ -139,6 +140,12 @@
 @keyframes breathe {
   50% {
     opacity: 0.45;
+  }
+}
+
+@keyframes orbit {
+  to {
+    transform: rotate(360deg);
   }
 }
 

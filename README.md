@@ -162,8 +162,12 @@ available there; core EDA runs are unaffected.
 
 Public deployment is an explicit security mode; changing only the Caddy domain
 is not sufficient. Set `EDA_DEPLOYMENT_MODE=remote`, exact
-`EDA_ALLOWED_HOSTS` host names, and exact `EDA_ALLOWED_ORIGINS` browser origins.
-Remote unsafe requests require the same allowed origin plus the frontend's
+`EDA_ALLOWED_HOSTS` host names, exact HTTPS `EDA_ALLOWED_ORIGINS` browser origins,
+and a unique 32+ character `EDA_REMOTE_AUTH_TOKEN`. The browser prompts for HTTP
+Basic credentials; use `eda` as the username and the configured token as the
+password. Basic credentials are accepted only as a single-workspace deployment
+boundary and must be protected by TLS. Remote unsafe requests additionally
+require the same allowed origin plus the frontend's
 `X-EDA-CSRF` signal. Remote uploads are also rate-limited by the direct client
 address (or `X-Forwarded-For` only when the direct proxy IP is explicitly
 trusted). Persistent SQLite quotas cover each project's canonical file count,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from eda_platform.core.finding_freshness import assess_decision_report_freshness
 from eda_platform.core.ids import make_artifact_id
@@ -25,6 +25,7 @@ from eda_platform.schemas.resource_metrics import (
     EdaInputMetrics,
     EdaMemoryMetrics,
     EdaResourcePreflight,
+    PeakRssMethod,
 )
 from eda_platform.schemas.session_metrics import SessionMetrics, StepMetric
 
@@ -459,13 +460,14 @@ def _resource_usage(events: list[TraceEvent], artifacts: list[Artifact]) -> Auto
     )
     baseline = _optional_int(runtime_summary.get("baseline_peak_rss_bytes"))
     peak = _optional_int(runtime_summary.get("peak_rss_bytes"))
-    method = str(runtime_summary.get("peak_rss_method") or "unavailable")
-    if method not in {
+    raw_method = str(runtime_summary.get("peak_rss_method") or "unavailable")
+    if raw_method not in {
         "getrusage_ru_maxrss",
         "get_process_memory_info_peak_working_set",
         "unavailable",
     }:
-        method = "unavailable"
+        raw_method = "unavailable"
+    method = cast(PeakRssMethod, raw_method)
     estimated_working_set = preflight.estimated_working_set_bytes if preflight is not None else 0
     verified_working_set = preflight.verified_working_set_bytes if preflight is not None else None
     budget = preflight.policy.max_working_set_bytes if preflight is not None else 0

@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from eda_platform.schemas.artifacts import EvidenceRef
 
@@ -257,7 +257,8 @@ class ReportSection(BaseModel):
 
 class ReportBundle(BaseModel):
     project_id: str
-    session_id: str
+    # Accept pre-session-migration bundles while always serializing the new name.
+    session_id: str = Field(validation_alias=AliasChoices("session_id", "run_id"))
     status: ReportStatus = ReportStatus.DRAFT
     sections: list[ReportSection]
     audit: ReportAudit | None = None

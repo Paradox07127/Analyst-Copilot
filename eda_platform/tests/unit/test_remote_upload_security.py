@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 import shutil
@@ -27,6 +28,12 @@ from eda_platform.core.query import TrustedFileQueryEngine
 from eda_platform.core.store import ArtifactStore
 
 CSV = b"a,b\n1,2\n"
+REMOTE_TOKEN = "test-remote-token-that-is-at-least-32-characters"
+
+
+def _auth_header(token: str = REMOTE_TOKEN) -> str:
+    encoded = base64.b64encode(f"eda:{token}".encode()).decode("ascii")
+    return f"Basic {encoded}"
 
 
 def _service(store: ArtifactStore, **kwargs: int) -> UploadService:
@@ -240,6 +247,7 @@ def _remote_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EDA_DEPLOYMENT_MODE", "remote")
     monkeypatch.setenv("EDA_ALLOWED_HOSTS", "app.example,testserver")
     monkeypatch.setenv("EDA_ALLOWED_ORIGINS", "https://app.example")
+    monkeypatch.setenv("EDA_REMOTE_AUTH_TOKEN", REMOTE_TOKEN)
 
 
 def test_remote_mode_fails_closed_without_hosts_and_origins(monkeypatch) -> None:
@@ -253,12 +261,18 @@ def test_remote_mode_fails_closed_without_hosts_and_origins(monkeypatch) -> None
 def test_remote_mode_can_be_configured_from_repo_env_file(
     tmp_path: Path, monkeypatch
 ) -> None:
-    for name in ("EDA_DEPLOYMENT_MODE", "EDA_ALLOWED_HOSTS", "EDA_ALLOWED_ORIGINS"):
+    for name in (
+        "EDA_DEPLOYMENT_MODE",
+        "EDA_ALLOWED_HOSTS",
+        "EDA_ALLOWED_ORIGINS",
+        "EDA_REMOTE_AUTH_TOKEN",
+    ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env").write_text(
         "EDA_DEPLOYMENT_MODE=remote\n"
         "EDA_ALLOWED_HOSTS=app.example\n"
-        "EDA_ALLOWED_ORIGINS=https://app.example\n",
+        "EDA_ALLOWED_ORIGINS=https://app.example\n"
+        f"EDA_REMOTE_AUTH_TOKEN={REMOTE_TOKEN}\n",
         encoding="utf-8",
     )
     config = deployment_config(repo_root=tmp_path)
@@ -272,6 +286,7 @@ def test_remote_config_normalizes_origin_slash_and_rejects_ambiguous_authority(
     monkeypatch.setenv("EDA_DEPLOYMENT_MODE", "remote")
     monkeypatch.setenv("EDA_ALLOWED_HOSTS", "APP.EXAMPLE")
     monkeypatch.setenv("EDA_ALLOWED_ORIGINS", "HTTPS://APP.EXAMPLE/")
+    monkeypatch.setenv("EDA_REMOTE_AUTH_TOKEN", REMOTE_TOKEN)
     config = deployment_config()
     assert config.allowed_hosts == ("app.example",)
     assert config.allowed_origins == ("https://app.example",)
@@ -289,6 +304,7 @@ def test_remote_config_normalizes_origin_slash_and_rejects_ambiguous_authority(
 def test_remote_host_and_unsafe_origin_header_contract(tmp_path: Path, monkeypatch) -> None:
     _remote_env(monkeypatch)
     client = TestClient(create_app(tmp_path), base_url="https://app.example")
+    client.headers["Authorization"] = _auth_header()
 
     missing = client.post("/api/v1/projects", json={"project_id": "demo"})
     evil = client.post(
@@ -310,11 +326,47 @@ def test_remote_host_and_unsafe_origin_header_contract(tmp_path: Path, monkeypat
     assert client.get("/api/v1/projects", headers={"Host": "evil.example"}).status_code == 400
 
 
+def test_remote_mode_authenticates_every_request_before_csrf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _remote_env(monkeypatch)
+    client = TestClient(create_app(tmp_path), base_url="https://app.example")
+
+    missing = client.get("/api/v1/projects")
+    forged_csrf = client.post(
+        "/api/v1/projects",
+        json={"project_id": "blocked"},
+        headers={"Origin": "https://app.example", "X-EDA-CSRF": "1"},
+    )
+    wrong = client.get(
+        "/api/v1/projects", headers={"Authorization": _auth_header("x" * 32)}
+    )
+    allowed = client.get(
+        "/api/v1/projects", headers={"Authorization": _auth_header()}
+    )
+
+    assert missing.status_code == 401
+    assert missing.headers["WWW-Authenticate"].startswith("Basic ")
+    assert missing.headers["Cache-Control"] == "no-store"
+    assert forged_csrf.status_code == 401
+    assert wrong.status_code == 401
+    assert allowed.status_code == 200
+
+
+def test_remote_mode_fails_closed_without_a_strong_auth_token(monkeypatch) -> None:
+    _remote_env(monkeypatch)
+    for token in ("", "short", "x" * 31, "x" * 31 + "\n"):
+        monkeypatch.setenv("EDA_REMOTE_AUTH_TOKEN", token)
+        with pytest.raises(DeploymentConfigError, match="EDA_REMOTE_AUTH_TOKEN"):
+            deployment_config()
+
+
 def test_remote_cors_preflight_and_referer_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _remote_env(monkeypatch)
     client = TestClient(create_app(tmp_path), base_url="https://app.example")
+    client.headers["Authorization"] = _auth_header()
     preflight = client.options(
         "/api/v1/projects",
         headers={
@@ -358,6 +410,7 @@ def test_remote_upload_rate_limit_uses_trusted_client_and_expires(
     _remote_env(monkeypatch)
     monkeypatch.setenv("EDA_UPLOAD_RATE_LIMIT", "1")
     client = TestClient(create_app(tmp_path), base_url="https://app.example")
+    client.headers["Authorization"] = _auth_header()
     headers = {
         "Origin": "https://app.example",
         "X-EDA-CSRF": "1",
@@ -442,8 +495,9 @@ def test_remote_config_keeps_ipv6_origin_brackets(
     Rebuilding without them makes every IPv6 origin miss the allowlist."""
     monkeypatch.setenv("EDA_DEPLOYMENT_MODE", "remote")
     monkeypatch.setenv("EDA_ALLOWED_HOSTS", "app.example")
-    monkeypatch.setenv("EDA_ALLOWED_ORIGINS", "https://[::1]:8443,http://[fe80::1]")
+    monkeypatch.setenv("EDA_ALLOWED_ORIGINS", "https://[::1]:8443,https://[fe80::1]")
+    monkeypatch.setenv("EDA_REMOTE_AUTH_TOKEN", REMOTE_TOKEN)
 
     config = deployment_config()
 
-    assert config.allowed_origins == ("https://[::1]:8443", "http://[fe80::1]")
+    assert config.allowed_origins == ("https://[::1]:8443", "https://[fe80::1]")

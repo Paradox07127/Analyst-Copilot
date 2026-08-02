@@ -20,6 +20,30 @@ CapabilityStatus = Literal[
     "available", "deferred", "not_run", "not_applicable", "failed"
 ]
 PiiLabel = Literal["email", "phone", "name", "id", "unknown"]
+CatalogStage = Literal[
+    "ingest",
+    "profile",
+    "quality",
+    "exploration",
+    "statistics",
+    "semantic",
+    "question_planning",
+    "question_execution",
+    "reporting",
+    "observability",
+]
+CatalogRole = Literal[
+    "gate",
+    "summary",
+    "evidence",
+    "visual",
+    "plan",
+    "result",
+    "presentation",
+    "metric",
+]
+CatalogPriority = Literal["critical", "high", "normal", "on_demand"]
+CatalogSensitivity = Literal["public", "internal", "sensitive", "pii_restricted"]
 
 
 class HandoffCapabilities(_StrictModel):
@@ -130,31 +154,11 @@ class ArtifactCatalogEntry(_StrictModel):
     artifact_id: str
     type: ArtifactType
     origin_session_id: str
-    stage: Literal[
-        "ingest",
-        "profile",
-        "quality",
-        "exploration",
-        "statistics",
-        "semantic",
-        "question_planning",
-        "question_execution",
-        "reporting",
-        "observability",
-    ]
-    role: Literal[
-        "gate",
-        "summary",
-        "evidence",
-        "visual",
-        "plan",
-        "result",
-        "presentation",
-        "metric",
-    ]
+    stage: CatalogStage
+    role: CatalogRole
     dataset_id: str | None = None
     title: str | None = None
-    priority: Literal["critical", "high", "normal", "on_demand"]
+    priority: CatalogPriority
     required: bool
     fetch: str
     content_sha256: str
@@ -164,7 +168,7 @@ class ArtifactCatalogEntry(_StrictModel):
     parents: list[str] = Field(default_factory=list)
     evidence_count: int = Field(ge=0)
     warning_count: int = Field(ge=0)
-    sensitivity: Literal["public", "internal", "sensitive", "pii_restricted"]
+    sensitivity: CatalogSensitivity
 
 
 class HandoffQuestionResult(_StrictModel):

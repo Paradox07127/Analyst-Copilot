@@ -18,7 +18,7 @@ PROJECT = "demo"
 RUN = "run_1"
 BARE_RUN = "run_2"
 
-HTML_BODY = "<!doctype html>\n<html lang=\"en\"><body><h1>EDA Agent Report</h1></body></html>\n"
+HTML_BODY = '<!doctype html>\n<html lang="en"><body><h1>EDA Agent Report</h1></body></html>\n'
 
 DECISION_PAYLOAD = {
     "report_id": "dreport_1",
@@ -109,9 +109,7 @@ def test_download_pdf_without_weasyprint_is_503_not_500(
     assert "uv sync --extra pdf" in body["message"]
 
 
-def test_download_markdown_renders_the_decision_report(
-    workspace: Path, client: TestClient
-) -> None:
+def test_download_markdown_renders_the_decision_report(workspace: Path, client: TestClient) -> None:
     store = ArtifactStore(workspace)
     store.save_artifact(
         Artifact(
@@ -161,7 +159,9 @@ def test_download_refuses_traversal_session_ids(client: TestClient, session_id: 
     rest reach the handler and miss the runs index (404 run_not_found). Either
     way nothing off the workspace is read.
     """
-    response = client.get(f"/api/v1/sessions/{session_id}/report/download", params={"format": "html"})
+    response = client.get(
+        f"/api/v1/sessions/{session_id}/report/download", params={"format": "html"}
+    )
     assert response.status_code == 404
     assert response.json()["error"]["code"] in {"session_not_found", "http_error"}
     assert b"root:" not in response.content
@@ -176,9 +176,7 @@ def test_download_internal_run_marker_is_run_not_found(client: TestClient) -> No
 
 @pytest.mark.parametrize("bad_format", ["../../etc/passwd", "docx", "", "HTML"])
 def test_download_rejects_unknown_formats(client: TestClient, bad_format: str) -> None:
-    response = client.get(
-        f"/api/v1/sessions/{RUN}/report/download", params={"format": bad_format}
-    )
+    response = client.get(f"/api/v1/sessions/{RUN}/report/download", params={"format": bad_format})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
 

@@ -41,7 +41,10 @@ from eda_platform.application.dto import (
     UsageRecentSession,
     WorkspaceUsageView,
 )
-from eda_platform.application.services.session_service import InvalidCursorError, SessionNotFoundError
+from eda_platform.application.services.session_service import (
+    InvalidCursorError,
+    SessionNotFoundError,
+)
 from eda_platform.application.workspace_paths import relativize_workspace_paths
 from eda_platform.core.bounded_pagination import (
     JsonlPageIndex,
@@ -161,8 +164,7 @@ class TraceService:
         """
         now = datetime.now(UTC)
         window = [
-            (now - timedelta(days=offset)).date().isoformat()
-            for offset in range(days - 1, -1, -1)
+            (now - timedelta(days=offset)).date().isoformat() for offset in range(days - 1, -1, -1)
         ]
         per_day = dict.fromkeys(window, 0)
         status_counts: dict[str, int] = {}
@@ -301,7 +303,9 @@ class TraceService:
                 if metrics is not persisted[0]:
                     source = "artifact+incremental"
         event_count = sum(
-            self._store.trace_event_type_counts(project_id=project_id, session_id=session_id).values()
+            self._store.trace_event_type_counts(
+                project_id=project_id, session_id=session_id
+            ).values()
         )
         return SessionMetricsView.model_validate(
             {
@@ -328,9 +332,7 @@ class TraceService:
         # durable dedupe does not turn the raw client identifier into telemetry.
         dedupe_digest = hashlib.sha256(failure.dedupe_key.encode()).hexdigest()
         event_key = f"client-failure:{session_id}:{dedupe_digest}"
-        since = datetime.now(UTC) - timedelta(
-            seconds=CLIENT_FAILURE_RATE_WINDOW_SECONDS
-        )
+        since = datetime.now(UTC) - timedelta(seconds=CLIENT_FAILURE_RATE_WINDOW_SECONDS)
         now = datetime.now(UTC)
         outcome = self._store.append_trace_bounded(
             project_id,
@@ -371,39 +373,19 @@ class TraceService:
             project_id=project_id, session_id=session_id, event_types=BUDGET_EVENT_TYPES
         )
         incremental = [
-            event
-            for event in events
-            if (event.finished_at or event.started_at) > generated_at
+            event for event in events if (event.finished_at or event.started_at) > generated_at
         ]
         billed = spend_events(
             [event for event in incremental if event.event_type == LLM_USAGE_EVENT]
         )
-        reserved = [
-            event
-            for event in incremental
-            if event.event_type == BUDGET_RESERVED_EVENT
-        ]
-        settled = [
-            event
-            for event in incremental
-            if event.event_type == BUDGET_SETTLED_EVENT
-        ]
-        rejected = [
-            event
-            for event in incremental
-            if event.event_type == BUDGET_REJECTED_EVENT
-        ]
+        reserved = [event for event in incremental if event.event_type == BUDGET_RESERVED_EVENT]
+        settled = [event for event in incremental if event.event_type == BUDGET_SETTLED_EVENT]
+        rejected = [event for event in incremental if event.event_type == BUDGET_REJECTED_EVENT]
         if not (billed or reserved or settled or rejected):
             return persisted
-        prompt_tokens = sum(
-            _metric_int(event.summary.get("prompt_tokens")) for event in billed
-        )
-        cached_tokens = sum(
-            _metric_int(event.summary.get("cached_tokens")) for event in billed
-        )
-        total_tokens = sum(
-            _metric_int(event.summary.get("total_tokens")) for event in billed
-        )
+        prompt_tokens = sum(_metric_int(event.summary.get("prompt_tokens")) for event in billed)
+        cached_tokens = sum(_metric_int(event.summary.get("cached_tokens")) for event in billed)
+        total_tokens = sum(_metric_int(event.summary.get("total_tokens")) for event in billed)
         costs = [
             float(event.summary["estimated_cost_usd"])
             for event in billed
@@ -429,32 +411,19 @@ class TraceService:
                     else round(min(merged_cached, merged_prompt) / merged_prompt, 6)
                 ),
                 "est_cost_usd": _merge_cost(persisted.est_cost_usd, costs),
-                "budget_reserved_calls": persisted.budget_reserved_calls
-                + len(reserved),
-                "budget_settled_calls": persisted.budget_settled_calls
-                + len(settled),
-                "budget_rejected_calls": persisted.budget_rejected_calls
-                + len(rejected),
+                "budget_reserved_calls": persisted.budget_reserved_calls + len(reserved),
+                "budget_settled_calls": persisted.budget_settled_calls + len(settled),
+                "budget_rejected_calls": persisted.budget_rejected_calls + len(rejected),
                 "budget_uncertain_calls": persisted.budget_uncertain_calls
-                + sum(
-                    event.summary.get("status") == "uncertain"
-                    for event in settled
-                ),
+                + sum(event.summary.get("status") == "uncertain" for event in settled),
                 "budget_total_tokens": persisted.budget_total_tokens
-                + sum(
-                    _metric_int(event.summary.get("total_tokens"))
-                    for event in settled
-                ),
-                "budget_est_cost_usd": _merge_cost(
-                    persisted.budget_est_cost_usd, budget_costs
-                ),
+                + sum(_metric_int(event.summary.get("total_tokens")) for event in settled),
+                "budget_est_cost_usd": _merge_cost(persisted.budget_est_cost_usd, budget_costs),
                 "budget_reconciliation": _merge_reconciliation(
                     persisted.budget_reconciliation,
                     current.budget_reconciliation,
                 ),
-                "duration_seconds": max(
-                    persisted.duration_seconds, current.duration_seconds
-                ),
+                "duration_seconds": max(persisted.duration_seconds, current.duration_seconds),
                 "artifact_counts": current.artifact_counts,
             }
         )
@@ -469,7 +438,9 @@ class TraceService:
     ) -> TraceEventPage:
         limit = max(1, min(limit, MAX_TRACE_LIMIT))
         project_id = self._project_for_run(session_id)
-        event_types = self._store.trace_event_type_counts(project_id=project_id, session_id=session_id)
+        event_types = self._store.trace_event_type_counts(
+            project_id=project_id, session_id=session_id
+        )
         after_id = _decode_cursor(cursor, event_type, session_id) if cursor else None
         rows = self._store.query_trace_rows(
             project_id=project_id,
@@ -486,9 +457,7 @@ class TraceService:
         next_cursor = (
             _encode_cursor(rows[-1][0], event_type, session_id) if has_more and rows else None
         )
-        total = (
-            sum(event_types.values()) if event_type is None else event_types.get(event_type, 0)
-        )
+        total = sum(event_types.values()) if event_type is None else event_types.get(event_type, 0)
         return TraceEventPage(
             session_id=session_id,
             items=items,
@@ -678,9 +647,9 @@ class TraceService:
                     summary["total_tokens"] = int(summary["total_tokens"]) + _int(
                         event.summary.get("total_tokens")
                     )
-                    summary["estimated_cost_usd"] = float(
-                        summary["estimated_cost_usd"]
-                    ) + _float(event.summary.get("estimated_cost_usd"))
+                    summary["estimated_cost_usd"] = float(summary["estimated_cost_usd"]) + _float(
+                        event.summary.get("estimated_cost_usd")
+                    )
                 if error_rows([event]):
                     summary["errors"] = int(summary["errors"]) + 1
                 if event.event_type == "report_validation":
@@ -695,19 +664,13 @@ class TraceService:
                     )
             if len(rows) < 500:
                 break
-        summary["estimated_cost_usd"] = round(
-            float(summary["estimated_cost_usd"]), 6
-        )
+        summary["estimated_cost_usd"] = round(float(summary["estimated_cost_usd"]), 6)
         validation = latest_validation.summary if latest_validation else {}
         quality: dict[str, int | float | str] = {
             "section_coverage": _float(validation.get("section_coverage")),
-            "claim_section_coverage": _float(
-                validation.get("claim_section_coverage")
-            ),
+            "claim_section_coverage": _float(validation.get("claim_section_coverage")),
             "claim_survival_rate": _float(validation.get("claim_survival_rate")),
-            "deterministic_repair_count": _int(
-                validation.get("deterministic_repair_count")
-            ),
+            "deterministic_repair_count": _int(validation.get("deterministic_repair_count")),
             "prompt_tokens_by_attempt": ", ".join(prompt_attempts),
         }
         return summary, quality
@@ -894,7 +857,9 @@ class TraceService:
     def _read_contained(
         self, artifact_id: str, *, project_id: str, session_id: str
     ) -> Artifact | None:
-        row = self._store.artifact_index_row(artifact_id, project_id=project_id, session_id=session_id)
+        row = self._store.artifact_index_row(
+            artifact_id, project_id=project_id, session_id=session_id
+        )
         if row is None:
             return None
         path = row["path"]
@@ -1050,9 +1015,7 @@ def _strip_workspace(text: str, root: Path) -> str:
     return text
 
 
-def _debug_log_replacements(
-    root: Path, api_keys: Sequence[str]
-) -> tuple[tuple[bytes, bytes], ...]:
+def _debug_log_replacements(root: Path, api_keys: Sequence[str]) -> tuple[tuple[bytes, bytes], ...]:
     replacements: set[tuple[bytes, bytes]] = set()
     for prefix in {str(root.resolve()), str(root)}:
         if prefix and prefix != os.sep:

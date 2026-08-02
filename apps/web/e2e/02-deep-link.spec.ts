@@ -28,7 +28,7 @@ const RUN_ROUTES = [
 
 /* The header is row 0; virtualiser spacers are aria-hidden and not rows. */
 function firstDataCell(page: Page) {
-  return page.getByRole("row").nth(1).getByRole("cell").first();
+  return page.getByRole("row").nth(1).getByRole("cell").nth(1);
 }
 
 test("deep link to a table page with an offset survives a refresh", async ({

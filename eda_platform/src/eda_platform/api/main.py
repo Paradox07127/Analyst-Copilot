@@ -90,6 +90,7 @@ from eda_platform.core.config import (
     deployment_config,
     resolve_workspace_path,
 )
+from eda_platform.core.ids import UNFILED_PROJECT_ID
 from eda_platform.core.query import TrustedFileQueryEngine
 from eda_platform.core.sandbox_broker import SandboxBroker, sandbox_required_at_startup
 from eda_platform.core.session_deletion import (
@@ -116,6 +117,10 @@ def create_app(
     app.state.workspace = root
     app.state.deployment = deployment
     store = ArtifactStore(root)
+    # The global "New session" flow is backed by a hidden project bucket. It
+    # must exist before the rail asks for its sessions, including on a fresh
+    # workspace that deep-links straight into a normal project.
+    store.ensure_project(UNFILED_PROJECT_ID, name="Unfiled sessions")
     sweep_staging(root)
     store.reconcile_upload_quota()
     # Trusted engine allow-list: projects/* covers per-project uploads (and any
@@ -241,8 +246,10 @@ def _configure_middleware(
         max_bytes=MAX_UPLOAD_BYTES + _BODY_LIMIT_SLACK,
     )
     if deployment.remote:
+        assert deployment.remote_auth_token is not None
         app.add_middleware(
             DeploymentSecurityMiddleware,
+            auth_token=deployment.remote_auth_token,
             allowed_origins=deployment.allowed_origins,
             trusted_proxy_ips=deployment.trusted_proxy_ips,
             rate_limit=deployment.upload_rate_limit,

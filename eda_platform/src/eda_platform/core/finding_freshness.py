@@ -88,7 +88,11 @@ def _assess_finding_freshness(
         )
 
     source_artifacts = next(
-        (artifacts for session_id, artifacts in project_runs if session_id == plan.source_session_id),
+        (
+            artifacts
+            for session_id, artifacts in project_runs
+            if session_id == plan.source_session_id
+        ),
         [],
     )
     recorded_profiles = _profiles_by_name(source_artifacts)
