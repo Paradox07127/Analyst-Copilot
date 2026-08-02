@@ -1,21 +1,15 @@
-import { useState, type FormEvent } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import {
-  api,
-  ApiError,
   type ProjectSummary,
   type UsageRecentSession,
   type WorkspaceUsageView,
 } from "../../api/client";
 import {
-  queryKeys,
   useProjects,
-  useSessions,
   useWorkspaceUsage,
 } from "../../api/hooks";
 import {
-  EmptyState,
   ErrorState,
   LoadingSkeleton,
 } from "../../components/async-states";
@@ -30,197 +24,36 @@ import {
   type Tone,
 } from "../../components/ui";
 import { ActivityGrid } from "./ActivityGrid";
-import { NewSessionPanel } from "../launchpad/LaunchpadPage";
 import { projectLabel } from "../../app/unfiled";
 import { newProjectSessionPath, newSessionPath, sessionBasePath } from "../../app/paths";
 import { DeleteProjectDialog } from "./DeleteProjectDialog";
 
-const MAX_PROJECT_ID_LENGTH = 64;
-const MAX_PROJECT_NAME_LENGTH = 200;
 const DEFAULT_USAGE_WINDOW_DAYS = 180;
 const MONTH_USAGE_WINDOW_DAYS = 30;
 const WEEK_USAGE_WINDOW_DAYS = 7;
+const RECENT_SESSION_LIMIT = 6;
+const PROJECT_LIMIT = 2;
 type UsagePeriod = "week" | "month" | "half-year";
-
-/* Mirrors the server's project_id rules (run_service._validated_project_id):
- * single path segment, starts alphanumeric, spaces allowed. */
-function deriveProjectId(name: string): string {
-  return name
-    .replace(/[^A-Za-z0-9 _.-]/g, "")
-    .replace(/\s+/g, " ")
-    .replace(/^[^A-Za-z0-9]+/, "")
-    .trim()
-    .slice(0, MAX_PROJECT_ID_LENGTH);
-}
-
-function NewProjectForm({ onCancel }: { onCancel: () => void }) {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const [name, setName] = useState("");
-  const [editedId, setEditedId] = useState<string | null>(null);
-  const projectId = (editedId ?? deriveProjectId(name)).trim();
-
-  const create = useMutation({
-    mutationFn: (idempotencyKey: string) =>
-      api.createProject(
-        { project_id: projectId, name: name.trim() || projectId },
-        idempotencyKey,
-      ),
-    onSuccess: (project: ProjectSummary) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.projects });
-      navigate(newProjectSessionPath(project.project_id));
-    },
-  });
-
-  const onSubmit = (event: FormEvent) => {
-    event.preventDefault();
-    /* Minted per submit, not per call: a retry of this same submit must reuse
-     * the key so the server replays instead of creating twice. */
-    if (projectId) create.mutate(crypto.randomUUID());
-  };
-
-  const error = create.error instanceof ApiError ? create.error : null;
-  const conflict = error?.code === "project_conflict";
-
-  return (
-    <form
-      onSubmit={onSubmit}
-      className="flex max-w-content flex-col gap-4 rounded-xl border border-border bg-bg p-5"
-    >
-      <SectionHeader
-        title="New project"
-        description="A project is a folder of sessions that share uploads and settings. Creating one opens its Launchpad, where you add data."
-      />
-
-      {/* Name leads; the id is derived and only edited when the derived one is
-       * wrong, so it sits at caption weight below rather than as an equal. */}
-      <div className="flex flex-col gap-1">
-        <label className="text-sm font-medium" htmlFor="new-project-name">
-          Name
-        </label>
-        <input
-          id="new-project-name"
-          autoFocus
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          maxLength={MAX_PROJECT_NAME_LENGTH}
-          placeholder="Brazilian E-Commerce"
-          className="rounded-base border border-border bg-bg px-2.5 py-1.5 text-sm"
-        />
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <label className="text-xs text-status-neutral" htmlFor="new-project-id">
-          Project id
-        </label>
-        <input
-          id="new-project-id"
-          value={projectId}
-          onChange={(event) => setEditedId(event.target.value)}
-          maxLength={MAX_PROJECT_ID_LENGTH}
-          aria-describedby="new-project-id-hint"
-          className="rounded-base border border-border bg-bg px-2.5 py-1.5 font-mono text-sm"
-        />
-        <p id="new-project-id-hint" className="text-xs text-status-neutral">
-          The workspace folder name, derived from the name above. Letters,
-          digits, spaces, “_”, “.” and “-”; must start with a letter or digit.
-        </p>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <Button
-          type="submit"
-          variant="primary"
-          disabled={!projectId || create.isPending}
-        >
-          {create.isPending ? "Creating…" : "Create project"}
-        </Button>
-        <Button onClick={onCancel}>Cancel</Button>
-      </div>
-
-      {error && (
-        <div
-          role="alert"
-          className={`flex flex-col gap-1 rounded-base border p-3 text-sm ${
-            conflict ? "border-status-warn/50" : "border-status-critical/40"
-          }`}
-        >
-          <p
-            className={`font-medium ${
-              conflict ? "text-status-warn" : "text-status-critical"
-            }`}
-          >
-            {conflict
-              ? "That id clashes with an existing project."
-              : "Could not create the project."}
-          </p>
-          <p className="text-status-neutral">{error.message}</p>
-        </div>
-      )}
-      {create.isError && !error && (
-        <div
-          role="alert"
-          className="rounded-base border border-status-critical/40 p-3 text-sm text-status-critical"
-        >
-          {create.error instanceof Error
-            ? create.error.message
-            : "Could not create the project."}
-        </div>
-      )}
-    </form>
-  );
-}
 
 function statusTone(status: string): Tone {
   const s = status.toLowerCase();
   if (["complete", "completed", "succeeded", "success", "ready"].includes(s))
     return "ok";
-  if (["running", "in_progress", "active", "pending"].includes(s)) return "warn";
+  if (["running", "in_progress", "active", "pending", "queued", "connecting"].includes(s)) return "warn";
   if (["failed", "error", "cancelled"].includes(s)) return "critical";
   return "neutral";
 }
 
-function LatestSessionLink({ project }: { project: ProjectSummary }) {
-  const sessions = useSessions(project.project_id);
-  const latest = sessions.data?.pages[0]?.items[0];
-
-  if (sessions.isPending) {
-    return <span className="text-xs text-status-neutral">Loading sessions…</span>;
+function statusLabel(status: string): string {
+  const normalized = status.toLowerCase();
+  if (["complete", "completed", "succeeded", "success", "ready"].includes(normalized)) {
+    return "Completed";
   }
-  if (!latest) {
-    return (
-      <span className="text-xs text-status-neutral">
-        No sessions yet — start the first one below.
-      </span>
-    );
-  }
-  const when = latest.updated_at ?? latest.created_at;
-  const whenLabel = when
-    ? new Date(when).toLocaleDateString(undefined, {
-        month: "short",
-        day: "numeric",
-      })
-    : null;
-
-  /* The card answered "which project" but not "is anything happening in it",
-   * which is the question you open this page with. */
-  return (
-    <div className="flex min-w-0 flex-col gap-1">
-      <Link
-        to={sessionBasePath(latest.project_id, latest.session_id)}
-        className="min-w-0 text-sm text-link hover:underline"
-      >
-        <Marquee>Latest: {latest.title ?? latest.session_id}</Marquee>
-      </Link>
-      <span className="flex items-center gap-1.5 text-xs text-status-neutral">
-        <Dot
-          tone={statusTone(latest.status)}
-          motion={statusTone(latest.status) === "warn" ? "working" : undefined}
-        />
-        {[latest.status, whenLabel].filter(Boolean).join(" · ")}
-      </span>
-    </div>
-  );
+  if (["running", "in_progress", "active"].includes(normalized)) return "Running";
+  if (["pending", "queued", "connecting"].includes(normalized)) return "Queued";
+  if (["failed", "error"].includes(normalized)) return "Failed";
+  if (normalized === "cancelled") return "Cancelled";
+  return status || "Unknown";
 }
 
 /* An empty project needs one line, not a card: eight of them saying "No
@@ -256,46 +89,41 @@ function EmptyProjectRow({ project }: { project: ProjectSummary }) {
   );
 }
 
-/* Project management lives here, not only behind the rail's hover-revealed "…".
- * A destructive action that is only reachable by hovering the right row of a
- * sidebar is not reachable. */
-function ProjectCard({ project }: { project: ProjectSummary }) {
+/* Recent work already answers "what changed last". Projects are therefore a
+ * compact destination list instead of a second set of session cards. */
+function ProjectRow({ project }: { project: ProjectSummary }) {
   const [deleting, setDeleting] = useState(false);
 
   return (
-    <article className="group/card flex flex-col gap-3 rounded-xl border border-border bg-bg p-4 transition-colors duration-150 ease-out-quart hover:border-primary/35">
-      <div className="flex items-baseline justify-between gap-2">
-        <h2 className="min-w-0 text-base font-semibold"><Marquee>{project.name}</Marquee></h2>
-        <span className="tabular shrink-0 text-xs text-status-neutral">
-          {project.session_count} session{project.session_count === 1 ? "" : "s"}
-        </span>
-      </div>
-      <LatestSessionLink project={project} />
-      <div className="mt-auto flex items-center gap-2 border-t border-border pt-3">
-        <Link
-          to={newProjectSessionPath(project.project_id)}
-          aria-label={`New session in ${project.name}`}
-          className={buttonClass({ size: "sm" })}
-        >
-          New session
-        </Link>
-        <Button
-          variant="danger"
-          size="sm"
-          onClick={() => setDeleting(true)}
-          aria-label={`Delete project ${project.name}`}
-          className="ml-auto sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover/card:opacity-100"
-        >
-          Delete
-        </Button>
-      </div>
+    <li className="group/project flex min-w-0 items-center gap-2 rounded-base px-2 py-1.5 hover:bg-surface">
+      <span aria-hidden className="text-status-neutral">▱</span>
+      <Marquee className="min-w-0 flex-1 text-sm font-medium">{project.name}</Marquee>
+      <span className="tabular shrink-0 text-xs text-status-neutral">
+        {project.session_count} session{project.session_count === 1 ? "" : "s"}
+      </span>
+      <Link
+        to={newProjectSessionPath(project.project_id)}
+        aria-label={`New session in ${project.name}`}
+        className={buttonClass({ size: "sm", variant: "ghost" })}
+      >
+        New session
+      </Link>
+      <Button
+        variant="danger"
+        size="sm"
+        onClick={() => setDeleting(true)}
+        aria-label={`Delete project ${project.name}`}
+        className="sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover/project:opacity-100"
+      >
+        Delete
+      </Button>
       {deleting && (
         <DeleteProjectDialog
           project={project}
           onClose={() => setDeleting(false)}
         />
       )}
-    </article>
+    </li>
   );
 }
 
@@ -319,14 +147,14 @@ function DashboardMetric({
   value: string | number;
 }) {
   return (
-    <div className="flex min-w-0 flex-col rounded-md bg-surface px-1.5 py-1 xl:px-1 xl:py-0.5">
-      <Marquee className="text-[11px] leading-tight text-status-neutral xl:hidden 2xl:block">
+    <div className="flex min-w-0 flex-col rounded-md bg-surface px-1.5 py-1.5 xl:px-2 xl:py-1">
+      <Marquee
+        title={compactLabel ?? label}
+        className="text-xs leading-tight text-status-neutral"
+      >
         {label}
       </Marquee>
-      <span className="hidden truncate text-[10px] leading-tight text-status-neutral xl:block 2xl:hidden">
-        {compactLabel ?? label}
-      </span>
-      <span className="tabular whitespace-nowrap text-base leading-tight font-semibold xl:text-sm 2xl:text-base">
+      <span className="tabular whitespace-nowrap text-lg leading-tight font-semibold">
         {value}
       </span>
     </div>
@@ -336,11 +164,13 @@ function DashboardMetric({
 function UsageDashboard({
   usage,
   activityDays,
+  windowDays,
   period,
   onPeriodChange,
 }: {
   usage: WorkspaceUsageView;
   activityDays: NonNullable<WorkspaceUsageView["daily"]>;
+  windowDays: number;
   period: UsagePeriod;
   onPeriodChange: (period: UsagePeriod) => void;
 }) {
@@ -350,10 +180,10 @@ function UsageDashboard({
   return (
     <Card
       tone="quiet"
-      className="flex min-w-0 flex-col gap-2.5 p-3 sm:p-4 xl:p-3 2xl:p-4"
+      className="flex h-full min-w-0 flex-col gap-3 p-4 sm:p-5 xl:p-4 2xl:p-5"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold" id="workspace-overview">
+        <h1 className="text-xl font-semibold" id="workspace-overview">
           Overview
         </h1>
         <UsagePeriodToggle period={period} onChange={onPeriodChange} />
@@ -361,7 +191,7 @@ function UsageDashboard({
 
       <div
         data-dashboard-metrics
-        className="grid grid-cols-2 gap-x-1 gap-y-0.5 md:grid-cols-4"
+        className="grid grid-cols-2 gap-x-3 gap-y-2 md:grid-cols-4"
       >
         <DashboardMetric
           label="Active days"
@@ -405,9 +235,9 @@ function UsageDashboard({
         />
       </div>
 
-      <section className="flex min-w-0 flex-col gap-1.5 border-t border-border pt-2">
-        <h2 className="text-xs font-medium">
-          Activity · {DEFAULT_USAGE_WINDOW_DAYS} days
+      <section className="flex min-w-0 flex-col gap-2 border-t border-border pt-3">
+        <h2 className="text-sm font-semibold">
+          Activity · {windowDays} days
         </h2>
         <ActivityGrid days={activityDays} />
       </section>
@@ -446,7 +276,7 @@ function RecentSessions({ sessions }: { sessions: UsageRecentSession[] }) {
         description="Continue from the sessions you touched most recently."
       />
       <ul className="flex flex-col">
-        {sessions.map((session) => (
+        {sessions.slice(0, RECENT_SESSION_LIMIT).map((session) => (
           <li key={`${session.project_id}-${session.session_id}`}>
             <Link
               to={sessionBasePath(session.project_id, session.session_id)}
@@ -461,8 +291,11 @@ function RecentSessions({ sessions }: { sessions: UsageRecentSession[] }) {
               <Marquee className="min-w-0 flex-1 text-sm">
                 {session.title ?? session.session_id}
               </Marquee>
-              <Marquee className="max-w-[42%] shrink-0 text-xs text-status-neutral">
-                {projectLabel(session.project_id)}
+              <Marquee
+                className="max-w-[52%] shrink-0 text-xs text-status-neutral"
+                title={`${statusLabel(session.status)} · ${projectLabel(session.project_id)}`}
+              >
+                {statusLabel(session.status)} · {projectLabel(session.project_id)}
                 {formatRecentDate(session) ? ` · ${formatRecentDate(session)}` : ""}
               </Marquee>
             </Link>
@@ -505,27 +338,23 @@ function UsagePeriodToggle({
   );
 }
 
-/* The launch surface itself, not a link to it: dropping a CSV is the first thing
- * a returning user does here, and it used to cost a navigation to reach a page
- * that then asked for the same project this one already lists. */
-function QuickStart({ onNewProject }: { onNewProject: () => void }) {
+/* A compact final action keeps Home scan-friendly and sends every launch
+ * through the one authoritative composer on New session. */
+function QuickStart() {
   return (
-    <Card tone="quiet" className="flex flex-col gap-3 px-4 py-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+    <Card tone="quiet" className="flex flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3.5 shadow-overlay sm:px-5">
+      <div className="min-w-0 flex-1">
         <h2 className="text-base font-semibold">Start an analysis</h2>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <Link
-            to={newSessionPath()}
-            className={buttonClass({ variant: "ghost", size: "sm" })}
-          >
-            Open full page
-          </Link>
-          <Button size="sm" onClick={onNewProject}>
-            New project
-          </Button>
-        </div>
+        <p className="text-sm text-status-neutral">
+          Choose a project, select existing data or upload CSV files, then review the run before it starts.
+        </p>
       </div>
-      <NewSessionPanel />
+      <Link
+        to={newSessionPath()}
+        className={buttonClass({ variant: "primary" })}
+      >
+        New session
+      </Link>
     </Card>
   );
 }
@@ -549,9 +378,11 @@ export function Component() {
   const usage = useWorkspaceUsage(usageWindowDays);
   const historyUsage = useWorkspaceUsage(DEFAULT_USAGE_WINDOW_DAYS);
   const empty = projects.data?.length === 0;
-  const [creating, setCreating] = useState(() => searchParams.get("new") === "1");
   const active = (projects.data ?? []).filter((p) => p.session_count > 0);
   const idle = (projects.data ?? []).filter((p) => p.session_count === 0);
+  const visibleActive = active.slice(0, PROJECT_LIMIT);
+  const visibleIdle = idle.slice(0, Math.max(0, PROJECT_LIMIT - visibleActive.length));
+  const hiddenProjectCount = active.length + idle.length - visibleActive.length - visibleIdle.length;
 
   const changePeriod = (nextPeriod: UsagePeriod) => {
     const next = new URLSearchParams(searchParams);
@@ -561,14 +392,14 @@ export function Component() {
   };
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data flex-col gap-4 py-4 sm:py-5 lg:py-6">
+    <div className="mx-auto flex min-h-full w-[95%] max-w-data flex-col gap-4 py-4 sm:py-5 lg:py-6">
       <div
         data-home-layout="workspace"
-        className="grid min-w-0 gap-4 xl:grid-cols-5 xl:items-start"
+        className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-stretch"
       >
         <div
           data-home-column="overview"
-          className="flex min-w-0 flex-col gap-4 xl:col-span-2"
+          className="flex min-w-0 flex-col"
         >
           {(usage.isPending || historyUsage.isPending) && (
             <LoadingSkeleton lines={6} label="Loading workspace overview" />
@@ -585,89 +416,77 @@ export function Component() {
           {usage.data && historyUsage.data && (
             <UsageDashboard
               usage={usage.data}
-              activityDays={historyUsage.data.daily ?? []}
+              activityDays={usage.data.daily ?? []}
+              windowDays={usageWindowDays}
               period={period}
               onPeriodChange={changePeriod}
             />
           )}
         </div>
 
-        <div
-          data-home-column="actions"
-          className="flex min-w-0 flex-col gap-4 xl:col-span-3"
+        <aside
+          aria-label="Recent projects and sessions"
+          data-home-column="recent"
+          className="min-w-0"
         >
-          <QuickStart onNewProject={() => setCreating(true)} />
+          <Card tone="quiet" className="flex h-full min-w-0 flex-col divide-y divide-hairline p-0">
+            <section className="min-h-0 flex-1 p-3.5 sm:p-4">
+              {historyUsage.isPending && (
+                <LoadingSkeleton lines={3} label="Loading recent work" />
+              )}
+              {historyUsage.data && (
+                <RecentSessions sessions={historyUsage.data.recent ?? []} />
+              )}
+              {historyUsage.data && (historyUsage.data.recent ?? []).length === 0 && (
+                <div className="flex flex-col gap-1">
+                  <h2 className="text-base font-semibold">Recent work</h2>
+                  <p className="text-sm text-status-neutral">
+                    Completed and in-progress sessions will appear here.
+                  </p>
+                </div>
+              )}
+            </section>
 
-          {creating && <NewProjectForm onCancel={() => setCreating(false)} />}
-        </div>
-      </div>
-
-      <aside
-        aria-label="Recent projects and sessions"
-        data-home-column="recent"
-        className="flex w-full min-w-0 flex-col gap-4"
-      >
-        <div className="min-w-0 rounded-xl border border-border bg-bg p-4">
-          {historyUsage.isPending && (
-            <LoadingSkeleton lines={3} label="Loading recent work" />
-          )}
-          {historyUsage.data && (
-            <RecentSessions sessions={historyUsage.data.recent ?? []} />
-          )}
-          {historyUsage.data &&
-            (historyUsage.data.recent ?? []).length === 0 && (
-              <div className="flex flex-col gap-1">
-                <h2 className="text-base font-semibold">Recent work</h2>
-                <p className="text-sm text-status-neutral">
-                  Completed and in-progress sessions will appear here.
-                </p>
-              </div>
-            )}
-        </div>
-
-        <div className="min-w-0">
-          {projects.isPending && (
-            <LoadingSkeleton lines={4} label="Loading projects" />
-          )}
-          {projects.isError && (
-            <ErrorState
-              error={projects.error}
-              onRetry={() => projects.refetch()}
-            />
-          )}
-          {projects.data &&
-            (empty ? (
-              <EmptyState
-                title="No projects yet"
-                description="Projects keep related analyses and shared uploads together. You can create one from Start an analysis or continue using standalone analyses."
-              />
-            ) : (
-              <section className="flex flex-col gap-3">
-                <SectionHeader title="Projects" level={2} />
-                {active.length > 0 && (
-                  <div className="grid items-stretch gap-3 2xl:grid-cols-2">
-                    {active.map((project) => (
-                      <ProjectCard
-                        key={project.project_id}
-                        project={project}
-                      />
-                    ))}
-                  </div>
-                )}
-                {idle.length > 0 && (
+            <section className="min-h-0 flex-1 p-3.5 sm:p-4">
+              {projects.isPending && (
+                <LoadingSkeleton lines={3} label="Loading projects" />
+              )}
+              {projects.isError && (
+                <ErrorState error={projects.error} onRetry={() => projects.refetch()} />
+              )}
+              {projects.data && (empty ? (
+                <div className="flex flex-col gap-1">
+                  <h2 className="text-base font-semibold">Projects</h2>
+                  <p className="text-sm text-status-neutral">
+                    No projects yet. Create one while starting a new session.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <SectionHeader title="Projects" level={2} />
                   <ul className="flex flex-col">
-                    {idle.map((project) => (
-                      <EmptyProjectRow
-                        key={project.project_id}
-                        project={project}
-                      />
+                    {visibleActive.map((project) => (
+                      <ProjectRow key={project.project_id} project={project} />
+                    ))}
+                    {visibleIdle.map((project) => (
+                      <EmptyProjectRow key={project.project_id} project={project} />
                     ))}
                   </ul>
-                )}
-              </section>
-            ))}
-        </div>
-      </aside>
+                  {hiddenProjectCount > 0 && (
+                    <p className="text-xs text-status-neutral">
+                      + {hiddenProjectCount} more project{hiddenProjectCount === 1 ? "" : "s"}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </section>
+          </Card>
+        </aside>
+      </div>
+
+      <div data-home-launch className="sticky bottom-3 z-10 mt-auto pt-2">
+        <QuickStart />
+      </div>
     </div>
   );
 }

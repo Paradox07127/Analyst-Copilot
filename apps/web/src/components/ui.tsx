@@ -580,6 +580,9 @@ export function StepChain({
 
 /** Keep in step with the `w-64` on the Hint panel below. */
 const PANEL_WIDTH_PX = 256;
+/** A conservative estimate prevents a lower-page hint from opening below the
+ * viewport. The panel remains content-sized; this only chooses its direction. */
+const PANEL_HEIGHT_PX = 224;
 
 /** Inline definition for a term the product invented. The alternative that was
  *  in place — a paragraph of explanation under every control — is what makes
@@ -590,12 +593,19 @@ export function Hint({ label, children }: { label: string; children: ReactNode }
    * bar and in table headers, where a left-anchored 16rem panel runs off the
    * right edge. Measuring beats asking every call site to know where it is. */
   const [alignRight, setAlignRight] = useState(false);
+  const [openAbove, setOpenAbove] = useState(false);
   const panelId = useId();
   const wrapRef = useRef<HTMLSpanElement>(null);
 
   const toggle = () => {
     const rect = wrapRef.current?.getBoundingClientRect();
-    if (rect) setAlignRight(rect.left + PANEL_WIDTH_PX > window.innerWidth);
+    if (rect) {
+      setAlignRight(rect.left + PANEL_WIDTH_PX > window.innerWidth);
+      setOpenAbove(
+        rect.bottom + PANEL_HEIGHT_PX > window.innerHeight &&
+          rect.top >= PANEL_HEIGHT_PX,
+      );
+    }
     setOpen((current) => !current);
   };
 
@@ -631,7 +641,9 @@ export function Hint({ label, children }: { label: string; children: ReactNode }
         <span
           id={panelId}
           role="note"
-          className={`animate-enter absolute top-5 z-50 w-64 rounded-base border border-border bg-bg p-2.5 text-xs leading-relaxed font-normal text-text shadow-overlay ${
+          className={`animate-enter absolute z-50 w-64 rounded-base border border-border bg-bg p-2.5 text-xs leading-relaxed font-normal text-text shadow-overlay ${
+            openAbove ? "bottom-5" : "top-5"
+          } ${
             alignRight ? "right-0" : "left-0"
           }`}
         >

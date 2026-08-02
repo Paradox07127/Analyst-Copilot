@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import {
   createColumnHelper,
@@ -27,7 +27,11 @@ import {
   LoadingSkeleton,
   PartialState,
 } from "../../components/async-states";
-import { Marquee, SectionHeader, formatCompact } from "../../components/ui";
+import {
+  DataWorkspacePage,
+  DatasetScopeBar,
+} from "../../components/data-workspace";
+import { Marquee, formatCompact } from "../../components/ui";
 import { HeaderDistributionChart } from "./ColumnDistributionStrip";
 import { TypeIcon, classifyColumn } from "./mini-charts";
 
@@ -159,6 +163,10 @@ function PreviewTable({
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
+  const sourceIndexByRow = useMemo(
+    () => new Map(preview.rows.map((row, index) => [row, index])),
+    [preview.rows],
+  );
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // Rows highlight through CSS group-hover; a column has no CSS hover scope,
@@ -194,7 +202,7 @@ function PreviewTable({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
       <div className="flex items-center justify-between gap-3 px-0.5 text-xs text-status-neutral">
         <span>
-          Showing {visibleColumnNames.length} of {preview.columns.length} columns
+          Loaded page · {visibleColumnNames.length} of {preview.columns.length} columns
         </span>
         <span>Scroll horizontally to explore columns</span>
       </div>
@@ -253,7 +261,8 @@ function PreviewTable({
                           <button
                             type="button"
                             onClick={() => toggleSort(header.column.id)}
-                            className="flex min-w-0 flex-1 items-center gap-1 text-left font-semibold hover:text-primary"
+                            title={`Sort loaded rows by ${header.column.id}`}
+                            className="group/sort flex min-w-0 flex-1 items-center gap-1 text-left font-semibold hover:text-primary"
                           >
                             <Marquee>
                               {flexRender(
@@ -261,11 +270,20 @@ function PreviewTable({
                                 header.getContext(),
                               )}
                             </Marquee>
-                            {activeSort && (
-                              <span aria-hidden="true" className="shrink-0">
-                                {activeSort.direction === "asc" ? "▲" : "▼"}
-                              </span>
-                            )}
+                            <span
+                              aria-hidden="true"
+                              className={`shrink-0 text-[10px] ${
+                                activeSort
+                                  ? "text-primary"
+                                  : "text-status-neutral/55 group-hover/sort:text-primary"
+                              }`}
+                            >
+                              {activeSort
+                                ? activeSort.direction === "asc"
+                                  ? "▲"
+                                  : "▼"
+                                : "↕"}
+                            </span>
                           </button>
                         </span>
                         <span className="mt-1 block font-mono text-xs font-normal text-status-neutral">
@@ -287,9 +305,10 @@ function PreviewTable({
               {virtualRows.map((virtualRow) => {
                 const row = rows[virtualRow.index];
                 if (!row) return null;
+                const sourceIndex = sourceIndexByRow.get(row.original) ?? virtualRow.index;
                 /* Banding follows the absolute row number, not the virtual
                  * window index, so the stripes do not swap as you scroll. */
-                const banded = (offset + virtualRow.index) % 2 === 1;
+                const banded = (offset + sourceIndex) % 2 === 1;
                 return (
                   <tr
                     key={row.id}
@@ -301,7 +320,7 @@ function PreviewTable({
                         banded ? "bg-table-header-bg" : "bg-bg"
                       }`}
                     >
-                      {offset + virtualRow.index + 1}
+                      {offset + sourceIndex + 1}
                     </td>
                     {row.getVisibleCells().map((cell) => {
                       const text = formatCell(cell.getValue());
@@ -370,30 +389,20 @@ function PreviewControls({
   onShowAllColumnsChange: (show: boolean) => void;
 }) {
   const navigate = useNavigate();
-  const selectId = useId();
 
   return (
-    <div className="flex min-w-0 flex-wrap items-end gap-2">
-      <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs font-medium text-status-neutral" htmlFor={selectId}>
-          Table
-          <select
-            id={selectId}
-            value={datasetId}
-            onChange={(event) =>
-              navigate(tablePath(projectId, sessionId, event.target.value))
-            }
-            className="min-w-0 max-w-full rounded-base border border-border bg-bg px-2.5 py-1.5 text-sm text-text"
-          >
-            {datasets.length === 0 && (
-              <option value={datasetId}>Current table</option>
-            )}
-            {datasets.map((item) => (
-              <option key={item.dataset_id} value={item.dataset_id}>
-                {item.display_name || "Untitled table"}
-              </option>
-            ))}
-          </select>
-      </label>
+    <DatasetScopeBar
+      value={datasetId}
+      onChange={(value) => navigate(tablePath(projectId, sessionId, value))}
+      options={
+        datasets.length === 0
+          ? [{ value: datasetId, label: "Current dataset" }]
+          : datasets.map((item) => ({
+              value: item.dataset_id,
+              label: item.display_name || "Untitled dataset",
+            }))
+      }
+    >
       {preview && preview.columns.length > DEFAULT_VISIBLE_COLUMNS && (
         <button
           type="button"
@@ -441,7 +450,7 @@ function PreviewControls({
           </svg>
         </button>
       </div>
-    </div>
+    </DatasetScopeBar>
   );
 }
 
@@ -525,29 +534,29 @@ export function Component() {
   };
 
   return (
-    <div className="mx-auto flex h-full w-[90%] max-w-data min-w-0 flex-col gap-2 overflow-hidden px-6 pt-5 pb-2">
-      <SectionHeader
-        level={1}
-        title="Table Preview"
-        actions={
-          dataset && (
-            <span
-              className="tabular text-sm text-status-neutral"
-              title={
-                dataset.row_count == null
-                  ? undefined
-                  : `${dataset.row_count.toLocaleString()} rows`
-              }
-            >
-              {dataset.row_count == null
-                ? "rows unknown"
-                : `${formatCompact(dataset.row_count)} rows`}
-              {" · "}
-              {(dataset.schema ?? []).length} cols
-            </span>
-          )
-        }
-      />
+    <DataWorkspacePage
+      title="Table Preview"
+      fill
+      gap="compact"
+      actions={
+        dataset && (
+          <span
+            className="tabular text-sm text-status-neutral"
+            title={
+              dataset.row_count == null
+                ? undefined
+                : `${dataset.row_count.toLocaleString()} rows`
+            }
+          >
+            {dataset.row_count == null
+              ? "rows unknown"
+              : `${formatCompact(dataset.row_count)} rows`}
+            {" · "}
+            {(dataset.schema ?? []).length} cols
+          </span>
+        )
+      }
+    >
       <PreviewControls
         projectId={projectId}
         sessionId={sessionId}
@@ -632,6 +641,6 @@ export function Component() {
             </footer>
           </>
         ))}
-    </div>
+    </DataWorkspacePage>
   );
 }

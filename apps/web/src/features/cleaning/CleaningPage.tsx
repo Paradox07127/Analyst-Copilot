@@ -2,7 +2,7 @@
  * confirm → apply consumes the action_hash and forks an auto_eda job on the
  * cleaned version, which the activity drawer then tracks. */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import {
@@ -22,6 +22,7 @@ import {
 } from "../../api/data-operations";
 import { useJobActivity } from "../../app/job-activity";
 import { sessionSectionPath } from "../../app/paths";
+import { useRouteSearchParam } from "../../app/route-state";
 import {
   EmptyState,
   ErrorState,
@@ -36,6 +37,10 @@ import {
   StepChain,
 } from "../../components/ui";
 import { useDialogFocus } from "../../components/use-dialog-focus";
+import {
+  DataWorkspacePage,
+  DatasetScopeBar,
+} from "../../components/data-workspace";
 import { CleaningLogSection } from "./CleaningLogSection";
 import { RawPreCleaningSection } from "./RawPreCleaningSection";
 import { CLEANING_STAGES } from "./StageChain";
@@ -128,7 +133,7 @@ function PreviewCard({ result }: { result: CleaningPreviewResult }) {
   return (
     <Card
       as="section"
-      aria-label="Cleaning preview"
+      aria-label="Cleanup preview"
       tone="brand"
       className="flex flex-col gap-3 p-4"
     >
@@ -183,15 +188,8 @@ function PreviewCard({ result }: { result: CleaningPreviewResult }) {
   );
 }
 
-function PageHeading() {
-  return (
-    <SectionHeader
-      level={1}
-      title="Cleaning"
-      description="Review a suggested recipe, preview its impact, then explicitly authorize a cleaned copy and a new analysis run. The current data is never overwritten."
-    />
-  );
-}
+const PAGE_DESCRIPTION =
+  "Review a suggested recipe, preview its impact, then explicitly authorize a cleaned copy and a new analysis run. The current data is never overwritten.";
 
 export function Component() {
   const { projectId = "", sessionId = "" } = useParams();
@@ -201,14 +199,24 @@ export function Component() {
   const datasets = useDatasets(sessionId);
   const cleaningRaw = useCleaningRaw(sessionId);
   const cleaningLog = useCleaningLog(sessionId);
-  const [datasetId, setDatasetId] = useState<string>("");
+  const [datasetParam, setDatasetParam] = useRouteSearchParam("dataset");
   const [options, setOptions] = useState<CleaningOptions>(DEFAULT_OPTIONS);
   const [confirming, setConfirming] = useState(false);
   /* One idempotency key per previewed approval: Confirm retries replay the
    * same key (and job), while a fresh preview binds a fresh key. */
   const [applyKey, setApplyKey] = useState("");
 
-  const selectedDatasetId = datasetId || datasets.data?.[0]?.dataset_id || "";
+  const selectedDatasetId =
+    datasets.data?.find((dataset) => dataset.dataset_id === datasetParam)
+      ?.dataset_id ??
+    datasets.data?.[0]?.dataset_id ??
+    "";
+
+  useEffect(() => {
+    if (selectedDatasetId && selectedDatasetId !== datasetParam) {
+      setDatasetParam(selectedDatasetId);
+    }
+  }, [datasetParam, selectedDatasetId, setDatasetParam]);
 
   const preview = useMutation({
     mutationFn: () =>
@@ -287,40 +295,49 @@ export function Component() {
       (cleaningRaw.data.charts?.length ?? 0) +
       (cleaningRaw.data.previews?.length ?? 0)
     : 0;
+  const canPreview = Boolean(selectedDatasetId && selectedCount > 0);
 
   if (datasets.isPending) {
     return (
-      <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
+      <DataWorkspacePage title="Cleanup" description={PAGE_DESCRIPTION}>
         <LoadingSkeleton lines={4} label="Loading datasets" />
-      </div>
+      </DataWorkspacePage>
     );
   }
   if (datasets.isError) {
     return (
-      <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
-        <PageHeading />
+      <DataWorkspacePage title="Cleanup" description={PAGE_DESCRIPTION}>
         <ErrorState error={datasets.error} onRetry={() => datasets.refetch()} />
-      </div>
+      </DataWorkspacePage>
     );
   }
   if (datasets.data.length === 0) {
     return (
-      <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
-        <PageHeading />
+      <DataWorkspacePage title="Cleanup" description={PAGE_DESCRIPTION}>
         <EmptyState
           title="No datasets in this session"
-          description="This run has no ingested table to preview. Start another analysis with at least one CSV, then return to Cleaning."
+          description="This run has no ingested table to preview. Start another analysis with at least one CSV, then return to Cleanup."
         />
-      </div>
+      </DataWorkspacePage>
     );
   }
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data flex-col gap-5 p-6">
-      <PageHeading />
+    <DataWorkspacePage title="Cleanup" description={PAGE_DESCRIPTION}>
+      <DatasetScopeBar
+        value={selectedDatasetId}
+        onChange={(value) => {
+          setDatasetParam(value);
+          invalidatePreview();
+        }}
+        options={datasets.data.map((dataset) => ({
+          value: dataset.dataset_id,
+          label: dataset.display_name,
+        }))}
+      />
 
       <StepChain
-        label="Cleaning steps"
+        label="Cleanup steps"
         steps={CLEANING_STAGES}
         current={stage}
       />
@@ -336,27 +353,6 @@ export function Component() {
             </Badge>
           }
         />
-
-        <div className="flex flex-col gap-2">
-          <label className="text-sm font-medium" htmlFor="cleaning-dataset">
-            Dataset
-          </label>
-          <select
-            id="cleaning-dataset"
-            value={selectedDatasetId}
-            onChange={(event) => {
-              setDatasetId(event.target.value);
-              invalidatePreview();
-            }}
-            className="w-full max-w-md rounded-base border border-border bg-bg px-2 py-1.5 text-sm"
-          >
-            {datasets.data.map((handle) => (
-              <option key={handle.dataset_id} value={handle.dataset_id}>
-                {handle.display_name}
-              </option>
-            ))}
-          </select>
-        </div>
 
         <fieldset className="flex flex-col gap-2">
           <legend className="pb-1 text-sm font-medium">
@@ -411,13 +407,14 @@ export function Component() {
           <Button
             variant={preview.data ? "secondary" : "primary"}
             onClick={() => preview.mutate()}
-            disabled={!selectedDatasetId || preview.isPending}
+            disabled={!canPreview || preview.isPending}
           >
             {preview.isPending ? "Previewing…" : "Preview cleaning"}
           </Button>
           <span className="text-xs text-status-neutral">
-            Reads the current version only. No table version or analysis run is
-            created.
+            {selectedCount === 0
+              ? "Select at least one operation to preview."
+              : "Reads the current version only. No table version or analysis run is created."}
           </span>
         </div>
       </Card>
@@ -595,6 +592,6 @@ export function Component() {
           </div>
         )}
       </Card>
-    </div>
+    </DataWorkspacePage>
   );
 }

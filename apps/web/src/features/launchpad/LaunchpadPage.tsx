@@ -11,8 +11,8 @@
  * three. Uploads and project files are siblings in a single list so that
  * dropping a CSV and reusing a stored one are the same gesture.
  *
- * `NewSessionPanel` is the whole surface and takes no page chrome, so Home and
- * the per-project + button mount it directly. */
+ * `NewSessionPanel` owns the complete launch workflow. Home links here instead
+ * of embedding a second, subtly different project-and-upload flow. */
 
 import {
   useEffect,
@@ -381,8 +381,9 @@ function SupportDocsBar({
         type="button"
         onClick={() => inputRef.current?.click()}
         disabled={disabled || upload.isPending}
-        className="rounded-base px-1.5 py-1 underline-offset-2 hover:text-text hover:underline disabled:opacity-50"
+        className="inline-flex items-center gap-1.5 rounded-base border border-border bg-surface px-2 py-1.5 font-medium text-text shadow-sm transition-colors hover:border-primary/50 hover:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-50"
       >
+        <span aria-hidden="true" className="text-sm leading-none">+</span>
         {upload.isPending
           ? "Uploading…"
           : items.length === 0
@@ -423,16 +424,12 @@ function SupportDocsBar({
 
 /* ------------------------------------------------------------------- panel */
 
-export function NewSessionPanel({
+function NewSessionPanel({
   projectId: fixedProjectId,
-  layout = "inline",
 }: {
   /** Set by the per-project route: the destination is decided, so the picker
    *  collapses to a label instead of offering to move the session. */
   projectId?: string;
-  /** The route keeps launch confirmation visible beside the composer. Home
-   * embeds the same panel inline inside its quick-start card. */
-  layout?: "inline" | "route";
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -472,6 +469,7 @@ export function NewSessionPanel({
     sessionId: string;
     key: string;
     input: string;
+    projectId: string;
     projectKey: string;
     projectCreated: boolean;
   } | null>(null);
@@ -521,36 +519,59 @@ export function NewSessionPanel({
       ]);
       return;
     }
-    for (const file of files) {
-      const id = nextId.current++;
-      setUploads((entries) => [
-        ...entries,
-        { id, fileName: file.name, status: "uploading", selected: true },
-      ]);
+    /* Put the whole selection in the queue before network work starts. A user
+     * who picks twelve files should see twelve rows immediately, even though
+     * uploads are deliberately serialized to respect the API quota. */
+    const queued = files.map((file) => ({
+      id: nextId.current++,
+      file,
+      fileName: file.name,
+      status: "uploading" as const,
+      selected: true,
+    }));
+    setUploads((entries) => [...entries, ...queued]);
+    for (const entry of queued) {
       try {
-        const result = await api.createUpload(activeProjectId, file);
+        const result = await api.createUpload(activeProjectId, entry.file);
         if (result.status === "completed" && result.dataset) {
-          updateEntry(id, { status: "completed", dataset: result.dataset });
+          updateEntry(entry.id, { status: "completed", dataset: result.dataset });
           await queryClient.invalidateQueries({
             queryKey: queryKeys.projectUploads(activeProjectId),
           });
         } else {
-          updateEntry(id, {
+          updateEntry(entry.id, {
             status: "failed",
             error: result.error ?? `upload ${result.status}`,
           });
         }
       } catch (error) {
-        updateEntry(id, { status: "failed", error: uploadErrorMessage(error) });
+        updateEntry(entry.id, {
+          status: "failed",
+          error: uploadErrorMessage(error),
+        });
       }
     }
+  };
+
+  const validateDataFiles = (files: File[]): File[] => {
+    const csvFiles = files.filter((file) => /\.csv$/i.test(file.name));
+    if (csvFiles.length !== files.length) {
+      setFileFeedback(
+        csvFiles.length === 0
+          ? "Choose CSV files only."
+          : "Some files were ignored. This analysis accepts CSV files only.",
+      );
+    } else {
+      setFileFeedback(null);
+    }
+    return csvFiles;
   };
 
   const onPickFiles = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
-    setFileFeedback(null);
-    await ingest(files);
+    const csvFiles = validateDataFiles(files);
+    if (csvFiles.length > 0) await ingest(csvFiles);
   };
 
   const freshDatasets = uploads.filter(
@@ -574,6 +595,20 @@ export function NewSessionPanel({
   const existing = (projectUploads.data ?? []).filter(
     (handle) => !freshIds.has(handle.dataset_id),
   );
+  const selectableExisting = existing.filter(
+    (handle) => handle.ingest_status === "ready" && Boolean(handle.original_uri),
+  );
+  const allExistingSelected =
+    selectableExisting.length > 0 &&
+    selectableExisting.every((handle) => reusedIds.includes(handle.dataset_id));
+
+  const selectableUploads = uploads.filter(
+    (entry) => entry.status === "completed" || entry.status === "staged",
+  );
+  const allSelectableSelected =
+    selectableExisting.length + selectableUploads.length > 0 &&
+    (selectableExisting.length === 0 || allExistingSelected) &&
+    selectableUploads.every((entry) => entry.selected);
 
   const setDatasetSelected = (datasetId: string, selected: boolean) => {
     setUploads((entries) =>
@@ -587,6 +622,28 @@ export function NewSessionPanel({
           ? current
           : [...current, datasetId]
         : current.filter((id) => id !== datasetId),
+    );
+  };
+
+  const setAllExistingSelected = (selected: boolean) => {
+    const selectableIds = new Set(
+      selectableExisting.map((handle) => handle.dataset_id),
+    );
+    setReusedIds((current) =>
+      selected
+        ? Array.from(new Set([...current, ...selectableIds]))
+        : current.filter((id) => !selectableIds.has(id)),
+    );
+  };
+
+  const setAllSelected = (selected: boolean) => {
+    setAllExistingSelected(selected);
+    setUploads((entries) =>
+      entries.map((entry) =>
+        entry.status === "completed" || entry.status === "staged"
+          ? { ...entry, selected }
+          : entry,
+      ),
     );
   };
 
@@ -629,25 +686,20 @@ export function NewSessionPanel({
             ? "Uploading…"
             : entry.status === "failed"
               ? `Upload failed${entry.error ? `: ${entry.error}` : ""}`
-              : entry.status === "completed" && handle
-                ? `Ready · ${handle.dataset_id}`
+              : entry.status === "completed"
+                ? "Saved to project"
                 : null,
-        inProject: false,
-        remove: () => {
-          setUploads((entries) =>
-            entries.filter((item) => item.id !== entry.id),
-          );
-          if (handle) {
-            queryClient.invalidateQueries({
-              queryKey: queryKeys.projectUploads(activeProjectId),
-            });
-          }
-        },
+        inProject: entry.status === "completed",
+        remove:
+          entry.status === "staged" || entry.status === "failed"
+            ? () => {
+                setUploads((entries) =>
+                  entries.filter((item) => item.id !== entry.id),
+                );
+              }
+            : null,
         toggle: selectable
-          ? (next) =>
-              handle
-                ? setDatasetSelected(handle.dataset_id, next)
-                : updateEntry(entry.id, { selected: next })
+          ? (next) => updateEntry(entry.id, { selected: next })
           : null,
       };
     }),
@@ -674,14 +726,38 @@ export function NewSessionPanel({
 
   const launch = useMutation({
     mutationFn: async () => {
-      const input = projectChoice === "new" ? newProjectId : activeProjectId;
+      const input = JSON.stringify({
+        projectId: activeProjectId,
+        projectName: projectChoice === "new" ? newProjectName.trim() : null,
+        reused: [...reusedIds].sort(),
+        uploads: uploads
+          .filter(
+            (entry) =>
+              entry.selected &&
+              (entry.status === "completed" || entry.status === "staged"),
+          )
+          .map((entry) => ({
+            id: entry.id,
+            name: entry.fileName,
+            size: entry.file?.size ?? entry.dataset?.byte_size ?? null,
+            modified: entry.file?.lastModified ?? null,
+          })),
+        businessContext,
+        precleaning: precleanEnabled(preclean) ? preclean : null,
+      });
       if (!launchRef.current || launchRef.current.input !== input) {
+        const projectAlreadyCreated =
+          launchRef.current?.projectCreated === true &&
+          launchRef.current.projectId === activeProjectId;
         launchRef.current = {
           sessionId: newRunId(),
           key: crypto.randomUUID(),
           input,
-          projectKey: crypto.randomUUID(),
-          projectCreated: false,
+          projectId: activeProjectId,
+          projectKey: projectAlreadyCreated
+            ? launchRef.current!.projectKey
+            : crypto.randomUUID(),
+          projectCreated: projectAlreadyCreated,
         };
       }
       const attempt = launchRef.current;
@@ -819,15 +895,8 @@ export function NewSessionPanel({
       setDragging(false);
       if (!projectReady) return;
       const dropped = Array.from(event.dataTransfer.files);
-      const csvFiles = dropped.filter((file) => /\.csv$/i.test(file.name));
+      const csvFiles = validateDataFiles(dropped);
       if (csvFiles.length > 0) void ingest(csvFiles);
-      if (csvFiles.length !== dropped.length) {
-        setFileFeedback(
-          csvFiles.length === 0
-            ? "Add CSV files only."
-            : "Some files were ignored. This analysis accepts CSV files only.",
-        );
-      }
     },
   };
 
@@ -915,13 +984,7 @@ export function NewSessionPanel({
   );
 
   return (
-    <div
-      className={
-        layout === "route"
-          ? "grid min-w-0 grid-cols-1 items-start gap-5 @2xl/launchpad:grid-cols-[minmax(0,1fr)_19rem]"
-          : "flex min-w-0 flex-col gap-3"
-      }
-    >
+    <div className="grid min-w-0 grid-cols-1 items-start gap-4 @2xl/launchpad:grid-cols-[minmax(0,1fr)_19rem]">
       <div className="flex min-w-0 flex-col gap-4">
         <section
           aria-labelledby="launchpad-project-title"
@@ -1003,12 +1066,26 @@ export function NewSessionPanel({
             <h2 id="launchpad-data-title" className="text-sm font-semibold">
               Data
             </h2>
-            <Badge tone="brand">Required</Badge>
+            <div className="flex items-center gap-2">
+              {selectableExisting.length + selectableUploads.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setAllSelected(!allSelectableSelected)}
+                >
+                  {allSelectableSelected ? "Clear selection" : "Select all"}
+                </Button>
+              )}
+              <span className="tabular text-xs text-status-neutral">
+                {selectedFileCount} selected
+              </span>
+              <Badge tone="brand">Required</Badge>
+            </div>
           </div>
           {rows.length > 0 && (
             <ul
               aria-label="Data files in this session"
-              className="flex max-h-72 flex-col overflow-y-auto"
+              className="flex max-h-[min(13rem,28dvh)] flex-col overflow-y-auto"
             >
               {rows.map((row) => (
                 <FileRow key={row.key} row={row} />
@@ -1037,11 +1114,6 @@ export function NewSessionPanel({
             >
               Choose CSV files
             </Button>
-            <span className="text-sm text-status-neutral">
-              {rows.length > 0
-                ? "or drop more here"
-                : "or drop CSVs here. One table per file; joins are detected automatically."}
-            </span>
             <input
               ref={fileInputRef}
               aria-label="Data files (.csv)"
@@ -1080,69 +1152,42 @@ export function NewSessionPanel({
             aria-label="Business context"
             value={businessContext}
             onChange={(event) => setBusinessContext(event.target.value)}
-            rows={3}
+            rows={2}
             placeholder="What is this data about, and what decision should the analysis support?"
             className="w-full resize-y rounded-base border border-border bg-bg p-2.5 text-sm outline-none placeholder:text-status-neutral"
           />
         </label>
 
-        {layout === "inline" && (
-          <div className="flex flex-col overflow-hidden rounded-base border border-border bg-surface">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5">
-              {runOptions}
-              <span className="ml-auto flex flex-wrap items-center gap-3">
-                <span aria-live="polite" className="text-xs text-status-neutral">
-                  {blockedReason ??
-                    `${selectedFileCount} file${
-                      selectedFileCount === 1 ? "" : "s"
-                    } · report on · ${modelLabel}`}
-                </span>
-                {startButton}
-              </span>
-            </div>
-            {precleanEnabled(preclean) && (
-              <PrecleaningFields value={preclean} onChange={setPreclean} />
-            )}
-          </div>
-        )}
       </div>
 
-      {layout === "route" && (
-        <Card
-          as="section"
-          tone="quiet"
-          aria-labelledby="launchpad-run-title"
-          className="flex min-w-0 flex-col gap-4 p-4 @2xl/launchpad:sticky @2xl/launchpad:top-4"
-        >
-          <SectionHeader
-            level={2}
-            title={<span id="launchpad-run-title">Run analysis</span>}
-            description="Profile the data, check quality and generate a report."
-          />
-          {runSummary}
-          <div className="border-t border-border pt-3">{runOptions}</div>
-          {precleanEnabled(preclean) && (
-            <PrecleaningFields value={preclean} onChange={setPreclean} />
-          )}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
-            <span
-              aria-live="polite"
-              className="min-w-0 flex-1 text-xs text-status-neutral"
-            >
-              {blockedReason ?? "Ready to start."}
-            </span>
-            {startButton}
-          </div>
-        </Card>
-      )}
-
-      <div
-        className={
-          layout === "route"
-            ? "flex flex-col gap-3 @2xl/launchpad:col-span-2"
-            : ""
-        }
+      <Card
+        as="section"
+        tone="quiet"
+        aria-labelledby="launchpad-run-title"
+        className="flex min-w-0 flex-col gap-3 p-3.5 @2xl/launchpad:sticky @2xl/launchpad:top-4"
       >
+        <SectionHeader
+          level={2}
+          title={<span id="launchpad-run-title">Run analysis</span>}
+          description="Profile the data, check quality and generate a report."
+        />
+        {runSummary}
+        <div className="border-t border-border pt-3">{runOptions}</div>
+        {precleanEnabled(preclean) && (
+          <PrecleaningFields value={preclean} onChange={setPreclean} />
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+          <span
+            aria-live="polite"
+            className="min-w-0 flex-1 text-xs text-status-neutral"
+          >
+            {blockedReason ?? "Ready to start."}
+          </span>
+          {startButton}
+        </div>
+      </Card>
+
+      <div className="flex flex-col gap-3 @2xl/launchpad:col-span-2">
         {conflict ? (
           <div
             role="alert"
@@ -1179,20 +1224,20 @@ export function NewSessionPanel({
 
 /* --------------------------------------------------------------- route shell */
 
-/* The route gets a quiet sticky confirmation panel; Home embeds the same
- * composer inline, where a second column would compete with the dashboard. */
+/* The launch workflow has one route and one confirmation pattern. Home points
+ * here instead of keeping a second, inevitably drifting composer. */
 export function Component() {
   const { projectId } = useParams();
   return (
-    <div className="mx-auto grid w-[90%] max-w-data grid-cols-1 items-start gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_19rem]">
-      <header className="flex flex-col gap-1 lg:col-span-2">
+    <div className="mx-auto w-[95%] max-w-data min-w-0 px-4 py-4 sm:px-5 lg:px-6">
+      <header className="mb-4 flex flex-col gap-1">
         <h1 className="text-xl font-semibold">New session</h1>
         <p className="text-sm text-status-neutral">
           Choose data, add any useful context, then run the analysis.
         </p>
       </header>
-      <div className="@container/launchpad lg:col-span-2">
-        <NewSessionPanel projectId={projectId} layout="route" />
+      <div className="@container/launchpad">
+        <NewSessionPanel projectId={projectId} />
       </div>
     </div>
   );

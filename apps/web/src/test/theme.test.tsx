@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderAppAt } from "./render";
-import { initDensity } from "../app/theme";
+import { getTimeTheme, initDensity } from "../app/theme";
 
 /* setup.ts resets data-theme between tests but not data-density. */
 afterEach(() => {
@@ -17,59 +17,27 @@ describe("Theme switching", () => {
 
     /* The toggle is named for what it does, not for what is currently set —
      * so its name is the opposite of the active theme. */
-    // matchMedia stub reports light; first toggle goes dark.
+    const initial = getTimeTheme();
+    const firstTarget = initial === "light" ? "dark" : "light";
     await user.click(
-      screen.getByRole("button", { name: "Switch to dark theme" }),
+      screen.getByRole("button", { name: `Switch to ${firstTarget} theme` }),
     );
-    expect(document.documentElement.dataset["theme"]).toBe("dark");
-    expect(window.localStorage.getItem("eda.theme")).toBe("dark");
+    expect(document.documentElement.dataset["theme"]).toBe(firstTarget);
+    expect(window.localStorage.getItem("eda.theme")).toBe(firstTarget);
 
+    const secondTarget = firstTarget === "light" ? "dark" : "light";
     await user.click(
-      screen.getByRole("button", { name: "Switch to light theme" }),
+      screen.getByRole("button", { name: `Switch to ${secondTarget} theme` }),
     );
-    expect(document.documentElement.dataset["theme"]).toBe("light");
-    expect(window.localStorage.getItem("eda.theme")).toBe("light");
+    expect(document.documentElement.dataset["theme"]).toBe(secondTarget);
+    expect(window.localStorage.getItem("eda.theme")).toBe(secondTarget);
   });
 
-  it("follows OS theme changes while no explicit choice is stored", async () => {
-    let matches = false;
-    const listeners = new Set<(ev: MediaQueryListEvent) => void>();
-    const original = window.matchMedia;
-    window.matchMedia = (query: string) =>
-      ({
-        get matches() {
-          return matches;
-        },
-        media: query,
-        onchange: null,
-        addEventListener: (_: string, cb: (ev: MediaQueryListEvent) => void) =>
-          listeners.add(cb),
-        removeEventListener: (
-          _: string,
-          cb: (ev: MediaQueryListEvent) => void,
-        ) => listeners.delete(cb),
-        addListener: () => {},
-        removeListener: () => {},
-        dispatchEvent: () => false,
-      }) as MediaQueryList;
-
-    try {
-      const { act } = await import("@testing-library/react");
-      renderAppAt("/projects");
-      await screen.findByRole("button", { name: "Switch to dark theme" });
-
-      await act(async () => {
-        matches = true;
-        listeners.forEach((cb) => cb({ matches } as MediaQueryListEvent));
-      });
-      expect(
-        screen.getByRole("button", { name: "Switch to light theme" }),
-      ).toBeInTheDocument();
-      // An explicit choice must stop the OS from overriding it.
-      expect(window.localStorage.getItem("eda.theme")).toBeNull();
-    } finally {
-      window.matchMedia = original;
-    }
+  it("follows local time while no explicit choice is stored", async () => {
+    expect(getTimeTheme(new Date(2026, 7, 1, 6, 59))).toBe("dark");
+    expect(getTimeTheme(new Date(2026, 7, 1, 7))).toBe("light");
+    expect(getTimeTheme(new Date(2026, 7, 1, 18, 59))).toBe("light");
+    expect(getTimeTheme(new Date(2026, 7, 1, 19))).toBe("dark");
   });
 });
 

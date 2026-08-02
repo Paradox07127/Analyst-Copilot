@@ -31,7 +31,7 @@ async function launchTrackedJob() {
     screen.getByLabelText("Data files (.csv)"),
     new File(["id\n1\n"], "orders.csv", { type: "text/csv" }),
   );
-  await screen.findByText(/Ready · ds_orders/);
+  await screen.findByRole("checkbox", { name: "Exclude orders.csv" });
   await user.click(screen.getByRole("button", { name: "Run analysis" }));
   await screen.findByRole("heading", { name: "Data Map" });
   await user.click(screen.getByRole("button", { name: "Open activity" }));
@@ -172,7 +172,7 @@ describe("Activity center with job SSE", () => {
         job_id: "job_a",
       }),
     );
-    expect(await screen.findByText("Analysis completed.")).toBeInTheDocument();
+    expect(screen.queryByText("Analysis completed.")).not.toBeInTheDocument();
     expect(sourceA!.readyState).toBe(FakeEventSource.CLOSED);
     expect(sourceB!.readyState).toBe(FakeEventSource.OPEN);
 
@@ -230,7 +230,7 @@ describe("Activity center with job SSE", () => {
     ).toBeInTheDocument();
   });
 
-  it("advances the stepper from step events and toasts on completion", async () => {
+  it("advances the stepper from step events without a completion toast", async () => {
     const { source } = await launchTrackedJob();
 
     act(() => source.emit("job.queued", frame("job.queued", "job_1")));
@@ -256,9 +256,40 @@ describe("Activity center with job SSE", () => {
 
     act(() => source.emit("job.completed", frame("job.completed", "job_1")));
     expect(screen.getByText("Completed")).toBeInTheDocument();
-    expect(await screen.findByText("Analysis completed.")).toBeInTheDocument();
+    expect(screen.queryByText("Analysis completed.")).not.toBeInTheDocument();
     // Terminal frame ends the stream; the client must not auto-reconnect.
     expect(source.readyState).toBe(FakeEventSource.CLOSED);
+  });
+
+  it("keeps the focused job's step and degraded outcome in the top bar", async () => {
+    const { source, user } = await launchTrackedJob();
+    const progress = screen.getByLabelText("Current session job progress");
+
+    act(() => source.emit("job.started", frame("job.started", "job_1")));
+    act(() =>
+      source.emit("step_started", frame("step_started", "profile_dataset")),
+    );
+    expect(progress).toHaveTextContent("EDA · Reading data");
+
+    act(() =>
+      source.emit("budget_degraded", {
+        ...frame("budget_degraded", "job_1"),
+        summary: { degraded: true, reason: "Budget guard switched to a smaller model" },
+      }),
+    );
+    expect(progress).toHaveTextContent("EDA · degraded");
+
+    await user.hover(screen.getByLabelText(/EDA · degraded\. Degraded/));
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip.parentElement).toBe(document.body);
+    expect(tooltip).toHaveClass("z-[45]");
+    expect(tooltip).toHaveTextContent("Reading data");
+    expect(tooltip).toHaveTextContent(
+      "Budget guard switched to a smaller model",
+    );
+
+    act(() => source.emit("job.completed", frame("job.completed", "job_1")));
+    expect(progress).toHaveTextContent("EDA · degraded");
   });
 
   it("uses separate Activity and Event log sections", async () => {
@@ -313,7 +344,7 @@ describe("Activity center with job SSE", () => {
 
     act(() => source.emit("job.completed", frame("job.completed", "job_1")));
 
-    expect(await screen.findByText("Analysis completed.")).toBeInTheDocument();
+    expect(screen.queryByText("Analysis completed.")).not.toBeInTheDocument();
     expect(source.readyState).toBe(FakeEventSource.CLOSED);
   });
 
@@ -442,7 +473,7 @@ describe("Activity center with job SSE", () => {
 
     act(() => source.emit("job.cancelled", frame("job.cancelled", "job_1")));
     expect(screen.getByText("Cancelled")).toBeInTheDocument();
-    expect(await screen.findByText("Analysis cancelled.")).toBeInTheDocument();
+    expect(screen.queryByText("Analysis cancelled.")).not.toBeInTheDocument();
   });
 
   /* Opening a finished run's table queues a column scan. That is a page-level

@@ -90,6 +90,14 @@ describe("Data Map with real API", () => {
     // The dataset card proves the independent session and datasets requests
     // both settled; metric labels also occur in the Inspector.
     expect(await screen.findByText("sample.csv")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Table inventory/ })).toHaveTextContent(
+      "1 table",
+    );
+    expect(
+      screen.queryByText(
+        "Scan shape, field mix and readiness here; open a focused workspace for row or issue details.",
+      ),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Preview sample.csv" }),
     ).toHaveAttribute("href", "/projects/p1/sessions/r1/table/sample");
@@ -383,7 +391,9 @@ describe("Table Preview with real API", () => {
 
     expect(await screen.findByText("row-0")).toBeInTheDocument();
     expect(screen.getByText("int64")).toBeInTheDocument();
-    expect(screen.getByText("Showing 3 of 3 columns")).toBeInTheDocument();
+    expect(
+      screen.getByText("Loaded page · 3 of 3 columns"),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Rows 1–100/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Prev" })).toBeDisabled();
 

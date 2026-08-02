@@ -561,7 +561,7 @@ export function Component() {
   const busy = stream.phase === "connecting" || stream.phase === "running";
 
   return (
-    <div className="mx-auto flex h-full min-h-0 w-[90%] max-w-data flex-col gap-3 overflow-hidden p-3 sm:p-6">
+    <div className="mx-auto flex h-full min-h-0 w-[95%] max-w-data flex-col gap-3 overflow-hidden p-3 sm:p-6">
       <header className="flex shrink-0 flex-col gap-1">
         <h1 className="text-xl font-semibold">Chat</h1>
         <p className="text-sm text-status-neutral">

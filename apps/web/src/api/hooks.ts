@@ -107,7 +107,11 @@ export const queryKeys = {
 
 export const CHAT_PAGE_SIZE = 50;
 
-export const CHARTS_PAGE_SIZE = 50;
+/* The gallery only mounts six visual cards at a time. Fetch enough metadata
+ * to find analytical charts even when profile diagnostics were recorded
+ * first; individual Vega specs remain deferred until a visible card enters
+ * the viewport. */
+export const CHARTS_PAGE_SIZE = 100;
 
 export function useProjects() {
   return useQuery({
@@ -426,6 +430,7 @@ export function useJob(jobId: string) {
   return useQuery({
     queryKey: queryKeys.job(jobId),
     queryFn: ({ signal }) => api.getJob(jobId, signal),
+    enabled: Boolean(jobId),
     staleTime: Infinity,
   });
 }

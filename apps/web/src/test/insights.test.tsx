@@ -37,7 +37,9 @@ describe("Quality page", () => {
 
     expect(await screen.findByText("Column value is empty.")).toBeInTheDocument();
     expect(screen.getByLabelText("Dataset")).toHaveValue("sample");
-    expect(screen.getByLabelText("Severity")).toHaveValue("critical");
+    expect(
+      screen.getByRole("button", { name: "Critical", pressed: true }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText(/empty_column \(1\)/)).toBeChecked();
     expect(screen.getByLabelText(/high_missing \(1\)/)).not.toBeChecked();
     expect(
@@ -45,34 +47,27 @@ describe("Quality page", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders KPIs, dataset cards, and the issue table", async () => {
+  it("renders a metric strip, dataset scope, and the issue queue", async () => {
     renderAppAt("/projects/p1/sessions/r1/quality");
 
     expect(
       await screen.findByText("Column value is empty."),
     ).toBeInTheDocument();
-    /* "Critical" appears as KPI label and issue-table badge. */
+    /* "Critical" appears as metric label and issue-group heading. */
     expect(screen.getAllByText("Critical").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("Critical: 1")).toBeInTheDocument();
-    expect(screen.getByText("Info: 1")).toBeInTheDocument();
-    expect(screen.getByText("empty_column")).toBeInTheDocument();
+    expect(screen.getAllByText("Critical")[0]?.parentElement).toHaveTextContent("1");
+    expect(screen.getAllByText("Info")[0]?.parentElement).toHaveTextContent("1");
+    expect(screen.getAllByText("empty_column").length).toBeGreaterThanOrEqual(1);
     expect(
       screen.getByText("Column id looks like an identifier."),
     ).toBeInTheDocument();
     expect(screen.getByText("Affected datasets")).toBeInTheDocument();
     expect(screen.getByText("Affected fields")).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", {
-        level: 2,
-        name: "Review 1 critical flag first",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Inspect highest-priority table" }),
-    ).toHaveAttribute("href", "/projects/p1/sessions/r1/table/sample");
-    expect(
-      screen.getByRole("link", { name: "Review cleaning options" }),
-    ).toHaveAttribute("href", "/projects/p1/sessions/r1/cleaning");
+    expect(screen.getByRole("heading", { name: "Issue queue" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Inspect rows" })[0]).toHaveAttribute(
+      "href",
+      "/projects/p1/sessions/r1/table/sample",
+    );
   });
 
   it("filters issues by dataset id and severity", async () => {
@@ -91,7 +86,7 @@ describe("Quality page", () => {
       screen.getByText("Column id looks like an identifier."),
     ).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText("Severity"), "critical");
+    await user.click(screen.getByRole("button", { name: "Critical" }));
     expect(
       screen.getByText("No issues match the selected filters"),
     ).toBeInTheDocument();
@@ -111,7 +106,7 @@ describe("Quality page", () => {
     await screen.findByText("Column value is empty.");
 
     await user.selectOptions(screen.getByLabelText("Dataset"), "other");
-    await user.selectOptions(screen.getByLabelText("Severity"), "info");
+    await user.click(screen.getByRole("button", { name: "Info" }));
     const savedLocation =
       router.state.location.pathname + router.state.location.search;
     const params = new URLSearchParams(router.state.location.search);
@@ -121,7 +116,9 @@ describe("Quality page", () => {
     view.unmount();
     renderAppAt(savedLocation);
     expect(await screen.findByLabelText("Dataset")).toHaveValue("other");
-    expect(screen.getByLabelText("Severity")).toHaveValue("info");
+    expect(
+      screen.getByRole("button", { name: "Info", pressed: true }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Column id looks like an identifier.")).toBeInTheDocument();
   });
 
@@ -141,14 +138,29 @@ describe("Quality page", () => {
       screen.getByText("Column name has 40% missing values."),
     ).toBeInTheDocument();
 
-    // Unchecking every code falls back to "no filter" — same quirk as the
-    // Empty selection means no filter (`!selected || row.code in selected`).
+    // Empty is a real filter state, not an accidental reset to every code.
     await user.click(screen.getByLabelText(/high_missing \(1\)/));
     await user.click(screen.getByLabelText(/likely_id \(1\)/));
-    expect(screen.getByText("Column value is empty.")).toBeInTheDocument();
     expect(
-      screen.getByText("Column id looks like an identifier."),
+      screen.getByText("No issues match the selected filters"),
     ).toBeInTheDocument();
+  });
+
+  it("closes the issue-type menu when focus moves outside it", async () => {
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/quality");
+    await screen.findByText("Column value is empty.");
+
+    const trigger = screen.getByText(/Issue types/, { selector: "summary" });
+    const menu = trigger?.closest("details");
+    expect(trigger).not.toBeNull();
+    expect(menu).not.toBeNull();
+
+    await user.click(trigger!);
+    expect(menu).toHaveAttribute("open");
+
+    await user.click(screen.getByRole("heading", { name: "Issue queue" }));
+    expect(menu).not.toHaveAttribute("open");
   });
 
   /* The page leads with severity, worst first, and every row reaches its
@@ -163,16 +175,23 @@ describe("Quality page", () => {
     expect(groups).toEqual(["Critical", "Warning", "Info"]);
 
     expect(
+      screen.getByRole("heading", { level: 3, name: "Critical" }).closest("details"),
+    ).toHaveAttribute("open");
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Warning" }).closest("details"),
+    ).not.toHaveAttribute("open");
+
+    expect(
       screen.getAllByRole("link", { name: "Inspect rows" })[0],
     ).toHaveAttribute("href", "/projects/p1/sessions/r1/table/sample");
   });
 
-  it("scopes the issue list to a dataset picked from the ranked list", async () => {
+  it("scopes the issue list from the shared dataset selector", async () => {
     const user = userEvent.setup();
     renderAppAt("/projects/p1/sessions/r1/quality");
     await screen.findByText("Column value is empty.");
 
-    await user.click(screen.getByRole("button", { name: /other\.csv/ }));
+    await user.selectOptions(screen.getByLabelText("Dataset"), "other");
     expect(screen.queryByText("Column value is empty.")).not.toBeInTheDocument();
     expect(
       screen.getByText("Column id looks like an identifier."),
@@ -232,54 +251,110 @@ describe("Quality page", () => {
   });
 });
 
-describe("Profiles & Charts page", () => {
-  const chartsUrl = "/projects/p1/sessions/r1/profiles?view=charts";
+describe("Profiles and Charts pages", () => {
+  const chartsUrl = "/projects/p1/sessions/r1/charts";
 
   it("restores dataset, search, type, and sort context from the URL", async () => {
     renderAppAt(
-      "/projects/p1/sessions/r1/profiles?dataset=sample&q=value&kind=numeric&sort=name",
+      "/projects/p1/sessions/r1/profiles?dataset=sample&q=value&kind=numeric&sort=name-asc",
     );
 
     expect(await screen.findByDisplayValue("value")).toBeInTheDocument();
-    expect(screen.getByLabelText("Sort")).toHaveValue("name");
+    expect(
+      screen.getByRole("button", { name: "Column" }).closest("th"),
+    ).toHaveAttribute("aria-sort", "ascending");
     expect(
       screen.getByRole("button", { name: /numeric/i }),
     ).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByText("1 of 3 columns")).toBeInTheDocument();
+    expect(screen.getByText("1 / 3")).toBeInTheDocument();
     expect(screen.getAllByText("value").length).toBeGreaterThan(0);
   });
 
-  it("opens on field evidence and keeps charts in a separate task", async () => {
+  it("opens the merged workspace directly on field evidence", async () => {
     renderAppAt("/projects/p1/sessions/r1/profiles");
 
     expect(
-      await screen.findByRole("heading", { name: "Field profiles" }),
+      await screen.findByRole("heading", { name: "Profiles & charts" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Field profiles" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(screen.getByRole("tab", { name: "Charts" })).toHaveAttribute(
-      "aria-selected",
-      "false",
-    );
-    expect((await screen.findAllByText("sample.csv")).length).toBeGreaterThan(0);
-    expect(screen.getByText("categorical: 1")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Dataset")).toHaveValue("sample");
+    expect(
+      screen.getByRole("button", { name: "Profile", pressed: true }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Field mix")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tables profiled")).not.toBeInTheDocument();
     /* Field rows with formatted percents; null unique% renders empty. */
     expect(screen.getByText("40.0%")).toBeInTheDocument();
     expect(screen.queryByText("Value by name")).not.toBeInTheDocument();
   });
 
-  it("restores the charts task from the URL", async () => {
+  it("redirects the legacy Charts route into the merged chart view", async () => {
+    const { router } = renderAppWithRouterAt(chartsUrl);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Profiles & charts" })).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/projects/p1/sessions/r1/profiles");
+    expect(
+      await screen.findByRole("button", { name: "Charts", pressed: true }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Value by name")).toBeInTheDocument();
+    expect(screen.getByText("Value by name")).toBeInTheDocument();
+    expect(screen.getByText("Value over id")).toBeInTheDocument();
+  });
+
+  it("keeps a legacy charts switch URL in the merged workspace", async () => {
+    const { router } = renderAppWithRouterAt(
+      "/projects/p1/sessions/r1/profiles?view=charts&split=chart_1%2Cchart_2",
+    );
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Profiles & charts" }),
+    ).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(
+      "/projects/p1/sessions/r1/profiles",
+    );
+    expect(router.state.location.search).toContain("split=chart_1%2Cchart_2");
+    expect(router.state.location.search).toContain("view=charts");
+  });
+
+  it("keeps single-field diagnostics in profiles instead of repeating them in the chart gallery", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/charts", () =>
+        HttpResponse.json({
+          items: [
+            {
+              artifact_id: "chart_1",
+              title: "Value by name",
+              dataset_id: "sample",
+              dataset_name: "sample.csv",
+              mark: "bar",
+              fields: ["name", "value"],
+              description: "Demo bar chart.",
+            },
+            {
+              artifact_id: "distribution_value",
+              title: "Distribution of value",
+              dataset_id: "sample",
+              dataset_name: "sample.csv",
+              mark: "bar",
+              fields: ["value"],
+              description: "Single-field diagnostic.",
+            },
+          ],
+          next_cursor: null,
+        }),
+      ),
+    );
+
     renderAppAt(chartsUrl);
 
     expect(await screen.findByText("Value by name")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Charts" })).toHaveAttribute(
-      "aria-selected",
-      "true",
+    expect(screen.queryByText("Distribution of value")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/1 distribution or top-value chart.*available in Profile and Quality/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Review missingness" })).toHaveAttribute(
+      "href",
+      "/projects/p1/sessions/r1/quality?dataset=sample",
     );
-    expect(screen.getByText("Value by name")).toBeInTheDocument();
-    expect(screen.getByText("Value over id")).toBeInTheDocument();
   });
 
   it("hands each chart spec to vega-embed with the theme config", async () => {
@@ -444,7 +519,7 @@ describe("Profiles & Charts page", () => {
 
     view.unmount();
     renderAppAt(
-      "/projects/p1/sessions/r1/profiles?view=charts&split=chart_1%2Cchart_2",
+      "/projects/p1/sessions/r1/charts?split=chart_1%2Cchart_2",
     );
     const restored = await screen.findByRole("region", {
       name: "Linked chart split view",
@@ -496,7 +571,7 @@ describe("Profiles & Charts page", () => {
     );
 
     renderAppAt(
-      "/projects/p1/sessions/r1/profiles?view=charts&split=chart_1%2Cchart_2",
+      "/projects/p1/sessions/r1/charts?split=chart_1%2Cchart_2",
     );
     const split = await screen.findByRole("region", {
       name: "Linked chart split view",
@@ -558,7 +633,7 @@ describe("Profiles dataset selection", () => {
     expect(await screen.findByText("alpha")).toBeInTheDocument();
     expect(screen.queryByText("gamma")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /other\.csv/ }));
+    await user.selectOptions(screen.getByLabelText("Dataset"), "other");
     expect(await screen.findByText("gamma")).toBeInTheDocument();
     expect(screen.queryByText("alpha")).not.toBeInTheDocument();
   });
@@ -570,9 +645,10 @@ describe("Profiles dataset selection", () => {
     );
     await screen.findByText("alpha");
 
-    await user.click(screen.getByRole("button", { name: /other\.csv/ }));
+    await user.selectOptions(screen.getByLabelText("Dataset"), "other");
+    await user.click(screen.getByRole("button", { name: "Find column" }));
     await user.type(screen.getByLabelText("Find column"), "gam");
-    await user.selectOptions(screen.getByLabelText("Sort"), "name");
+    await user.click(screen.getByRole("button", { name: "Column" }));
     await user.click(screen.getByRole("button", { name: "numeric 1" }));
     const savedLocation =
       router.state.location.pathname + router.state.location.search;
@@ -581,13 +657,15 @@ describe("Profiles dataset selection", () => {
       dataset: "other",
       kind: "numeric",
       q: "gam",
-      sort: "name",
+      sort: "name-asc",
     });
 
     view.unmount();
     renderAppAt(savedLocation);
     expect(await screen.findByDisplayValue("gam")).toBeInTheDocument();
-    expect(screen.getByLabelText("Sort")).toHaveValue("name");
+    expect(
+      screen.getByRole("button", { name: "Column" }).closest("th"),
+    ).toHaveAttribute("aria-sort", "ascending");
     expect(screen.getByRole("button", { name: "numeric 1" })).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -599,6 +677,7 @@ describe("Profiles dataset selection", () => {
     renderAppAt("/projects/p1/sessions/r1/profiles");
     await screen.findByText("alpha");
 
+    fireEvent.click(screen.getByRole("button", { name: "Find column" }));
     fireEvent.change(screen.getByLabelText("Find column"), {
       target: { value: "bet" },
     });
@@ -617,12 +696,10 @@ describe("Profiles dataset selection", () => {
   });
 });
 
-/* Chart grouping: ported from _render_chart_artifacts in
- * Chart gallery — group by dataset_id, sort groups by
- * dataset display name, one bordered container + "Dataset: {name}" header
- * per group, 2-column grid only when the group has more than one chart. */
+/* Chart gallery: datasets are sorted by display name and selected one at a
+ * time, avoiding a long stack of unrelated chart groups. */
 describe("Charts grouped by dataset", () => {
-  const chartsUrl = "/projects/p1/sessions/r1/profiles?view=charts";
+  const chartsUrl = "/projects/p1/sessions/r1/charts";
   const GROUPED_CHARTS = [
     {
       artifact_id: "b_chart_1",
@@ -658,49 +735,92 @@ describe("Charts grouped by dataset", () => {
       http.get("/api/v1/sessions/:sessionId/charts", () =>
         HttpResponse.json({ items: GROUPED_CHARTS, next_cursor: null }),
       ),
+      http.get("/api/v1/sessions/:sessionId/profiles", () =>
+        HttpResponse.json({
+          session_id: "r1",
+          datasets: [
+            {
+              dataset_id: "ds_2",
+              name: "Alpha",
+              rows: 20,
+              columns: 2,
+              semantic_type_counts: { numeric: 2 },
+              fields: [],
+            },
+            {
+              dataset_id: "ds_1",
+              name: "Bravo",
+              rows: 10,
+              columns: 2,
+              semantic_type_counts: { numeric: 2 },
+              fields: [],
+            },
+          ],
+        }),
+      ),
     );
   });
 
-  it("groups same-dataset charts together, keeps different datasets apart, titles each group, and sorts groups by dataset display name", async () => {
+  it("uses the shared dataset selector and initially shows one dataset", async () => {
     renderAppAt(chartsUrl);
 
-    /* dataset_id order is ds_1 (Bravo) then ds_2 (Alpha), but Alpha sorts
-     * first: the sort key is the display name, not id or encounter order. */
-    const groupHeadings = await screen.findAllByText(/^Dataset: /);
-    expect(groupHeadings.map((el) => el.textContent)).toEqual([
-      "Dataset: Alpha",
-      "Dataset: Bravo",
-    ]);
+    const dataset = await screen.findByLabelText("Dataset");
+    expect(dataset).toHaveValue("ds_2");
+    expect(within(dataset).getByRole("option", { name: "Alpha" })).toBeInTheDocument();
+    expect(within(dataset).getByRole("option", { name: "Bravo" })).toBeInTheDocument();
+    expect(screen.getByText("A Chart One")).toBeInTheDocument();
+    expect(screen.getByText("A Chart Two")).toBeInTheDocument();
+    expect(screen.queryByText("B Chart One")).not.toBeInTheDocument();
+  });
 
-    const alphaGroup = groupHeadings[0]!.closest("div")!;
-    const bravoGroup = groupHeadings[1]!.closest("div")!;
+  it("shows six chart cards at a time and exposes Load more", async () => {
+    const requestedLimits: string[] = [];
+    const manyCharts = Array.from({ length: 7 }, (_, index) => ({
+      artifact_id: `a_chart_${index + 1}`,
+      title: `A Chart ${index + 1}`,
+      dataset_id: "ds_2",
+      dataset_name: "Alpha",
+      mark: "bar",
+      fields: ["x", "y"],
+      description: "",
+    }));
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/charts", ({ request }) => {
+        requestedLimits.push(new URL(request.url).searchParams.get("limit") ?? "");
+        return HttpResponse.json({ items: manyCharts, next_cursor: null });
+      }),
+    );
 
-    expect(within(alphaGroup).getByText("A Chart One")).toBeInTheDocument();
-    expect(within(alphaGroup).getByText("A Chart Two")).toBeInTheDocument();
+    renderAppAt(chartsUrl);
+
+    await screen.findByText("A Chart 1");
+    expect(requestedLimits).toEqual(["100"]);
+    expect(screen.getByText("A Chart 6")).toBeInTheDocument();
+    expect(screen.queryByText("A Chart 7")).not.toBeInTheDocument();
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "Load more charts" }),
+    );
+    expect(screen.getByText("A Chart 7")).toBeInTheDocument();
     expect(
-      within(alphaGroup).queryByText("B Chart One"),
+      screen.queryByRole("button", { name: "Load more charts" }),
     ).not.toBeInTheDocument();
-    expect(within(bravoGroup).getByText("B Chart One")).toBeInTheDocument();
-    expect(within(bravoGroup).queryByText(/^A Chart/)).not.toBeInTheDocument();
   });
 
-  it("grids a multi-chart group into 2 columns but leaves a single-chart group without a grid", async () => {
+  it("switches the visible chart group when another dataset is selected", async () => {
+    const user = userEvent.setup();
     renderAppAt(chartsUrl);
 
-    const groupHeadings = await screen.findAllByText(/^Dataset: /);
-    const alphaGroup = groupHeadings[0]!.closest("div")!; // 2 charts
-    const bravoGroup = groupHeadings[1]!.closest("div")!; // 1 chart
-
-    expect(alphaGroup.querySelector(".grid")).not.toBeNull();
-    expect(bravoGroup.querySelector(".grid")).toBeNull();
+    await user.selectOptions(await screen.findByLabelText("Dataset"), "ds_1");
+    expect(await screen.findByText("B Chart One")).toBeInTheDocument();
+    expect(screen.queryByText("A Chart One")).not.toBeInTheDocument();
   });
 
-  it("drops the redundant per-card dataset name now that the group header carries it", async () => {
+  it("drops redundant dataset headings from chart cards", async () => {
     renderAppAt(chartsUrl);
-    await screen.findByText("Dataset: Alpha");
+    expect(await screen.findByLabelText("Dataset")).toHaveValue("ds_2");
 
-    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
-    expect(screen.queryByText("Bravo")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Alpha" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Bravo" })).not.toBeInTheDocument();
   });
 });
 
@@ -709,10 +829,10 @@ describe("Charts grouped by dataset", () => {
  * default fixture dataset "sample" has columns id (int64), name (string),
  * value (float64) — see handlers.ts `sampleColumns`. */
 describe("Custom chart builder", () => {
-  const chartsUrl = "/projects/p1/sessions/r1/profiles?view=charts";
+  const chartsUrl = "/projects/p1/sessions/r1/charts";
 
   async function openBuilder(user: ReturnType<typeof userEvent.setup>) {
-    const toggle = await screen.findByRole("button", { name: "Open builder" });
+    const toggle = await screen.findByRole("button", { name: "Build a custom chart" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     await user.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -790,41 +910,18 @@ describe("Custom chart builder", () => {
     expect(optionValues).toEqual(["id", "value"]); // "name" (string) excluded
   });
 
-  /* _dataset_display_labels only disambiguates collisions, so a unique name
-   * must stay clean while duplicates gain an id suffix. */
-  it("suffixes only same-named datasets in the picker", async () => {
-    const base = {
-      project_id: "p1",
-      original_uri: "upload://sales.csv",
-      format: "csv",
-      content_hash: "aa",
-      byte_size: 10,
-      row_count: 10,
-      schema: [{ name: "amount", dtype: "float64" }],
-      ingest_status: "ready",
-    };
-    server.use(
-      http.get("/api/v1/sessions/:sessionId/datasets", () =>
-        HttpResponse.json([
-          { ...base, dataset_id: "ds_aaaaaa111111", display_name: "sales.csv" },
-          { ...base, dataset_id: "ds_bbbbbb222222", display_name: "sales.csv" },
-          { ...base, dataset_id: "ds_cccccc333333", display_name: "refunds.csv" },
-        ]),
-      ),
-    );
+  it("reuses the workspace dataset instead of rendering a second picker", async () => {
     const user = userEvent.setup();
     renderAppAt(chartsUrl);
     await openBuilder(user);
 
-    const picker = await screen.findByRole("combobox", { name: "Dataset" });
-    const labels = within(picker)
-      .getAllByRole("option")
-      .map((option) => option.textContent);
-    expect(labels).toEqual([
-      "sales.csv (111111)",
-      "sales.csv (222222)",
-      "refunds.csv",
-    ]);
+    expect(screen.getAllByRole("combobox", { name: "Dataset" })).toHaveLength(1);
+    const selectedName = screen.getAllByText("sample.csv").find(
+      (node) => node.closest("p")?.textContent?.includes("Building from"),
+    );
+    expect(selectedName?.closest("p")).toHaveTextContent(
+      "Building from sample.csv, the dataset selected above.",
+    );
   });
 
   it("blocks histogram when no numeric column exists", async () => {

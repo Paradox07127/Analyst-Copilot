@@ -748,7 +748,7 @@ export function Component() {
   };
 
   return (
-    <div className="mx-auto flex w-[90%] max-w-data min-w-0 flex-col gap-4 p-6">
+    <div className="mx-auto flex w-[95%] max-w-data min-w-0 flex-col gap-4 p-6">
       <header className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold">Investigation board</h1>
         {/* The board belongs to the project, not to the session in the URL — every

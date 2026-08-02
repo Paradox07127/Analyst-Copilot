@@ -1,9 +1,8 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router";
 import { useDatasets, useEdaHandoff, useSessionDetail } from "../../api/hooks";
 import { readBaseline } from "../../features/compare/baseline-storage";
 import {
-  projectComparePath,
   sessionBasePath,
   sessionSectionPath,
   tablePath,
@@ -20,7 +19,6 @@ interface NavPage {
 interface NavGroup {
   title: string;
   pages: NavPage[];
-  state?: StageState;
 }
 
 type StageState = "ready" | "running" | "waiting";
@@ -32,40 +30,31 @@ const FINISHED_SESSION_STATUSES = new Set([
   "cancelled",
 ]);
 
-const STAGE_LABEL: Record<StageState, string> = {
-  ready: "Ready",
-  running: "Running",
-  waiting: "Waiting",
-};
-
-const STAGE_DOT: Record<StageState, string> = {
-  ready: "bg-status-ok",
-  running: "animate-breathe bg-status-warn",
-  waiting: "bg-status-neutral/45",
-};
-
 /* Three stages of work, in the order a session moves through them. Board sits
  * with the investigation pages because it is the kanban over them; Trace & cost
  * and Artifacts sit together because both answer "where did this number come
  * from". */
-function useNavGroups(
+function buildNavGroups(
   projectId: string,
   sessionId: string,
-  readiness: { data: StageState; agent: StageState },
+  firstDatasetId?: string,
 ): NavGroup[] {
-  const datasets = useDatasets(sessionId);
-  const firstDatasetId = datasets.data?.[0]?.dataset_id;
   const at = (section: string) => sessionSectionPath(projectId, sessionId, section);
   const pinned = readBaseline(projectId);
-  const comparePath =
+  /* Compare belongs to the current run's workbench, not a project-level
+   * standalone surface. Keeping the session path preserves the top context,
+   * section navigation and Inspector while the query still names both sides
+   * of the comparison. */
+  const compareParams = new URLSearchParams(
     pinned && pinned !== sessionId
-      ? projectComparePath(projectId, pinned, sessionId)
-      : projectComparePath(projectId, sessionId);
+      ? { left: pinned, right: sessionId }
+      : { left: sessionId },
+  );
+  const comparePath = `${at("compare")}?${compareParams.toString()}`;
 
   return [
     {
       title: "Understand the data",
-      state: readiness.data,
       pages: [
         { label: "Data map", icon: "dashboard", to: at("data-map") },
         ...(firstDatasetId
@@ -81,9 +70,9 @@ function useNavGroups(
             ]
           : []),
         { label: "Quality", icon: "rule", to: at("quality") },
-        { label: "Profiles & charts", icon: "chart", to: at("profiles") },
+        { label: "Profiles & charts", icon: "profile", to: at("profiles") },
         {
-          label: "Cleaning info and raw data",
+          label: "Cleanup",
           icon: "cleaning",
           to: at("cleaning"),
         },
@@ -93,7 +82,6 @@ function useNavGroups(
     },
     {
       title: "Investigate with the agent",
-      state: readiness.agent,
       pages: [
         { label: "Questions", icon: "quiz", to: at("questions") },
         { label: "Deep analysis", icon: "analytics", to: at("deep-analysis") },
@@ -126,17 +114,19 @@ function useNavGroups(
 /* A handoff is more trustworthy than a session's coarse lifecycle status:
  * auto-EDA publishes it when the data surfaces are safe to browse, while the
  * agent can still be drafting questions and the report afterwards. */
-function usePipelineReadiness(sessionId: string): {
+function usePipelineReadiness(sessionId: string, hasDatasets: boolean): {
   data: StageState;
   agent: StageState;
-  active: boolean;
 } {
   const session = useSessionDetail(sessionId);
   const edaHandoff = useEdaHandoff(sessionId);
   const status = session.data?.status?.toLowerCase();
   const finished = status ? FINISHED_SESSION_STATUSES.has(status) : false;
   const completed = status === "complete" || status === "completed";
-  const dataReady = Boolean(edaHandoff.data) || completed;
+  /* A failed or cancelled run can still leave a complete, browseable dataset
+   * workspace behind. The data itself is stronger evidence than the coarse
+   * session status, so do not lock users out of partial EDA results. */
+  const dataReady = Boolean(edaHandoff.data) || completed || hasDatasets;
   const active = Boolean(status && !finished);
 
   useEffect(() => {
@@ -151,7 +141,6 @@ function usePipelineReadiness(sessionId: string): {
   return {
     data: dataReady ? "ready" : active ? "running" : "waiting",
     agent: completed ? "ready" : dataReady && active ? "running" : "waiting",
-    active,
   };
 }
 
@@ -159,7 +148,7 @@ function usePipelineReadiness(sessionId: string): {
  * panel so the session rail and the Inspector keep their full height, and the
  * rail stays a session switcher rather than competing with 17 page links. */
 const barClass =
-  "flex min-w-0 shrink-0 flex-col gap-1 border-b border-border bg-bg px-3 pt-2 pb-1.5 sm:px-4";
+  "relative z-30 flex min-w-0 shrink-0 flex-col gap-1 overflow-visible border-b border-border bg-bg px-3 py-1.5 sm:px-4";
 
 const itemClass = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-1.5 rounded-base px-2 py-1 text-sm transition-colors duration-150 ease-out-quart ${
@@ -192,17 +181,19 @@ function unavailableReason(
     : "The agent is still preparing this analysis.";
 }
 
-/* Deliberately no step numbers: the three stages are an order of work, not a
- * progress bar, and a numbered chip claims a completion state nothing here
- * measures. The chevrons carry the sequence; type weight carries the state. */
-function StageButton({
+/* The stage menu is intentionally on-demand. It is navigation rather than a
+ * progress meter, so a compact current-stage trigger carries orientation at
+ * rest and the full three-way choice only takes space while needed. */
+function StagePickerButton({
   group,
+  index,
   selected,
   current,
   panelId,
   onSelect,
 }: {
   group: NavGroup;
+  index: number;
   selected: boolean;
   current: boolean;
   panelId: string;
@@ -214,57 +205,23 @@ function StageButton({
       onClick={onSelect}
       aria-current={current ? "true" : undefined}
       aria-controls={panelId}
-      className={`flex items-center gap-1.5 rounded-base px-1.5 py-0.5 text-xs transition-colors duration-150 ease-out-quart ${
+      aria-label={`Show ${group.title} pages`}
+      className={`flex items-center gap-1.5 rounded-base border px-2.5 py-1.5 text-sm transition-colors duration-150 ease-out-quart ${
         selected
-          ? "font-semibold text-primary"
-          : "text-status-neutral hover:text-text"
+          ? "border-primary/30 bg-primary/10 font-semibold text-primary"
+          : "border-transparent text-status-neutral hover:bg-surface hover:text-text"
       }`}
     >
-      {group.title}
-      {group.state && (
-        <span
-          aria-hidden
-          title={STAGE_LABEL[group.state]}
-          className="ml-0.5 flex items-center gap-1 text-[10px] font-medium text-status-neutral"
-        >
-          <span className={`size-1.5 rounded-full ${STAGE_DOT[group.state]}`} />
-          {STAGE_LABEL[group.state]}
-        </span>
-      )}
+      <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full border border-current/25 font-mono text-[11px]">
+        {index + 1}
+      </span>
+      <span>{group.title}</span>
       {/* Only when the two diverge: looking ahead at another stage must not
        * make the bar forget which stage the open page belongs to. */}
       {current && !selected && (
         <span aria-hidden className="size-1.5 rounded-full bg-primary" />
       )}
     </button>
-  );
-}
-
-function ProgressNotice({
-  data,
-  agent,
-}: {
-  data: StageState;
-  agent: StageState;
-}) {
-  return (
-    <div
-      role="status"
-      className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-base bg-status-warn/10 px-2 py-1.5 text-xs text-status-neutral"
-    >
-      <span className="font-medium text-text">Analysis is still running</span>
-      <span className="flex items-center gap-1">
-        <span aria-hidden className={`size-1.5 rounded-full ${STAGE_DOT[data]}`} />
-        EDA {STAGE_LABEL[data].toLowerCase()}
-      </span>
-      <span className="flex items-center gap-1">
-        <span aria-hidden className={`size-1.5 rounded-full ${STAGE_DOT[agent]}`} />
-        Agent {STAGE_LABEL[agent].toLowerCase()}
-      </span>
-      <span className="text-status-neutral/80">
-        Live progress is in the floating button at bottom right.
-      </span>
-    </div>
   );
 }
 
@@ -275,10 +232,21 @@ function SessionNavGroups({
   projectId: string;
   sessionId: string;
 }) {
-  const readiness = usePipelineReadiness(sessionId);
-  const groups = useNavGroups(projectId, sessionId, readiness);
+  const datasets = useDatasets(sessionId);
+  const readiness = usePipelineReadiness(
+    sessionId,
+    Boolean(datasets.data?.length),
+  );
+  const groups = buildNavGroups(
+    projectId,
+    sessionId,
+    datasets.data?.[0]?.dataset_id,
+  );
   const { pathname } = useLocation();
   const panelId = useId();
+  const pickerId = useId();
+  const navRef = useRef<HTMLElement>(null);
+  const [stagePickerOpen, setStagePickerOpen] = useState(false);
   /* Stamped with the route it was chosen on, and compared during render rather
    * than cleared by an effect: an effect runs after commit, so the first render
    * on a new route would still show the stage picked on the previous one. */
@@ -293,62 +261,114 @@ function SessionNavGroups({
   const selected =
     groups.find((group) => group.title === lookahead) ?? currentGroup;
 
+  useEffect(() => {
+    setStagePickerOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    const activeLink = navRef.current?.querySelector<HTMLAnchorElement>(
+      'a[aria-current="page"]',
+    );
+    activeLink?.scrollIntoView?.({ block: "nearest", inline: "center" });
+  }, [pathname, selected.title]);
+
+  useEffect(() => {
+    if (!stagePickerOpen) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!navRef.current?.contains(event.target as Node)) {
+        setStagePickerOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setStagePickerOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [stagePickerOpen]);
+
   return (
-    <nav aria-label="Session sections" className={barClass}>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5">
-        {groups.map((group, index) => (
-          <div key={group.title} className="flex items-center gap-1">
-            {index > 0 && (
-              <span aria-hidden className="text-xs text-status-neutral/40">
-                ›
-              </span>
-            )}
-            <StageButton
+    <nav ref={navRef} aria-label="Session sections" className={barClass}>
+      <div className="flex min-w-0 items-center gap-2">
+        <button
+          type="button"
+          aria-expanded={stagePickerOpen}
+          aria-controls={pickerId}
+          aria-current={selected.title === currentGroup.title ? "true" : undefined}
+          onClick={() => setStagePickerOpen((open) => !open)}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-base px-2 py-1.5 text-[15px] font-semibold text-text transition-colors duration-150 ease-out-quart hover:bg-surface hover:text-primary focus-visible:outline-offset-1"
+        >
+          {selected.title}
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 16 16"
+            width="14"
+            height="14"
+            className={`shrink-0 transition-transform duration-150 ${stagePickerOpen ? "rotate-180" : ""}`}
+          >
+            <path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
+        <ul
+          id={panelId}
+          aria-label={selected.title}
+          className="flex min-w-0 flex-1 items-center gap-x-0.5 overflow-x-auto"
+        >
+          {selected.pages.map((page) => {
+            const active = pageMatches(pathname, page);
+            const reason = unavailableReason(selected.title, readiness);
+            return (
+              <li key={page.to} className="shrink-0">
+                {reason ? (
+                  <span
+                    aria-disabled="true"
+                    title={reason}
+                    className="flex cursor-not-allowed items-center gap-1.5 rounded-base px-2 py-1 text-sm text-status-neutral/50"
+                  >
+                    <NavIcon name={page.icon} />
+                    {page.label}
+                  </span>
+                ) : (
+                  <Link
+                    to={page.to}
+                    aria-current={active ? "page" : undefined}
+                    className={itemClass({ isActive: active })}
+                  >
+                    <NavIcon name={page.icon} />
+                    {page.label}
+                  </Link>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+      {stagePickerOpen && (
+        <div
+          id={pickerId}
+          aria-label="Choose a work stage"
+          className="animate-enter absolute left-3 top-[calc(100%+0.25rem)] z-40 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-1 rounded-base border border-border bg-surface p-2 shadow-overlay"
+        >
+          {groups.map((group, index) => (
+            <StagePickerButton
+              key={group.title}
               group={group}
+              index={index}
               selected={group.title === selected.title}
               current={group.title === currentGroup.title}
               panelId={panelId}
-              onSelect={() => setBrowsing({ pathname, title: group.title })}
+              onSelect={() => {
+                setBrowsing({ pathname, title: group.title });
+                setStagePickerOpen(false);
+              }}
             />
-          </div>
-        ))}
-      </div>
-      {readiness.active && (
-        <ProgressNotice data={readiness.data} agent={readiness.agent} />
+          ))}
+        </div>
       )}
-      <ul
-        id={panelId}
-        aria-label={selected.title}
-        className="flex min-w-0 flex-wrap items-center gap-x-0.5 gap-y-0.5"
-      >
-        {selected.pages.map((page) => {
-          const active = pageMatches(pathname, page);
-          const reason = unavailableReason(selected.title, readiness);
-          return (
-            <li key={page.to}>
-              {reason ? (
-                <span
-                  aria-disabled="true"
-                  title={reason}
-                  className="flex cursor-not-allowed items-center gap-1.5 rounded-base px-2 py-1 text-sm text-status-neutral/50"
-                >
-                  <NavIcon name={page.icon} />
-                  {page.label}
-                </span>
-              ) : (
-                <Link
-                  to={page.to}
-                  aria-current={active ? "page" : undefined}
-                  className={itemClass({ isActive: active })}
-                >
-                  <NavIcon name={page.icon} />
-                  {page.label}
-                </Link>
-              )}
-            </li>
-          );
-        })}
-      </ul>
     </nav>
   );
 }

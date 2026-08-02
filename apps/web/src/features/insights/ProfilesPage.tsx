@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router";
+import { Link, Navigate, useLocation, useParams } from "react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type {
   ChartSummary,
@@ -11,6 +11,7 @@ import {
   useCharts,
   useDatasetDistributions,
   useProfiles,
+  useQuality,
 } from "../../api/hooks";
 import {
   EmptyState,
@@ -18,16 +19,20 @@ import {
   LoadingSkeleton,
 } from "../../components/async-states";
 import {
-  Badge,
+  DataWorkspacePage,
+  DatasetScopeBar,
+  SegmentedControl,
+} from "../../components/data-workspace";
+import {
   Card,
   Hint,
   Marquee,
   MetricStrip,
   MetricTile,
-  SectionHeader,
   formatCompact,
   formatPercent,
 } from "../../components/ui";
+import { sessionSectionPath } from "../../app/paths";
 import {
   DistributionSpark,
   KIND_LABEL,
@@ -47,7 +52,16 @@ import {
 } from "./linked-chart";
 
 type FieldRow = NonNullable<DatasetProfileSummary["fields"]>[number];
-type SortKey = "table" | "missing" | "name";
+type SortKey =
+  | "table"
+  | "missing-asc"
+  | "missing-desc"
+  | "name-asc"
+  | "name-desc"
+  | "type-asc"
+  | "type-desc"
+  | "unique-asc"
+  | "unique-desc";
 
 /* Field rows arrive as 0-100, not as a ratio. */
 function percentText(value: number | null | undefined): string {
@@ -70,118 +84,21 @@ function emptyColumnCount(profile: DatasetProfileSummary): number {
   ).length;
 }
 
-function ProfilesSummary({ profiles }: { profiles: DatasetProfileSummary[] }) {
-  const columns = profiles.reduce(
-    (sum, profile) => sum + (profile.fields ?? []).length,
-    0,
-  );
-  const withNulls = profiles.reduce(
-    (sum, profile) =>
-      sum +
-      (profile.fields ?? []).filter((field) => (field.missing_percent ?? 0) > 0)
-        .length,
-    0,
-  );
-  const empty = profiles.reduce(
-    (sum, profile) => sum + emptyColumnCount(profile),
-    0,
-  );
-  const rows = profiles.reduce((sum, profile) => sum + profile.rows, 0);
-
-  return (
-    <MetricStrip>
-      <MetricTile label="Tables profiled" value={profiles.length} />
-      <MetricTile
-        label="Rows"
-        value={formatCompact(rows)}
-        hint={rows.toLocaleString()}
-      />
-      <MetricTile label="Columns" value={columns} />
-      <MetricTile
-        label="With nulls"
-        value={withNulls}
-        tone="warn"
-        emphasis={withNulls > 0}
-      />
-      <MetricTile
-        label="Entirely empty"
-        value={empty}
-        tone="critical"
-        emphasis={empty > 0}
-      />
-    </MetricStrip>
-  );
-}
-
-/* Nine datasets used to render nine full tables stacked vertically. The rail
- * is the summary level: pick one table, read one table. */
-function DatasetRail({
-  profiles,
-  selectedId,
-  onSelect,
-  panelId,
-}: {
-  profiles: DatasetProfileSummary[];
-  selectedId: string;
-  onSelect: (datasetId: string) => void;
-  panelId: string;
-}) {
-  return (
-    <ul className="flex max-h-[32rem] flex-col gap-1 overflow-y-auto lg:pr-1">
-      {profiles.map((profile) => {
-        const selected = profile.dataset_id === selectedId;
-        const rate = missingRate(profile);
-        const empty = emptyColumnCount(profile);
-        return (
-          <li key={profile.dataset_id}>
-            <button
-              type="button"
-              aria-pressed={selected}
-              aria-controls={panelId}
-              onClick={() => onSelect(profile.dataset_id)}
-              className={`flex w-full flex-col gap-1 rounded-base border-l-2 px-2 py-1.5 text-left hover:bg-bg ${
-                selected
-                  ? "border-primary bg-bg"
-                  : "border-transparent"
-              }`}
-            >
-              <span className="flex items-center gap-1.5">
-                <Marquee className="min-w-0 flex-1 text-sm font-medium" title={profile.name}>
-                  {profile.name}
-                </Marquee>
-                {empty > 0 && (
-                  <Badge tone="critical" title={`${empty} entirely empty columns`}>
-                    {empty} empty
-                  </Badge>
-                )}
-              </span>
-              <span className="tabular text-xs text-status-neutral">
-                {formatCompact(profile.rows)} rows · {profile.columns} cols
-              </span>
-              <span className="flex items-center gap-1.5">
-                <MissingBar percent={rate} width="w-16" />
-                <span className="tabular text-xs text-status-neutral">
-                  {formatPercent(rate / 100, 0)} null
-                </span>
-              </span>
-            </button>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
 const FIELD_ROW_HEIGHT = 40;
+const CHART_RENDER_BATCH_SIZE = 6;
 
 function FieldTable({
   fields,
   distributions,
   distributionsPending,
+  sort,
+  onSortChange,
 }: {
   fields: FieldRow[];
   distributions: Map<string, ColumnDistribution>;
   distributionsPending: boolean;
+  sort: SortKey;
+  onSortChange: (key: "name" | "missing" | "type" | "unique") => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -243,33 +160,44 @@ function FieldTable({
       <table className="w-full min-w-[20rem] border-collapse text-xs sm:text-sm">
         <thead className="sticky top-0 z-10 bg-table-header-bg text-left">
           <tr>
-            <th scope="col" className="px-2 py-2 font-medium sm:px-3">
-              Column
+            <th scope="col" aria-sort={sort.startsWith("name") ? (sort === "name-asc" ? "ascending" : "descending") : "none"} className="px-2 py-2 font-medium sm:px-3">
+              <button type="button" onClick={() => onSortChange("name")} className="inline-flex items-center gap-1 hover:text-primary">
+                Column <span aria-hidden="true" className="text-status-neutral">{sort === "name-asc" ? "↑" : sort === "name-desc" ? "↓" : "↕"}</span>
+              </button>
             </th>
             <th
               scope="col"
-              className="hidden px-3 py-2 font-medium md:table-cell"
+              aria-sort={sort.startsWith("type") ? (sort === "type-asc" ? "ascending" : "descending") : "none"}
+              className="hidden px-3 py-2 font-medium @4xl/data-page:table-cell"
             >
-              Type
+              <button type="button" onClick={() => onSortChange("type")} className="inline-flex items-center gap-1 hover:text-primary">
+                Type <span aria-hidden="true" className="text-status-neutral">{sort === "type-asc" ? "↑" : sort === "type-desc" ? "↓" : "↕"}</span>
+              </button>
             </th>
             <th scope="col" className="px-2 py-2 font-medium sm:px-3">
               Shape
             </th>
             <th
               scope="col"
+              aria-sort={sort.startsWith("missing") ? (sort === "missing-asc" ? "ascending" : "descending") : "none"}
               className="px-2 py-2 text-right font-medium sm:px-3"
             >
-              Missing
+              <button type="button" onClick={() => onSortChange("missing")} className="ml-auto inline-flex items-center gap-1 hover:text-primary">
+                Missing <span aria-hidden="true" className="text-status-neutral">{sort === "missing-asc" ? "↑" : sort === "missing-desc" ? "↓" : "↕"}</span>
+              </button>
             </th>
             <th
               scope="col"
-              className="hidden px-3 py-2 text-right font-medium lg:table-cell"
+              aria-sort={sort.startsWith("unique") ? (sort === "unique-asc" ? "ascending" : "descending") : "none"}
+              className="hidden px-3 py-2 text-right font-medium @4xl/data-page:table-cell"
             >
-              Unique
+              <button type="button" onClick={() => onSortChange("unique")} className="ml-auto inline-flex items-center gap-1 hover:text-primary">
+                Unique <span aria-hidden="true" className="text-status-neutral">{sort === "unique-asc" ? "↑" : sort === "unique-desc" ? "↓" : "↕"}</span>
+              </button>
             </th>
             <th
               scope="col"
-              className="hidden px-3 py-2 font-medium xl:table-cell"
+              className="hidden px-3 py-2 font-medium @4xl/data-page:table-cell"
             >
               Samples
             </th>
@@ -296,13 +224,13 @@ function FieldTable({
                       <Marquee className="block font-mono text-xs" title={field.column}>
                         {field.column}
                       </Marquee>
-                      <Marquee className="block font-mono text-[10px] text-status-neutral md:hidden">
+                      <Marquee className="block font-mono text-[10px] text-status-neutral @4xl/data-page:hidden">
                         {field.dtype}
                       </Marquee>
                     </span>
                   </span>
                 </td>
-                <td className="hidden px-3 py-2 whitespace-nowrap md:table-cell">
+                <td className="hidden px-3 py-2 whitespace-nowrap @4xl/data-page:table-cell">
                   <span className="font-mono text-xs">{field.dtype}</span>
                   <span className="ml-1.5 text-xs text-status-neutral">
                     {field.semantic_type}
@@ -323,19 +251,19 @@ function FieldTable({
                   </span>
                 </td>
                 <td className="px-2 py-2 text-right whitespace-nowrap sm:px-3">
-                  <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-flex w-28 items-center justify-end gap-1.5">
                     <span className="hidden sm:inline-flex">
-                      <MissingBar percent={field.missing_percent} />
+                      <MissingBar percent={field.missing_percent} width="w-16" />
                     </span>
-                    <span className="tabular">
+                    <span className="tabular w-[4.5ch] text-right">
                       {percentText(field.missing_percent)}
                     </span>
                   </span>
                 </td>
-                <td className="tabular hidden px-3 py-2 text-right whitespace-nowrap lg:table-cell">
+                <td className="tabular hidden px-3 py-2 text-right whitespace-nowrap @4xl/data-page:table-cell">
                   {percentText(field.unique_percent)}
                 </td>
-                <td className="hidden max-w-40 px-3 py-2 text-status-neutral xl:table-cell">
+                <td className="hidden max-w-40 px-3 py-2 text-status-neutral @4xl/data-page:table-cell">
                   <Marquee title={field.sample_values}>
                     {field.sample_values}
                   </Marquee>
@@ -364,6 +292,8 @@ function FieldPanel({
   panelId: string;
 }) {
   const [query, setQuery] = useRouteSearchParam("q");
+  const [searchOpen, setSearchOpen] = useState(Boolean(query));
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [kindParam, setKindParam] = useRouteSearchParam("kind", "all");
   const kindFilter: ColumnKind | "all" =
     kindParam === "all" ||
@@ -374,10 +304,14 @@ function FieldPanel({
       : "all";
   const setKindFilter = (kind: ColumnKind | "all") => setKindParam(kind);
   const [sortParam, setSortParam] = useRouteSearchParam("sort", "table");
-  const sort: SortKey = ["table", "missing", "name"].includes(sortParam)
+  const sort: SortKey = ["table", "missing-asc", "missing-desc", "name-asc", "name-desc", "type-asc", "type-desc", "unique-asc", "unique-desc"].includes(sortParam)
     ? (sortParam as SortKey)
     : "table";
-  const setSort = (next: SortKey) => setSortParam(next);
+  const toggleSort = (key: "name" | "missing" | "type" | "unique") => {
+    const ascending = `${key}-asc` as SortKey;
+    const descending = `${key}-desc` as SortKey;
+    setSortParam(sort === ascending ? descending : sort === descending ? "table" : ascending);
+  };
 
   const distributions = useDatasetDistributions(sessionId, profile.dataset_id);
   const distByColumn = useMemo(() => {
@@ -414,74 +348,38 @@ function FieldPanel({
         field.semantic_type.toLowerCase().includes(needle)
       );
     });
-    if (sort === "missing") {
+    if (sort === "missing-asc" || sort === "missing-desc") {
+      const direction = sort === "missing-asc" ? 1 : -1;
       return [...filtered].sort(
-        (a, b) => (b.missing_percent ?? 0) - (a.missing_percent ?? 0),
+        (a, b) => direction * ((a.missing_percent ?? 0) - (b.missing_percent ?? 0)),
       );
     }
-    if (sort === "name") {
-      return [...filtered].sort((a, b) => a.column.localeCompare(b.column));
+    if (sort === "name-asc" || sort === "name-desc") {
+      const direction = sort === "name-asc" ? 1 : -1;
+      return [...filtered].sort((a, b) => direction * a.column.localeCompare(b.column));
+    }
+    if (sort === "type-asc" || sort === "type-desc") {
+      const direction = sort === "type-asc" ? 1 : -1;
+      return [...filtered].sort(
+        (a, b) =>
+          direction * (
+            classifyColumn(a.dtype, a.semantic_type).localeCompare(
+              classifyColumn(b.dtype, b.semantic_type),
+            ) || a.dtype.localeCompare(b.dtype) || a.column.localeCompare(b.column)
+          ),
+      );
+    }
+    if (sort === "unique-asc" || sort === "unique-desc") {
+      const direction = sort === "unique-asc" ? 1 : -1;
+      return [...filtered].sort(
+        (a, b) => direction * ((a.unique_percent ?? -1) - (b.unique_percent ?? -1)),
+      );
     }
     return filtered;
   }, [fields, kindFilter, query, sort]);
 
-  const searchId = `${panelId}-search`;
-  const sortId = `${panelId}-sort`;
-
   return (
     <div id={panelId} className="flex min-w-0 flex-col gap-3">
-      <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h3 className="min-w-0 text-sm font-semibold"><Marquee>{profile.name}</Marquee></h3>
-        <span className="tabular text-xs text-status-neutral">
-          {profile.rows.toLocaleString()} rows · {profile.columns} columns
-        </span>
-      </header>
-
-      <div className="flex flex-wrap gap-1.5">
-        {Object.entries(profile.semantic_type_counts ?? {}).map(
-          ([type, count]) => (
-            <Badge key={type}>
-              {type}: {count}
-            </Badge>
-          ),
-        )}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <label htmlFor={searchId} className="text-sm text-status-neutral">
-          Find column
-        </label>
-        <input
-          id={searchId}
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="name, dtype or semantic type…"
-          className="min-w-40 rounded-base border border-border bg-bg px-2 py-1 text-sm"
-        />
-        <label htmlFor={sortId} className="text-sm text-status-neutral">
-          Sort
-        </label>
-        <select
-          id={sortId}
-          value={sort}
-          onChange={(event) => setSort(event.target.value as SortKey)}
-          className="rounded-base border border-border bg-bg px-2 py-1 text-sm"
-        >
-          <option value="table">Table order</option>
-          <option value="missing">Most missing</option>
-          <option value="name">Name A–Z</option>
-        </select>
-        <Hint label="Distribution">
-          A mini histogram for numeric columns and top-value bars for
-          categorical ones, computed from the table (sampled above the row cap).
-          The bar beside Missing is the column&apos;s null rate.
-        </Hint>
-        <span className="tabular ml-auto text-xs text-status-neutral">
-          {visible.length} of {fields.length} columns
-        </span>
-      </div>
-
       <div className="flex flex-wrap gap-1.5">
         <KindChip
           label="All"
@@ -499,6 +397,42 @@ function FieldPanel({
             onClick={() => setKindFilter(kindFilter === kind ? "all" : kind)}
           />
         ))}
+        <div className="ml-auto flex items-center gap-2">
+          {searchOpen && (
+            <input
+              ref={searchInputRef}
+              aria-label="Find column"
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Find column…"
+              className="min-w-40 rounded-base border border-border bg-bg px-2 py-1 text-sm"
+            />
+          )}
+          <button
+            type="button"
+            aria-label={searchOpen ? "Close column search" : "Find column"}
+            title={searchOpen ? "Close column search" : "Find column"}
+            onClick={() => {
+              if (searchOpen) {
+                setSearchOpen(false);
+                setQuery("");
+              } else {
+                setSearchOpen(true);
+                requestAnimationFrame(() => searchInputRef.current?.focus());
+              }
+            }}
+            className="inline-flex size-7 items-center justify-center rounded-base border border-border text-status-neutral hover:bg-surface hover:text-text"
+          >
+            {searchOpen ? "×" : "⌕"}
+          </button>
+          <Hint label="Distribution">
+            A mini histogram for numeric columns and top-value bars for categorical ones. The bar beside Missing is the column&apos;s null rate.
+          </Hint>
+          <span className="tabular text-xs text-status-neutral">
+            {visible.length} / {fields.length}
+          </span>
+        </div>
       </div>
 
       {distributions.isError && (
@@ -518,6 +452,8 @@ function FieldPanel({
           fields={visible}
           distributions={distByColumn}
           distributionsPending={distributions.isPending}
+          sort={sort}
+          onSortChange={toggleSort}
         />
       )}
 
@@ -563,65 +499,6 @@ function KindChip({
   );
 }
 
-function FieldProfiles({
-  sessionId,
-  profiles,
-}: {
-  sessionId: string;
-  profiles: DatasetProfileSummary[];
-}) {
-  const [datasetParam, setSelectedId] = useRouteSearchParam("dataset");
-  const selectedId = profiles.some(
-    (profile) => profile.dataset_id === datasetParam,
-  )
-    ? datasetParam
-    : (profiles[0]?.dataset_id ?? "");
-
-  const selected =
-    profiles.find((profile) => profile.dataset_id === selectedId) ??
-    profiles[0]!;
-  const panelId = "profile-fields";
-
-  return (
-    <>
-      <ProfilesSummary profiles={profiles} />
-      <Card
-        tone="quiet"
-        className="grid gap-4 p-3 lg:grid-cols-[minmax(11rem,15rem)_minmax(0,1fr)]"
-      >
-        <label className="flex min-w-0 flex-col gap-1 text-xs lg:hidden">
-          <span className="text-status-neutral">Profile dataset</span>
-          <select
-            value={selected.dataset_id}
-            onChange={(event) => setSelectedId(event.target.value)}
-            className="w-full rounded-base border border-border bg-bg px-2 py-1.5 text-sm"
-          >
-            {profiles.map((profile) => (
-              <option key={profile.dataset_id} value={profile.dataset_id}>
-                {profile.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="hidden lg:block">
-          <DatasetRail
-            profiles={profiles}
-            selectedId={selected.dataset_id}
-            onSelect={setSelectedId}
-            panelId={panelId}
-          />
-        </div>
-        <FieldPanel
-          key={selected.dataset_id}
-          sessionId={sessionId}
-          profile={selected}
-          panelId={panelId}
-        />
-      </Card>
-    </>
-  );
-}
-
 /* The listing is metadata-only; the vega-lite spec is fetched per chart. The
  * card title stays in the card header, so the in-spec title is dropped to
  * avoid rendering twice. */
@@ -635,7 +512,8 @@ function chartSpecWithoutTitle(
 type ChartDatasetGroup = {
   datasetId: string;
   datasetName: string;
-  charts: ChartSummary[];
+  analyticalCharts: ChartSummary[];
+  diagnosticCharts: ChartSummary[];
 };
 
 /* Chart gallery: group by
@@ -647,17 +525,28 @@ function groupChartsByDataset(charts: ChartSummary[]): ChartDatasetGroup[] {
   for (const chart of charts) {
     const group = groups.get(chart.dataset_id);
     if (group) {
-      group.charts.push(chart);
+      if (isProfileDiagnostic(chart)) group.diagnosticCharts.push(chart);
+      else group.analyticalCharts.push(chart);
     } else {
       groups.set(chart.dataset_id, {
         datasetId: chart.dataset_id,
         datasetName: chart.dataset_name,
-        charts: [chart],
+        analyticalCharts: isProfileDiagnostic(chart) ? [] : [chart],
+        diagnosticCharts: isProfileDiagnostic(chart) ? [chart] : [],
       });
     }
   }
   return [...groups.values()].sort((a, b) =>
     a.datasetName < b.datasetName ? -1 : a.datasetName > b.datasetName ? 1 : 0,
+  );
+}
+
+function isProfileDiagnostic(chart: ChartSummary): boolean {
+  const title = chart.title.trim().toLowerCase();
+  return (
+    title.startsWith("distribution of ") ||
+    title.startsWith("top values in ") ||
+    title.startsWith("missing values by column")
   );
 }
 
@@ -711,20 +600,27 @@ function ChartCard({
 }
 
 function ChartGroupSection({
-  group,
+  charts,
+  chartCount,
   sessionId,
   onZoom,
 }: {
-  group: ChartDatasetGroup;
+  charts: ChartSummary[];
+  chartCount: number;
   sessionId: string;
   onZoom: (chart: ChartSummary) => void;
 }) {
   return (
-    <Card tone="quiet" className="flex flex-col gap-3 p-3">
-      <h3 className="text-sm font-semibold">Dataset: {group.datasetName}</h3>
-      {group.charts.length > 1 ? (
-        <div className="grid gap-3 xl:grid-cols-2">
-          {group.charts.map((chart) => (
+    <section className="flex min-w-0 flex-col gap-3">
+      <header className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h3 className="text-sm font-semibold">Analytical charts</h3>
+        <span className="tabular text-xs text-status-neutral">
+          {chartCount} analytical chart{chartCount === 1 ? "" : "s"}
+        </span>
+      </header>
+      {charts.length > 1 ? (
+        <div className="grid gap-3 @4xl/data-page:grid-cols-2">
+          {charts.map((chart) => (
             <ChartCard
               key={chart.artifact_id}
               chart={chart}
@@ -735,13 +631,41 @@ function ChartGroupSection({
         </div>
       ) : (
         <ChartCard
-          chart={group.charts[0]!}
+          chart={charts[0]!}
           sessionId={sessionId}
-          onZoom={() => onZoom(group.charts[0]!)}
+          onZoom={() => onZoom(charts[0]!)}
         />
       )}
-    </Card>
+    </section>
   );
+}
+
+function diagnosticChartSummary(charts: ChartSummary[]): string {
+  const missingness = charts.filter((chart) =>
+    chart.title.trim().toLowerCase().startsWith("missing values by column"),
+  ).length;
+  const distributions = charts.length - missingness;
+  const parts = [
+    distributions > 0
+      ? `${distributions} distribution or top-value chart${distributions === 1 ? "" : "s"}`
+      : "",
+    missingness > 0
+      ? `${missingness} missingness chart${missingness === 1 ? "" : "s"}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" and ");
+}
+
+function missingnessSummary(
+  issues: Array<{ code: string; column?: string | null; message: string }>,
+): string | null {
+  const relevant = issues.filter((issue) => /missing|empty|null/i.test(issue.code));
+  if (relevant.length === 0) return null;
+  const fields = [...new Set(relevant.map((issue) => issue.column).filter(Boolean))];
+  if (fields.length === 0) return `${relevant.length} missingness flag${relevant.length === 1 ? "" : "s"}`;
+  const shown = fields.slice(0, 3).join(", ");
+  const remainder = fields.length - 3;
+  return `Missingness flags: ${shown}${remainder > 0 ? ` +${remainder} more` : ""}`;
 }
 
 function LinkedChartSplit({
@@ -944,59 +868,59 @@ function ChartZoomModal({
   );
 }
 
-function FieldProfilesWorkspace({ sessionId }: { sessionId: string }) {
-  const profiles = useProfiles(sessionId);
-  const profileList = profiles.data?.datasets ?? [];
-
-  return (
-    <section
-      id="profiles-fields-panel"
-      role="tabpanel"
-      aria-labelledby="profiles-fields-tab"
-      className="flex min-w-0 flex-col gap-3"
-    >
-      <SectionHeader
-        title="Field profiles"
-        description="Choose one table, then search or filter its columns by the kind of evidence you need."
-      />
-      {profiles.isPending && (
-        <LoadingSkeleton lines={4} label="Loading profiles" />
-      )}
-      {profiles.isError && (
-        <ErrorState error={profiles.error} onRetry={() => profiles.refetch()} />
-      )}
-      {profiles.data &&
-        (profileList.length === 0 ? (
-          <EmptyState
-            title="No dataset profiles"
-            description="Run an analysis to profile the datasets in this session."
-          />
-        ) : (
-          <FieldProfiles sessionId={sessionId} profiles={profileList} />
-        ))}
-    </section>
-  );
-}
-
-function ChartsWorkspace({
+function DatasetInsightsWorkspace({
   sessionId,
   projectId,
 }: {
   sessionId: string;
   projectId: string;
 }) {
+  const profiles = useProfiles(sessionId);
   const charts = useCharts(sessionId);
+  const quality = useQuality(sessionId);
   const [zoomed, setZoomed] = useState<ChartSummary | null>(null);
+  const [visibleChartCount, setVisibleChartCount] = useState(CHART_RENDER_BATCH_SIZE);
+  const [datasetParam, setDatasetParam] = useRouteSearchParam("dataset");
+  const [viewParam, setViewParam] = useRouteSearchParam("view");
   const [splitParam, setSplitParam] = useRouteSearchParam("split");
+  const profileList = profiles.data?.datasets ?? [];
   const chartItems = charts.data?.pages.flatMap((page) => page.items) ?? [];
   const chartGroups = groupChartsByDataset(chartItems);
+  const defaultDatasetId =
+    profileList.find(
+      (profile) =>
+        chartGroups.find((group) => group.datasetId === profile.dataset_id)
+          ?.analyticalCharts.length,
+    )?.dataset_id ?? profileList[0]?.dataset_id ?? "";
+  const selectedDatasetId = profileList.some(
+    (profile) => profile.dataset_id === datasetParam,
+  )
+    ? datasetParam
+    : defaultDatasetId;
+  const selectedProfile =
+    profileList.find((profile) => profile.dataset_id === selectedDatasetId) ?? null;
+  const selectedGroup =
+    chartGroups.find((group) => group.datasetId === selectedDatasetId) ?? {
+      datasetId: selectedDatasetId,
+      datasetName: selectedProfile?.name ?? "Selected dataset",
+      analyticalCharts: [],
+      diagnosticCharts: [],
+    };
+  const activeView = viewParam === "charts" ? "charts" : "profiles";
+  const visibleCharts = selectedGroup.analyticalCharts.slice(0, visibleChartCount);
+  const hasMoreVisibleCharts = selectedGroup.analyticalCharts.length > visibleChartCount;
+  const selectedMissingness = missingnessSummary(
+    (quality.data?.issues ?? []).filter(
+      (issue) => issue.dataset_id === selectedDatasetId,
+    ),
+  );
+  const galleryItems = chartItems.filter((chart) => !isProfileDiagnostic(chart));
   const [leftId = "", rightId = ""] = splitParam.split(",", 2);
   const splitLeft = chartItems.find((chart) => chart.artifact_id === leftId);
   const splitRight = chartItems.find((chart) => chart.artifact_id === rightId);
-  /* A shared split URL may point at charts beyond the first listing page.
-   * Follow the cursor until both ids are found (or the listing ends), so a
-   * cold deep link restores the requested pair instead of silently offering a
-   * different first-page pair. */
+
+  /* Restore a shared split deep link even when either chart lives beyond the
+   * first cursor page. */
   useEffect(() => {
     if (
       leftId &&
@@ -1016,6 +940,11 @@ function ChartsWorkspace({
     splitLeft,
     splitRight,
   ]);
+
+  useEffect(() => {
+    setVisibleChartCount(CHART_RENDER_BATCH_SIZE);
+  }, [selectedDatasetId]);
+
   const splitPair =
     splitLeft &&
     splitRight &&
@@ -1024,8 +953,8 @@ function ChartsWorkspace({
       ? ([splitLeft, splitRight] as const)
       : null;
   const initialSplitPair = (() => {
-    for (const left of chartItems) {
-      const right = chartItems.find(
+    for (const left of selectedGroup.analyticalCharts) {
+      const right = galleryItems.find(
         (candidate) =>
           candidate.artifact_id !== left.artifact_id &&
           sharedChartField(left, candidate) !== null,
@@ -1035,164 +964,154 @@ function ChartsWorkspace({
     return null;
   })();
 
+  if (profiles.isPending) return <LoadingSkeleton lines={6} label="Loading datasets" />;
+  if (profiles.isError) return <ErrorState error={profiles.error} onRetry={() => profiles.refetch()} />;
+  if (profileList.length === 0) {
+    return <EmptyState title="No dataset profiles" description="Run an analysis to inspect datasets in this session." />;
+  }
+  const resolvedProfile = selectedProfile ?? profileList[0]!;
+
   return (
-    <section
-      id="profiles-charts-panel"
-      role="tabpanel"
-      aria-labelledby="profiles-charts-tab"
-      className="flex min-w-0 flex-col gap-4"
-    >
-      <SectionHeader
-        title="Charts"
-        description="Review charts already produced by the analysis, or open the builder for a focused one-off view."
-      />
-
-      <section aria-labelledby="custom-chart-heading">
-        <CustomChartBuilder sessionId={sessionId} projectId={projectId} />
-      </section>
-
-      <section
-        aria-label="Generated charts"
-        className="flex flex-col gap-3"
-      >
-        <SectionHeader
-          title="Generated charts"
-          description={
-            charts.data
-              ? `${chartItems.length} loaded across ${chartGroups.length} dataset${chartGroups.length === 1 ? "" : "s"}.`
-              : "Charts produced and persisted by this analysis."
-          }
-        />
-        {charts.data && initialSplitPair && !splitPair && (
-          <button
-            type="button"
-            onClick={() =>
-              setSplitParam(
-                `${initialSplitPair[0].artifact_id},${initialSplitPair[1].artifact_id}`,
-              )
-            }
-            className="self-start rounded-base border border-border px-3 py-1.5 text-sm hover:bg-surface"
-          >
-            Open linked split view
-          </button>
-        )}
-        {splitPair && (
-          <LinkedChartSplit
-            left={splitPair[0]}
-            right={splitPair[1]}
-            charts={chartItems}
-            sessionId={sessionId}
-            onPairChange={(left, right) => setSplitParam(`${left},${right}`)}
-            onClose={() => setSplitParam("")}
-            onZoom={setZoomed}
+    <section className="flex min-w-0 flex-col gap-4">
+      <section aria-label="Dataset overview" className="flex min-w-0 flex-col gap-3">
+        <DatasetScopeBar
+          value={selectedDatasetId}
+          onChange={setDatasetParam}
+          options={profileList.map((profile) => ({
+            value: profile.dataset_id,
+            label: profile.name,
+          }))}
+        >
+          <SegmentedControl
+            label="Dataset view"
+            value={activeView}
+            onChange={(value) => setViewParam(value === "profiles" ? "" : value)}
+            options={[
+              { value: "profiles", label: "Profile" },
+              { value: "charts", label: "Charts" },
+            ]}
           />
-        )}
-        {charts.isPending && (
-          <LoadingSkeleton lines={4} label="Loading charts" />
-        )}
-        {charts.isError && (
-          <ErrorState error={charts.error} onRetry={() => charts.refetch()} />
-        )}
-        {charts.data &&
-          (chartItems.length === 0 ? (
-            <EmptyState
-              title="No charts"
-              description="No chart specs were generated for this session."
-            />
-          ) : (
-            <>
-              <div className="flex flex-col gap-3">
-                {chartGroups.map((group) => (
-                  <ChartGroupSection
-                    key={group.datasetId}
-                    group={group}
-                    sessionId={sessionId}
-                    onZoom={setZoomed}
-                  />
-                ))}
-              </div>
-              {charts.hasNextPage && (
-                <button
-                  type="button"
-                  onClick={() => charts.fetchNextPage()}
-                  disabled={charts.isFetchingNextPage}
-                  className="self-start rounded-base border border-border px-3 py-1.5 text-sm hover:bg-surface disabled:opacity-60"
-                >
-                  {charts.isFetchingNextPage ? "Loading…" : "Load more"}
-                </button>
-              )}
-            </>
-          ))}
+        </DatasetScopeBar>
+        <MetricStrip>
+          <MetricTile label="Rows" value={resolvedProfile.rows.toLocaleString()} />
+          <MetricTile label="Columns" value={resolvedProfile.columns} />
+          <MetricTile label="Null rate" value={formatPercent(missingRate(resolvedProfile) / 100, 0)} />
+          <MetricTile label="Empty columns" value={emptyColumnCount(resolvedProfile)} />
+          <MetricTile label="Profiled fields" value={resolvedProfile.fields?.length ?? resolvedProfile.columns} />
+          <MetricTile label="Analytical charts" value={selectedGroup.analyticalCharts.length} />
+        </MetricStrip>
       </section>
 
-      {zoomed && (
-        <ChartZoomModal
-          chart={zoomed}
-          sessionId={sessionId}
-          onClose={() => setZoomed(null)}
-        />
+      {activeView === "profiles" ? (
+        <section role="tabpanel" aria-label="Profile" className="min-w-0">
+          <FieldPanel
+            key={resolvedProfile.dataset_id}
+            sessionId={sessionId}
+            profile={resolvedProfile}
+            panelId="dataset-fields"
+          />
+        </section>
+      ) : (
+        <section role="tabpanel" aria-label="Charts" className="grid min-w-0 gap-4 @5xl/data-page:grid-cols-[minmax(0,1fr)_12rem]">
+          <div className="order-2 flex min-w-0 flex-col gap-4 @5xl/data-page:order-1">
+          {charts.data && initialSplitPair && !splitPair && (
+            <button
+              type="button"
+              onClick={() =>
+                setSplitParam(
+                  `${initialSplitPair[0].artifact_id},${initialSplitPair[1].artifact_id}`,
+                )
+              }
+              className="self-start rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface"
+            >
+              Open linked split view
+            </button>
+          )}
+          {splitPair && (
+            <LinkedChartSplit
+              left={splitPair[0]}
+              right={splitPair[1]}
+              charts={galleryItems}
+              sessionId={sessionId}
+              onPairChange={(left, right) => setSplitParam(`${left},${right}`)}
+              onClose={() => setSplitParam("")}
+              onZoom={setZoomed}
+            />
+          )}
+          {selectedGroup.diagnosticCharts.length > 0 && (
+            <Card tone="quiet" className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
+              <p className="min-w-0 flex-1 text-sm text-status-neutral">
+                {diagnosticChartSummary(selectedGroup.diagnosticCharts)} are available in Profile and Quality instead of repeated here.{selectedMissingness ? ` ${selectedMissingness}.` : ""}
+              </p>
+              <Link to={`${sessionSectionPath(projectId, sessionId, "quality")}?dataset=${encodeURIComponent(selectedDatasetId)}`} className="text-sm font-medium text-primary hover:underline">Review missingness</Link>
+            </Card>
+          )}
+          {charts.isPending && <LoadingSkeleton lines={4} label="Loading charts" />}
+          {charts.isError && (
+            <ErrorState error={charts.error} onRetry={() => charts.refetch()} />
+          )}
+          {charts.data && visibleCharts.length > 0 ? (
+            <ChartGroupSection
+              charts={visibleCharts}
+              chartCount={selectedGroup.analyticalCharts.length}
+              sessionId={sessionId}
+              onZoom={setZoomed}
+            />
+          ) : charts.data ? (
+            <EmptyState
+              title={charts.hasNextPage ? "No analytical charts loaded for this dataset yet" : "No analytical charts for this dataset"}
+              description={charts.hasNextPage ? "Load the next chart batch to continue checking this dataset." : "Its single-field evidence is available in Profile and Quality."}
+            />
+          ) : null}
+          {hasMoreVisibleCharts && (
+            <button
+              type="button"
+              onClick={() =>
+                setVisibleChartCount((count) => count + CHART_RENDER_BATCH_SIZE)
+              }
+              className="self-start rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface"
+            >
+              Load more charts
+            </button>
+          )}
+          </div>
+          <aside className="order-1 self-start @5xl/data-page:order-2 @5xl/data-page:sticky @5xl/data-page:top-3">
+            <CustomChartBuilder
+              sessionId={sessionId}
+              projectId={projectId}
+              datasetId={selectedDatasetId}
+              datasetName={resolvedProfile.name}
+              rowCount={resolvedProfile.rows}
+            />
+          </aside>
+        </section>
       )}
+      {zoomed && <ChartZoomModal chart={zoomed} sessionId={sessionId} onClose={() => setZoomed(null)} />}
     </section>
   );
 }
 
-type ProfilesView = "fields" | "charts";
-
 export function Component() {
   const { projectId = "", sessionId = "" } = useParams();
-  const [viewParam, setViewParam] = useRouteSearchParam("view", "fields");
-  const view: ProfilesView = viewParam === "charts" ? "charts" : "fields";
-
   return (
-    <div className="mx-auto flex w-[90%] max-w-data min-w-0 flex-col gap-4 p-6">
-      <SectionHeader
-        level={1}
-        title="Profiles & Charts"
-        description="Inspect column-level evidence or switch to the charts produced from this session."
-      />
+    <DataWorkspacePage
+      title="Profiles & charts"
+      description="Choose a dataset once, then move between its field evidence and analytical charts."
+    >
+      <DatasetInsightsWorkspace sessionId={sessionId} projectId={projectId} />
+    </DataWorkspacePage>
+  );
+}
 
-      <div
-        role="tablist"
-        aria-label="Profiles and charts tasks"
-        className="grid grid-cols-2 gap-1 rounded-base border border-border bg-surface p-1 sm:flex sm:w-fit"
-      >
-        <button
-          id="profiles-fields-tab"
-          type="button"
-          role="tab"
-          aria-selected={view === "fields"}
-          aria-controls="profiles-fields-panel"
-          onClick={() => setViewParam("fields")}
-          className={`rounded-base px-3 py-1.5 text-sm font-medium ${
-            view === "fields"
-              ? "bg-bg text-text shadow-sm"
-              : "text-status-neutral hover:text-text"
-          }`}
-        >
-          Field profiles
-        </button>
-        <button
-          id="profiles-charts-tab"
-          type="button"
-          role="tab"
-          aria-selected={view === "charts"}
-          aria-controls="profiles-charts-panel"
-          onClick={() => setViewParam("charts")}
-          className={`rounded-base px-3 py-1.5 text-sm font-medium ${
-            view === "charts"
-              ? "bg-bg text-text shadow-sm"
-              : "text-status-neutral hover:text-text"
-          }`}
-        >
-          Charts
-        </button>
-      </div>
-
-      {view === "fields" ? (
-        <FieldProfilesWorkspace sessionId={sessionId} />
-      ) : (
-        <ChartsWorkspace sessionId={sessionId} projectId={projectId} />
-      )}
-    </div>
+export function ChartsComponent() {
+  const { projectId = "", sessionId = "" } = useParams();
+  const location = useLocation();
+  const search = new URLSearchParams(location.search);
+  search.set("view", "charts");
+  return (
+    <Navigate
+      replace
+      to={`${sessionSectionPath(projectId, sessionId, "profiles")}?${search.toString()}`}
+    />
   );
 }

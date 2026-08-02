@@ -31,7 +31,7 @@ describe("Knowledge page", () => {
     expect(screen.getByText("· measure")).toBeInTheDocument();
 
     /* Join policy is a separate project-wide task, restored from URL state. */
-    await user.click(screen.getByRole("tab", { name: "Join policy" }));
+    await user.click(screen.getByRole("button", { name: "Join policy" }));
     expect(
       screen.getByText("sample.csv.id -> other.csv.sample_id"),
     ).toBeInTheDocument();

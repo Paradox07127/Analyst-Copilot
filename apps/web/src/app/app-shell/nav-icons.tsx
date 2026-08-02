@@ -25,6 +25,13 @@ const GLYPHS = {
     </>
   ),
   chart: <path d="M5 20V10M12 20V4M19 20v-7" />,
+  profile: (
+    <>
+      <path d="M4 5h16M4 10h10M4 15h7M4 20h4" />
+      <circle cx="18" cy="15" r="3" />
+      <path d="m20.2 17.2 2 2" />
+    </>
+  ),
   cleaning: (
     <>
       <path d="M14.5 3.5l6 6" />

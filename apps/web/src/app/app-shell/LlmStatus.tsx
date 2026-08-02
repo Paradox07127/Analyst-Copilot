@@ -1,5 +1,5 @@
 /* Sidebar footer status: a state dot
- * followed by `provider · model`. The dot uses is_ready_for_live_calls rather
+ * followed by the selected model. The dot uses is_ready_for_live_calls rather
  * than that footer's is_live_provider, so a provider picked without its API key
  * reads as "not ready" instead of green — the footer's looser predicate hides
  * the one failure the dot exists to warn about. */
@@ -38,7 +38,7 @@ export function useLlmStatus(): LlmStatus | null {
   const missing = data.missing_fields ?? [];
   return {
     state,
-    label: `${data.provider} · ${data.model}`,
+    label: data.model || "No model selected",
     /* missing_fields is the only place that names what to go fix. */
     title:
       state === "incomplete" && missing.length > 0

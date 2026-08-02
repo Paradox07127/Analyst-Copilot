@@ -6,7 +6,7 @@ import {
   useRouteError,
 } from "react-router";
 import { AppShell } from "./app-shell/AppShell";
-import { projectComparePath, sessionSectionPath } from "./paths";
+import { sessionSectionPath } from "./paths";
 
 function RouteLoadingFallback() {
   return (
@@ -96,6 +96,16 @@ export const routes: RouteObject[] = [
       },
       {
         path: "projects/:projectId/compare",
+        /* Preserve shareable project-level links, but once they name a left
+         * run they belong in that run's embedded workbench. */
+        loader: ({ params, request }) => {
+          const query = new URL(request.url).searchParams;
+          const left = query.get("left");
+          if (!left) return null;
+          return redirect(
+            `${sessionSectionPath(params.projectId ?? "", left, "compare")}?${query.toString()}`,
+          );
+        },
         lazy: () => import("../features/compare/ComparePage"),
       },
       {
@@ -123,6 +133,13 @@ export const routes: RouteObject[] = [
           {
             path: "profiles",
             lazy: () => import("../features/insights/ProfilesPage"),
+          },
+          {
+            path: "charts",
+            lazy: () =>
+              import("../features/insights/ProfilesPage").then((module) => ({
+                Component: module.ChartsComponent,
+              })),
           },
           {
             path: "relationships",
@@ -164,11 +181,17 @@ export const routes: RouteObject[] = [
             path: "compare",
             loader: ({ params, request }) => {
               const query = new URL(request.url).searchParams;
+              if (query.get("left")) return null;
               query.set("left", params.sessionId ?? "");
               return redirect(
-                `${projectComparePath(params.projectId ?? "")}?${query.toString()}`,
+                `${sessionSectionPath(
+                  params.projectId ?? "",
+                  params.sessionId ?? "",
+                  "compare",
+                )}?${query.toString()}`,
               );
             },
+            lazy: () => import("../features/compare/ComparePage"),
           },
           {
             path: "skills",

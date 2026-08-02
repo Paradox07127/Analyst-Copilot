@@ -48,6 +48,11 @@ const ProfilesPage = lazy(() =>
     default: module.Component,
   })),
 );
+const ChartsPage = lazy(() =>
+  import("../../features/insights/ProfilesPage").then((module) => ({
+    default: module.ChartsComponent,
+  })),
+);
 const RelationshipsPage = lazy(() =>
   import("../../features/relationships/RelationshipsPage").then((module) => ({
     default: module.Component,
@@ -229,6 +234,7 @@ function PaneRoutes({
           <Route path="table/:datasetId" element={<TablePreviewPage />} />
           <Route path="quality" element={<QualityPage />} />
           <Route path="profiles" element={<ProfilesPage />} />
+          <Route path="charts" element={<ChartsPage />} />
           <Route path="relationships" element={<RelationshipsPage />} />
           <Route path="questions" element={<QuestionsPage />} />
           <Route path="findings" element={<FindingsPage />} />
@@ -238,6 +244,7 @@ function PaneRoutes({
           <Route path="trace" element={<TracePage />} />
           <Route path="report" element={<ReportPage />} />
           <Route path="artifacts" element={<ArtifactsPage />} />
+          <Route path="compare" element={<ComparePage />} />
           <Route path="skills" element={<SkillsPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="board" element={<BoardPage />} />

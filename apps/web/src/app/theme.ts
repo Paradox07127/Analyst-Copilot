@@ -14,6 +14,14 @@ function readStoredDensity(): Density | null {
   return stored === "comfortable" || stored === "compact" ? stored : null;
 }
 
+/** The product is used as a desktop workspace, so a restrained time-based
+ * default is friendlier than asking every new user to set a visual preference.
+ * A manual toggle still wins and remains persisted. */
+export function getTimeTheme(now = new Date()): Theme {
+  const hour = now.getHours();
+  return hour >= 7 && hour < 19 ? "light" : "dark";
+}
+
 /* Comfortable is the default and needs no attribute (CSS is comfortable by
  * default); only compact stamps data-density, mirroring how clearTheme()
  * below removes data-theme rather than writing "light" explicitly. */
@@ -43,10 +51,7 @@ export function hasStoredTheme(): boolean {
 
 export function getEffectiveTheme(): Theme {
   const stored = readStoredTheme();
-  if (stored) return stored;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  return stored ?? getTimeTheme();
 }
 
 export function setTheme(theme: Theme): void {
@@ -60,13 +65,12 @@ export function clearTheme(): void {
   delete document.documentElement.dataset["theme"];
 }
 
-/* Re-apply an explicit choice on boot; without one, the system preference
- * (prefers-color-scheme media query in design-tokens.css) governs.
+/* Re-apply an explicit choice on boot; without one, the local time determines
+ * the initial theme. This runs before first paint, avoiding a light/dark flash.
  * initDensity() piggybacks here since main.tsx only calls initTheme() before
  * the first render — this keeps both boot-time attributes applied pre-paint
  * from the one existing call site. */
 export function initTheme(): void {
-  const stored = readStoredTheme();
-  if (stored) document.documentElement.dataset["theme"] = stored;
+  document.documentElement.dataset["theme"] = getEffectiveTheme();
   initDensity();
 }

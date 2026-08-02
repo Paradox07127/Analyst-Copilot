@@ -13,6 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import type { JobEventsState } from "../api/job-events";
 
 export interface ActiveJob {
   jobId: string;
@@ -37,8 +38,14 @@ export interface TrackedDataset {
   format?: string | null;
 }
 
+export interface JobActivitySnapshot {
+  state: JobEventsState;
+  kind: string | undefined;
+}
+
 interface JobActivityValue {
   trackedJobs: ActiveJob[];
+  jobSnapshots: ReadonlyMap<string, JobActivitySnapshot>;
   activeJob: ActiveJob | null;
   selectedJobId: string | null;
   panelOpen: boolean;
@@ -50,6 +57,7 @@ interface JobActivityValue {
   clearActiveJob: () => void;
   setPanelOpen: (open: boolean) => void;
   setLauncherVisible: (visible: boolean) => void;
+  setJobSnapshot: (jobId: string, snapshot: JobActivitySnapshot) => void;
   /** True the first time a job settles; false on SSE replays after route
    * changes, so toast + invalidation fire once per job per app session. */
   claimSettlement: (jobId: string) => boolean;
@@ -151,6 +159,9 @@ const JobActivityContext = createContext<JobActivityValue | null>(null);
 
 export function JobActivityProvider({ children }: { children: ReactNode }) {
   const [trackedJobs, setTrackedJobs] = useState<ActiveJob[]>(readStoredJobs);
+  const [jobSnapshots, setJobSnapshots] = useState<
+    ReadonlyMap<string, JobActivitySnapshot>
+  >(new Map());
   const [selectedJobId, setSelectedJobId] = useState<string | null>(() => {
     const stored = window.localStorage.getItem(SELECTED_JOB_KEY);
     return stored && trackedJobs.some((job) => job.jobId === stored)
@@ -214,6 +225,12 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
 
   const dismissJob = useCallback(
     (jobId: string) => {
+      setJobSnapshots((current) => {
+        if (!current.has(jobId)) return current;
+        const next = new Map(current);
+        next.delete(jobId);
+        return next;
+      });
       setTrackedJobs((current) => {
         const next = current.filter((job) => job.jobId !== jobId);
         const nextSelected =
@@ -232,6 +249,18 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
     if (activeJob) dismissJob(activeJob.jobId);
   }, [activeJob, dismissJob]);
 
+  const setJobSnapshot = useCallback(
+    (jobId: string, snapshot: JobActivitySnapshot) => {
+      setJobSnapshots((current) => {
+        if (current.get(jobId) === snapshot) return current;
+        const next = new Map(current);
+        next.set(jobId, snapshot);
+        return next;
+      });
+    },
+    [],
+  );
+
   const settledJobs = useRef(new Set<string>());
   const claimSettlement = useCallback((jobId: string) => {
     if (settledJobs.current.has(jobId)) return false;
@@ -242,6 +271,7 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
   const value = useMemo(
     () => ({
       trackedJobs,
+      jobSnapshots,
       activeJob,
       selectedJobId,
       panelOpen,
@@ -252,10 +282,12 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
       clearActiveJob,
       setPanelOpen,
       setLauncherVisible,
+      setJobSnapshot,
       claimSettlement,
     }),
     [
       trackedJobs,
+      jobSnapshots,
       activeJob,
       selectedJobId,
       panelOpen,
@@ -266,6 +298,7 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
       clearActiveJob,
       setPanelOpen,
       setLauncherVisible,
+      setJobSnapshot,
       claimSettlement,
     ],
   );

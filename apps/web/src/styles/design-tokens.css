@@ -34,7 +34,7 @@
 
   /* Semantic status palette */
   --color-status-critical: #b4232a; /* redColor */
-  --color-status-warn: #b45309; /* orangeColor: warn / agentic-amber */
+  --color-status-warn: #8a6a00; /* yellow: warning / attention */
   --color-status-ok: #1a7f37; /* greenColor */
   --color-status-info: #115e59; /* blueColor: info = brand teal */
   --color-status-llm: #8250df; /* violetColor: llm-origin marker */
@@ -97,7 +97,7 @@
     --color-rail-hover: #2c2926;
 
     --color-status-critical: #e5675c;
-    --color-status-warn: #d89a54;
+    --color-status-warn: #f2c94c;
     --color-status-ok: #57b972;
     --color-status-info: #5cc0b6;
     --color-status-llm: #b08be0;
@@ -161,7 +161,7 @@
   --color-rail-hover: #2c2926;
 
   --color-status-critical: #e5675c;
-  --color-status-warn: #d89a54;
+  --color-status-warn: #f2c94c;
   --color-status-ok: #57b972;
   --color-status-llm: #b08be0;
   --color-status-info: #5cc0b6;

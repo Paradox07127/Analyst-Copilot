@@ -78,13 +78,26 @@ function VerticalBars({
               onMouseLeave={() => setActiveIndex(null)}
               onFocus={() => setActiveIndex(index)}
               onBlur={() => setActiveIndex(null)}
-              className={`min-h-px flex-1 rounded-t-sm transition-opacity focus-visible:outline-offset-1 ${
-                activeIndex !== null && !isActive
-                  ? "bg-chart-1/30 opacity-45"
-                  : "bg-chart-1/85 hover:bg-chart-1"
+              /* The button owns the whole chart height, not only the painted
+               * bar. A 1% bucket can be a single pixel high; making that one
+               * pixel the hit target made its value effectively unreachable.
+               * The child below is visual-only and still stands on the shared
+               * baseline, while this full-height column maps hover position
+               * horizontally to the bucket. */
+              className={`group flex h-full min-w-0 flex-1 items-end rounded-sm transition-opacity focus-visible:outline-offset-1 ${
+                activeIndex !== null && !isActive ? "opacity-45" : ""
               }`}
-              style={{ height: `${Math.max(4, (bucket.count / peak) * 100).toFixed(1)}%` }}
-            />
+            >
+              <span
+                aria-hidden="true"
+                className={`block w-full rounded-t-sm transition-opacity ${
+                activeIndex !== null && !isActive
+                  ? "bg-chart-1/30"
+                  : "bg-chart-1/85 group-hover:bg-chart-1 group-focus:bg-chart-1"
+              }`}
+                style={{ height: `${Math.max(4, (bucket.count / peak) * 100).toFixed(1)}%` }}
+              />
+            </button>
           );
         })}
       </div>

@@ -261,11 +261,11 @@ describe("Session rail navigation", () => {
 });
 
 describe("Top bar LLM status", () => {
-  it("shows provider · model with an offline indicator", async () => {
+  it("shows the model name with an offline indicator", async () => {
     renderAppAt("/projects");
     const bar = await screen.findByRole("banner");
     expect(
-      await within(bar).findByText("offline · offline-deterministic"),
+      await within(bar).findByText("offline-deterministic"),
     ).toBeInTheDocument();
     expect(within(bar).getByLabelText("LLM offline")).toBeInTheDocument();
     expect(within(bar).queryByLabelText("LLM ready")).not.toBeInTheDocument();
@@ -276,7 +276,7 @@ describe("Top bar LLM status", () => {
     ).toBeNull();
   });
 
-  it("shows a different indicator once a live provider is configured", async () => {
+  it("shows the live model without repeating its provider", async () => {
     server.use(
       http.get("/api/v1/settings", () =>
         HttpResponse.json({
@@ -292,7 +292,7 @@ describe("Top bar LLM status", () => {
     renderAppAt("/projects");
     const bar = await screen.findByRole("banner");
     expect(
-      await within(bar).findByText("deepseek · deepseek-v4-flash"),
+      await within(bar).findByText("deepseek-v4-flash"),
     ).toBeInTheDocument();
     expect(within(bar).getByLabelText("LLM ready")).toBeInTheDocument();
     expect(within(bar).queryByLabelText("LLM offline")).not.toBeInTheDocument();

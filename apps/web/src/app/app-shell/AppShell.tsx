@@ -529,7 +529,7 @@ function AppShellLayout() {
                     >
                       <SessionRail />
                     </Panel>
-                    <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary" />
+                    <PanelResizeHandle className="group/resize relative w-2 cursor-col-resize bg-transparent after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-border after:transition-colors after:content-[''] hover:after:bg-primary active:after:bg-primary" />
                   </>
                 )}
                 <Panel id="main" defaultSize={56} minSize={30} order={2}>
@@ -540,7 +540,7 @@ function AppShellLayout() {
                 </Panel>
                 {hasSession && (
                   <>
-                    <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary" />
+                    <PanelResizeHandle className="group/resize relative w-2 cursor-col-resize bg-transparent after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-border after:transition-colors after:content-[''] hover:after:bg-primary active:after:bg-primary" />
                     <Panel
                       id="inspector"
                       ref={inspectorRef}
