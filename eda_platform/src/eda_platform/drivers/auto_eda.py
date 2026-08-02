@@ -122,6 +122,11 @@ from eda_platform.tools.stat_tests import (
 )
 from eda_platform.tools.value_discovery import build_value_map, enrich_question_candidates
 
+# A resource-limited run publishes preflight/metrics/handoff and nothing else.
+# It is terminal but not a completed analysis: marking it "completed" made an
+# empty run look like a successful one in the session list and in compare.
+LIMITED_SESSION_STATUS = "limited"
+
 
 @dataclass(frozen=True)
 class AutoEDAResult:
@@ -1753,7 +1758,7 @@ def run_auto_eda(
             execution_fingerprint=ctx.execution_fingerprint,
             emit_trace=ctx.emit_trace,
         )
-        store.mark_session_status(project_id, actual_session_id, "completed")
+        store.mark_session_status(project_id, actual_session_id, LIMITED_SESSION_STATUS)
         return AutoEDAResult(
             project_id=project_id,
             session_id=actual_session_id,
@@ -1860,7 +1865,7 @@ def run_auto_eda(
             execution_fingerprint=ctx.execution_fingerprint,
             emit_trace=ctx.emit_trace,
         )
-        store.mark_session_status(project_id, actual_session_id, "completed")
+        store.mark_session_status(project_id, actual_session_id, LIMITED_SESSION_STATUS)
         return AutoEDAResult(
             project_id=project_id,
             session_id=actual_session_id,

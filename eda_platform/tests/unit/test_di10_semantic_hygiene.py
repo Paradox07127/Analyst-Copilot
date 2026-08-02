@@ -272,6 +272,26 @@ def test_auto_confirm_requires_id_naming_on_both_sides() -> None:
     assert proposals[0].status == "proposed"
 
 
+def test_auto_confirm_requires_unsampled_evidence() -> None:
+    """A sampled overlap estimate produced the `high` label; the machine may
+    propose on it but must not confirm it."""
+    candidate = _candidate("orders.csv", "customer_id", "customers.csv", "customer_id")
+    sampled = candidate.model_copy(
+        update={"signals": candidate.signals.model_copy(update={"sampled": True})}
+    )
+    validation = _validation(sampled, "many_to_one").model_copy(
+        update={"sampled": True}
+    )
+
+    proposals = propose_join_candidates(
+        _candidate_set(sampled), RelationshipValidationSet(validations=[validation])
+    )
+
+    assert proposals[0].status == "proposed"
+    assert proposals[0].confirmed_by == ""
+    assert proposals[0].validation_verified is True
+
+
 def test_auto_confirm_requires_full_validation() -> None:
     candidate = _candidate("orders.csv", "customer_id", "customers.csv", "customer_id")
 

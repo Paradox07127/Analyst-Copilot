@@ -316,7 +316,9 @@ class InsightService:
             selected_columns=selected_columns,
             y_column=y_column,
             drop_missing=options.drop_missing,
-            drop_outliers=options.drop_outliers,
+            # A histogram's fence belongs to X and is applied while binning; a Y
+            # fence here would filter on a column the chart never draws.
+            drop_outliers=options.drop_outliers and options.chart_type != "histogram",
             limit=CUSTOM_CHART_ROW_LIMIT,
             cancel_check=cancel_check,
         )
@@ -341,6 +343,11 @@ class InsightService:
                 drop_missing=options.drop_missing,
                 drop_outliers=options.drop_outliers,
                 cancel_check=cancel_check,
+            )
+            # Bins are the whole population the chart describes, so report what
+            # was binned rather than the pre-fence scan count.
+            source_row_count = (
+                int(cast("Any", chart_frame["count"]).sum()) if len(chart_frame) else 0
             )
         elif full_aggregate:
             output_y = y_column or ROW_COUNT_Y
@@ -436,7 +443,12 @@ class InsightService:
                 raise CustomChartValidationError(
                     f"Column is not part of this dataset: {column}"
                 )
-        if options.drop_outliers and options.y_column is None:
+        # A histogram fences its own X distribution, so it needs no Y at all.
+        if (
+            options.drop_outliers
+            and options.y_column is None
+            and options.chart_type != "histogram"
+        ):
             raise CustomChartValidationError(
                 "drop_outliers needs a Y column; it cannot apply to a row count."
             )

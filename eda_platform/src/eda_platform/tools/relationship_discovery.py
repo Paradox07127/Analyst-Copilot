@@ -254,9 +254,14 @@ def propose_join_candidates(
             _columns_id_named(pair.left_columns) or _columns_id_named(pair.right_columns)
         ):
             quality = "low"
+        # `sampled` means the overlap statistics behind `confidence` came from a
+        # bounded sample, so "high" is an estimate. Such an edge may be proposed
+        # but never machine-confirmed; a human confirms it or nobody does.
         auto_confirm = (
             validation is not None
             and validation.verified
+            and not validation.sampled
+            and not candidate.signals.sampled
             and candidate.confidence == "high"
             and both_sides_id_named
             and cardinality != "many_to_many"

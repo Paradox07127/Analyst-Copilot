@@ -23,11 +23,14 @@ interface NavGroup {
 
 type StageState = "ready" | "running" | "waiting";
 
+/* "limited" is a resource-preflight run that stopped before ingest: terminal,
+ * so the nav must stop polling, but not a completed analysis. */
 const FINISHED_SESSION_STATUSES = new Set([
   "complete",
   "completed",
   "failed",
   "cancelled",
+  "limited",
 ]);
 
 /* Three stages of work, in the order a session moves through them. Board sits

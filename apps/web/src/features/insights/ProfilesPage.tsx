@@ -640,6 +640,64 @@ function ChartGroupSection({
   );
 }
 
+/* Per-field distribution, top-value and missingness charts, folded away so they
+ * do not bury the analytical gallery on a wide table. They used to be dropped
+ * from the page entirely under a note pointing at Profile and Quality, where
+ * only a sampled sparkline exists and no Vega chart is rendered at all. */
+function DiagnosticChartsPanel({
+  charts,
+  visibleCount,
+  onShowMore,
+  missingness,
+  qualityHref,
+  sessionId,
+  onZoom,
+}: {
+  charts: ChartSummary[];
+  visibleCount: number;
+  onShowMore: () => void;
+  missingness: string | null;
+  qualityHref: string;
+  sessionId: string;
+  onZoom: (chart: ChartSummary) => void;
+}) {
+  const visible = charts.slice(0, visibleCount);
+  return (
+    <details className="rounded-base border border-border bg-bg">
+      <summary className="cursor-pointer px-3 py-2 text-sm text-status-neutral marker:text-status-neutral">
+        Field diagnostics: {diagnosticChartSummary(charts)}
+        {missingness ? ` · ${missingness}` : ""}
+      </summary>
+      <div className="flex flex-col gap-3 border-t border-hairline px-3 py-3">
+        <div className="grid gap-3 @4xl/data-page:grid-cols-2">
+          {visible.map((chart) => (
+            <ChartCard
+              key={chart.artifact_id}
+              chart={chart}
+              sessionId={sessionId}
+              onZoom={() => onZoom(chart)}
+            />
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          {charts.length > visibleCount && (
+            <button
+              type="button"
+              onClick={onShowMore}
+              className="rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface"
+            >
+              Load more diagnostics
+            </button>
+          )}
+          <Link to={qualityHref} className="text-sm font-medium text-primary hover:underline">
+            Review missingness
+          </Link>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function diagnosticChartSummary(charts: ChartSummary[]): string {
   const missingness = charts.filter((chart) =>
     chart.title.trim().toLowerCase().startsWith("missing values by column"),
@@ -880,6 +938,9 @@ function DatasetInsightsWorkspace({
   const quality = useQuality(sessionId);
   const [zoomed, setZoomed] = useState<ChartSummary | null>(null);
   const [visibleChartCount, setVisibleChartCount] = useState(CHART_RENDER_BATCH_SIZE);
+  const [visibleDiagnosticCount, setVisibleDiagnosticCount] = useState(
+    CHART_RENDER_BATCH_SIZE,
+  );
   const [datasetParam, setDatasetParam] = useRouteSearchParam("dataset");
   const [viewParam, setViewParam] = useRouteSearchParam("view");
   const [splitParam, setSplitParam] = useRouteSearchParam("split");
@@ -943,6 +1004,7 @@ function DatasetInsightsWorkspace({
 
   useEffect(() => {
     setVisibleChartCount(CHART_RENDER_BATCH_SIZE);
+    setVisibleDiagnosticCount(CHART_RENDER_BATCH_SIZE);
   }, [selectedDatasetId]);
 
   const splitPair =
@@ -1039,12 +1101,17 @@ function DatasetInsightsWorkspace({
             />
           )}
           {selectedGroup.diagnosticCharts.length > 0 && (
-            <Card tone="quiet" className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
-              <p className="min-w-0 flex-1 text-sm text-status-neutral">
-                {diagnosticChartSummary(selectedGroup.diagnosticCharts)} are available in Profile and Quality instead of repeated here.{selectedMissingness ? ` ${selectedMissingness}.` : ""}
-              </p>
-              <Link to={`${sessionSectionPath(projectId, sessionId, "quality")}?dataset=${encodeURIComponent(selectedDatasetId)}`} className="text-sm font-medium text-primary hover:underline">Review missingness</Link>
-            </Card>
+            <DiagnosticChartsPanel
+              charts={selectedGroup.diagnosticCharts}
+              visibleCount={visibleDiagnosticCount}
+              onShowMore={() =>
+                setVisibleDiagnosticCount((count) => count + CHART_RENDER_BATCH_SIZE)
+              }
+              missingness={selectedMissingness}
+              qualityHref={`${sessionSectionPath(projectId, sessionId, "quality")}?dataset=${encodeURIComponent(selectedDatasetId)}`}
+              sessionId={sessionId}
+              onZoom={setZoomed}
+            />
           )}
           {charts.isPending && <LoadingSkeleton lines={4} label="Loading charts" />}
           {charts.isError && (
@@ -1060,7 +1127,13 @@ function DatasetInsightsWorkspace({
           ) : charts.data ? (
             <EmptyState
               title={charts.hasNextPage ? "No analytical charts loaded for this dataset yet" : "No analytical charts for this dataset"}
-              description={charts.hasNextPage ? "Load the next chart batch to continue checking this dataset." : "Its single-field evidence is available in Profile and Quality."}
+              description={
+                charts.hasNextPage
+                  ? "Load the next chart batch to continue checking this dataset."
+                  : selectedGroup.diagnosticCharts.length > 0
+                    ? "Its single-field evidence is under Field diagnostics above."
+                    : "Its single-field evidence is in the Profile tab."
+              }
             />
           ) : null}
           {hasMoreVisibleCharts && (

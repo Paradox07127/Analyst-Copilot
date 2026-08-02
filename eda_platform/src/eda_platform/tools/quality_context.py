@@ -5,17 +5,21 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.schemas.artifacts import (
     Artifact,
     ArtifactType,
+    ColumnProfile,
     DatasetProfile,
     QualityIssue,
     QualityIssueSet,
 )
 from eda_platform.schemas.quality_context import QualityContext, QualityContextSet
+from eda_platform.tools.frame_stats import iqr_bounds
 from eda_platform.tools.loader import LoadedDataset
+from eda_platform.tools.value_parsing import parse_numeric_like
 
 _SKIPPED_CODES = {"no_high_missing"}
 
@@ -112,19 +116,22 @@ def _pattern_facts(
         return [*facts, *_group_pattern_facts(mask, frame, profile, exclude=column_name)]
     if issue.code == "outlier_detected" and column in frame:
         column_name = cast(str, column)
-        mask = _iqr_outlier_mask(_frame_series(frame, column_name))
+        mask = _iqr_outlier_mask(_frame_series(frame, column_name), column_name)
         facts = [
             f"{int(cast(Any, mask.sum()))} of {len(frame)} values are IQR outliers "
             f"in {column_name}."
         ]
         return [*facts, *_group_pattern_facts(mask, frame, profile, exclude=column_name)]
     if issue.code == "duplicate_rows":
-        return [f"{int(frame.duplicated().sum())} rows are exact duplicates."]
+        return [_duplicate_fact(profile)]
     if issue.code == "date_parse_failure" and column in frame:
-        raw = _frame_series(frame, cast(str, column))
-        parsed = pd.to_datetime(raw, errors="coerce")
-        failed = int(cast(Any, (raw.notna() & parsed.isna()).sum()))
-        return [f"{failed} non-empty values in {column} fail datetime parsing."]
+        detail = _column_profile(profile, cast(str, column))
+        if detail is None:
+            return []
+        return [
+            f"{detail.parse_failure_count} non-empty values in {column} "
+            "fail datetime parsing."
+        ]
     if issue.code == "high_cardinality_category" and column in frame:
         unique = int(cast(Any, _frame_series(frame, cast(str, column)).nunique(dropna=True)))
         return [f"{column} has {unique} distinct non-null values in {len(frame)} rows."]
@@ -165,18 +172,40 @@ def _group_pattern_facts(
     return [f"The highest affected rate is {rates.iloc[0] * 100:.1f}% for {categorical}={group}."]
 
 
-def _iqr_outlier_mask(series: pd.Series) -> pd.Series:
-    numeric = cast(pd.Series, pd.to_numeric(series, errors="coerce"))
-    valid = numeric.dropna()
-    if len(valid) < 4:
-        return pd.Series(False, index=series.index)
-    lower = float(cast(Any, valid.quantile(0.25)))
-    upper = float(cast(Any, valid.quantile(0.75)))
-    spread = upper - lower
-    return cast(
-        pd.Series,
-        (numeric < lower - 1.5 * spread) | (numeric > upper + 1.5 * spread),
+def _duplicate_fact(profile: DatasetProfile) -> str:
+    """Restate the profiler's duplicate count. Recomputing it here with a whole-row
+    `frame.duplicated()` reported 0 whenever a surrogate key made every row
+    unique, contradicting the issue that opened the context."""
+    scope = profile.duplicate_scope_columns
+    if profile.exact_duplicate_rows == profile.duplicate_rows or not scope:
+        return f"{profile.duplicate_rows} rows are exact duplicates."
+    return (
+        f"{profile.duplicate_rows} rows repeat across {len(scope)} non-identifier "
+        f"field(s): {', '.join(scope)}."
     )
+
+
+def _column_profile(profile: DatasetProfile, column: str) -> ColumnProfile | None:
+    return next((item for item in profile.columns_detail if item.name == column), None)
+
+
+def _iqr_outlier_mask(series: pd.Series, column_name: str) -> pd.Series:
+    """profiler._iqr_outlier_count as a mask, so the group breakdown below and the
+    quality issue agree. Plain `to_numeric` turned parsed columns ("80,824") into
+    all-NaN and reported zero outliers under an issue that found some."""
+    if is_numeric_dtype(series):
+        numeric = cast(pd.Series, pd.to_numeric(series, errors="coerce"))
+    else:
+        numeric = pd.Series(
+            [parse_numeric_like(value, column_name=column_name) for value in series],
+            index=series.index,
+            dtype="float64",
+        )
+    bounds = iqr_bounds(cast(pd.Series, numeric.dropna()))
+    if bounds is None:
+        return pd.Series(False, index=series.index)
+    lower, upper = bounds
+    return cast(pd.Series, (numeric < lower) | (numeric > upper))
 
 
 def _frame_series(frame: pd.DataFrame, column: str) -> pd.Series:

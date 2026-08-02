@@ -315,7 +315,7 @@ describe("Profiles and Charts pages", () => {
     expect(router.state.location.search).toContain("view=charts");
   });
 
-  it("keeps single-field diagnostics in profiles instead of repeating them in the chart gallery", async () => {
+  it("folds single-field diagnostics into a disclosure instead of dropping them", async () => {
     server.use(
       http.get("/api/v1/sessions/:sessionId/charts", () =>
         HttpResponse.json({
@@ -347,10 +347,17 @@ describe("Profiles and Charts pages", () => {
     renderAppAt(chartsUrl);
 
     expect(await screen.findByText("Value by name")).toBeInTheDocument();
-    expect(screen.queryByText("Distribution of value")).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/1 distribution or top-value chart.*available in Profile and Quality/),
-    ).toBeInTheDocument();
+    /* The gallery still counts only the analytical chart, but the diagnostic is
+     * on the page behind a collapsed disclosure rather than nowhere at all. */
+    expect(screen.getByText("1 analytical chart")).toBeInTheDocument();
+    const summary = screen.getByText(
+      /Field diagnostics: 1 distribution or top-value chart/,
+    );
+    expect(screen.getByText("Distribution of value")).not.toBeVisible();
+
+    await userEvent.click(summary);
+
+    expect(screen.getByText("Distribution of value")).toBeVisible();
     expect(screen.getByRole("link", { name: "Review missingness" })).toHaveAttribute(
       "href",
       "/projects/p1/sessions/r1/quality?dataset=sample",
@@ -897,6 +904,20 @@ describe("Custom chart builder", () => {
     expect(
       screen.getByLabelText("Exclude IQR outliers from Y"),
     ).toBeDisabled();
+  });
+
+  it("names X as the fenced axis for a histogram and keeps the switch usable", async () => {
+    const user = userEvent.setup();
+    renderAppAt(chartsUrl);
+    await openBuilder(user);
+
+    await user.selectOptions(screen.getByLabelText("Chart type"), "histogram");
+    /* The server fences the histogram's X column, so a Row-count Y must not
+     * disable the switch and the copy must not promise a Y fence. */
+    expect(
+      screen.queryByLabelText("Exclude IQR outliers from Y"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Exclude IQR outliers from X")).toBeEnabled();
   });
 
   it("restricts the X column to numeric columns when chart type is histogram", async () => {

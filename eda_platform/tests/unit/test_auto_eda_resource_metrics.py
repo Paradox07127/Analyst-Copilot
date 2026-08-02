@@ -72,7 +72,9 @@ def test_limited_preflight_publishes_only_three_metadata_artifacts(
     )
     assert metrics.resource_usage.preflight_status == "limited"
     assert metrics.resource_usage.processing_mode == "metadata_only"
-    assert ArtifactStore(workspace).get_session_status("limited") == "completed"
+    # A metadata-only run has no profile, no charts and no report; calling it
+    # "completed" made a degraded run indistinguishable from a full one.
+    assert ArtifactStore(workspace).get_session_status("limited") == "limited"
 
 
 def test_rejected_preflight_fails_without_publishing_handoff(tmp_path: Path) -> None:

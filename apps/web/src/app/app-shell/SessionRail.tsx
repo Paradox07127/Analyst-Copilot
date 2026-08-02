@@ -56,6 +56,7 @@ function statusDotClass(status: string): string {
   if (["running", "in_progress", "active", "pending"].includes(s))
     return "bg-status-warn";
   if (["failed", "error", "cancelled"].includes(s)) return "bg-status-critical";
+  if (s === "limited") return "bg-status-warn";
   return "bg-status-neutral";
 }
 

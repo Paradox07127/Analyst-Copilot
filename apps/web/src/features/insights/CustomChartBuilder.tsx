@@ -90,10 +90,18 @@ function ChartControls({
 
   const buildChart = useBuildCustomChart(sessionId, projectId);
 
+  /* The server fences a histogram on X and everything else on Y, so the switch
+   * has to name the axis it will actually cut. */
+  const outliersDisabled = chartType !== "histogram" && yColumn === ROW_COUNT_Y;
+  const outliersLabel =
+    chartType === "histogram"
+      ? "Exclude IQR outliers from X"
+      : "Exclude IQR outliers from Y";
+
   function handleYChange(next: string) {
     setYColumn(next);
     setAggregate(defaultAggregate(next, numericColumns));
-    if (next === ROW_COUNT_Y) setDropOutliers(false);
+    if (next === ROW_COUNT_Y && chartType !== "histogram") setDropOutliers(false);
   }
 
   function handleBuild() {
@@ -105,15 +113,15 @@ function ChartControls({
       color_column: colorColumn === NO_COLOR ? null : colorColumn,
       aggregate,
       drop_missing: dropMissing,
-      // Never send outlier-dropping against a null Y: the API 422s on that combination.
-      drop_outliers: yColumn === ROW_COUNT_Y ? false : dropOutliers,
+      // Never send outlier-dropping against a null Y: the API 422s on that
+      // combination, except for a histogram, which fences its own X.
+      drop_outliers: outliersDisabled ? false : dropOutliers,
     };
     buildChart.mutate(body, {
       onSuccess: (view) => setAggregate(view.aggregate as Aggregate),
     });
   }
 
-  const outliersDisabled = yColumn === ROW_COUNT_Y;
   const histogramBlocked = chartType === "histogram" && xOptions.length === 0;
 
   return (
@@ -217,7 +225,7 @@ function ChartControls({
                 disabled={outliersDisabled}
                 onChange={(event) => setDropOutliers(event.target.checked)}
               />
-              <span>Exclude IQR outliers from Y</span>
+              <span>{outliersLabel}</span>
             </label>
           </div>
 

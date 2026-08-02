@@ -220,6 +220,24 @@ def test_drop_outliers_rejected_for_row_count_y(client: TestClient) -> None:
     assert response.json()["error"]["code"] == "custom_chart_invalid"
 
 
+def test_histogram_drop_outliers_fences_x_without_a_y_column(client: TestClient) -> None:
+    """A histogram's fence is a statement about X; requiring a Y column made the
+    builder ask for a column it then ignored."""
+    response = _post(
+        client,
+        chart_type="histogram",
+        x_column="amount",
+        y_column=None,
+        drop_outliers=True,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    values = body["spec"]["data"]["values"]
+    assert sum(row["count"] for row in values) == CSV_ROWS - 1
+    assert max(row["bin_end"] for row in values) < 100
+    assert body["row_count"] == CSV_ROWS - 1
+
+
 def test_drop_missing_removes_null_rows(store: ArtifactStore) -> None:
     source = store.project_dir(PROJECT) / "uploads" / DATASET / "v1" / CSV_NAME
     source.write_text(CSV_BODY + ",d,2024-01-06\n", encoding="utf-8")

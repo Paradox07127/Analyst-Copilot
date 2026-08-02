@@ -55,17 +55,21 @@ const KIND_TINT: Record<ColumnKind, string> = {
   other: "bg-status-neutral/45",
 };
 
+/* The profiler's semantic_type outranks the dtype: a CSV date or amount column
+ * reads back as `object`, and letting the dtype answer first filed every parsed
+ * column under "text", contradicting the semantic type shown beside it. */
 export function classifyColumn(dtype: string, semanticType = ""): ColumnKind {
   const semantic = semanticType.toLowerCase();
   if (semantic === "id" || semantic === "identifier") return "id";
+  if (semantic === "boolean") return "boolean";
+  if (semantic === "datetime" || semantic === "temporal") return "temporal";
+  if (semantic === "numeric" || semantic === "continuous") return "numeric";
+  if (semantic === "categorical" || semantic === "text") return "text";
   const type = dtype.toLowerCase();
   if (/bool/.test(type)) return "boolean";
   if (/datetime|timestamp|date|time|period/.test(type)) return "temporal";
   if (/^(u?int|float|double|decimal|numeric|number)/.test(type)) return "numeric";
   if (/str|object|categor|utf8|char|text/.test(type)) return "text";
-  if (semantic === "numeric" || semantic === "continuous") return "numeric";
-  if (semantic === "categorical" || semantic === "text") return "text";
-  if (semantic === "datetime" || semantic === "temporal") return "temporal";
   return "other";
 }
 
