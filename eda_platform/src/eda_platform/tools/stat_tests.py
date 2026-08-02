@@ -3,10 +3,13 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
+from itertools import combinations
 from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 from eda_platform.core.ids import make_artifact_id
 from eda_platform.core.provenance import code_ref
@@ -19,7 +22,7 @@ from eda_platform.core.tool_guard import (
     check_range,
     raise_for_violations,
 )
-from eda_platform.schemas.artifacts import Artifact, ArtifactType
+from eda_platform.schemas.artifacts import AnalysisTable, Artifact, ArtifactType
 from eda_platform.schemas.charts import ChartSpec
 from eda_platform.schemas.stats import (
     StatAssumptionCheck,
@@ -57,6 +60,31 @@ _CHI2_LOW_EXPECTED_SHARE = 0.20
 _EFFECT_CI_RESAMPLES = 2_000
 _EFFECT_CI_MAX_TOTAL_N = 8_000
 _EFFECT_CI_SEED = 0
+
+# Contingency tests get their effect CI from dedicated paths rather than the
+# (group, value) sample bootstrap in _EFFECT_CI_STATISTICS.
+_EFFECT_CI_SPECIAL: frozenset[str] = frozenset(
+    {"paired_t_test", "chi_square_independence", "fisher_exact"}
+)
+
+# Per-test-type publishability for the claim gate: a test type may enter the
+# confirmatory lane only if it produces an effect size WITH a CI; anything
+# else must be explicitly descriptive_only (no silent dead-end lane).
+TEST_PUBLISHABILITY: dict[str, str] = {
+    "independent_t_test": "confirmatory_ready",
+    "paired_t_test": "confirmatory_ready",
+    "chi_square_independence": "confirmatory_ready",
+    "fisher_exact": "confirmatory_ready",
+    "one_way_anova": "confirmatory_ready",
+    "welch_anova": "confirmatory_ready",
+    "mann_whitney_u": "confirmatory_ready",
+    "kruskal_wallis": "confirmatory_ready",
+}
+
+
+def effect_ci_supported(test_type: str) -> bool:
+    """True when run_stat_test can attach an effect-size CI for this test type."""
+    return test_type in _EFFECT_CI_STATISTICS or test_type in _EFFECT_CI_SPECIAL
 
 
 def run_stat_test(
@@ -107,6 +135,8 @@ def run_stat_test(
             test_type=result.test_type,
             group_column=group_column,
             value_column=value_column,
+            category_column=category_column,
+            pair_column=pair_column,
         )
         result.effect_ci_low = ci_low
         result.effect_ci_high = ci_high
@@ -416,15 +446,14 @@ def _independent_t_test(
     )
 
 
-def _paired_t_test(
+def _matched_pair_values(
     frame: pd.DataFrame,
     *,
-    dataset_id: str,
     group_column: str,
     value_column: str,
     pair_column: str,
-) -> StatTestResult:
-    stats = _scipy_stats()
+) -> tuple[pd.Series, pd.Series, list[str]]:
+    """Complete matched pairs as (left, right, sorted labels); left/right follow label order."""
     working = cast(
         pd.DataFrame,
         frame[[pair_column, group_column, value_column]],
@@ -447,6 +476,24 @@ def _paired_t_test(
         raise ValueError("paired_t_test requires at least two complete matched pairs")
     paired_left = cast(pd.Series, paired[labels[0]]).reset_index(drop=True)
     paired_right = cast(pd.Series, paired[labels[1]]).reset_index(drop=True)
+    return paired_left, paired_right, labels
+
+
+def _paired_t_test(
+    frame: pd.DataFrame,
+    *,
+    dataset_id: str,
+    group_column: str,
+    value_column: str,
+    pair_column: str,
+) -> StatTestResult:
+    stats = _scipy_stats()
+    paired_left, paired_right, labels = _matched_pair_values(
+        frame,
+        group_column=group_column,
+        value_column=value_column,
+        pair_column=pair_column,
+    )
     differences = paired_left - paired_right
     test = cast(Any, stats.ttest_rel(paired_left, paired_right, nan_policy="omit"))
     return StatTestResult(
@@ -458,8 +505,8 @@ def _paired_t_test(
         statistic=_round_float(test.statistic),
         p_value=_finite_float(test.pvalue),
         effect_size=_round_float(_paired_cohens_d(paired_left, paired_right)),
-        sample_size=int(len(paired)),
-        groups={label: int(len(paired)) for label in labels},
+        sample_size=int(len(paired_left)),
+        groups={label: int(len(paired_left)) for label in labels},
         assumptions=[
             *_normality_checks(stats, {"paired_differences": differences}),
             StatAssumptionCheck(
@@ -479,7 +526,8 @@ def _chi_square_independence(
     category_column: str,
 ) -> StatTestResult:
     stats = _scipy_stats()
-    table = pd.crosstab(frame[group_column], frame[category_column])
+    working = cast(pd.DataFrame, frame[[group_column, category_column]]).dropna()
+    table = pd.crosstab(working[group_column], working[category_column])
     statistic, p_value, dof, expected = cast(
         tuple[Any, Any, Any, Any],
         stats.chi2_contingency(table),
@@ -494,7 +542,6 @@ def _chi_square_independence(
                 dataset_id=dataset_id,
                 group_column=group_column,
                 category_column=category_column,
-                chi_square_statistic=float(statistic),
                 low_expected_share=low_expected_share,
             )
         raise ValueError(
@@ -518,7 +565,7 @@ def _chi_square_independence(
         category_column=category_column,
         statistic=_round_float(statistic),
         p_value=_finite_float(p_value),
-        effect_size=_round_float(_cramers_v(float(statistic), table)),
+        effect_size=_round_float(_corrected_cramers_v_from_counts(table.to_numpy())),
         degrees_of_freedom=int(dof),
         sample_size=int(table.to_numpy().sum()),
         groups={str(index): int(table.loc[index].sum()) for index in table.index},
@@ -540,23 +587,20 @@ def _fisher_exact_2x2(
     dataset_id: str,
     group_column: str,
     category_column: str,
-    chi_square_statistic: float,
     low_expected_share: float,
 ) -> StatTestResult:
     """Deterministic fallback when chi-square expected counts are too sparse."""
     counts = table.to_numpy()
-    odds_ratio, p_value = cast(tuple[Any, Any], stats.fisher_exact(counts))
-    odds = float(odds_ratio)
+    _, p_value = cast(tuple[Any, Any], stats.fisher_exact(counts))
+    odds = _haldane_anscombe_odds_ratio(counts)
     correction_note = ""
-    if not math.isfinite(odds):
-        # A zero cell makes the sample odds ratio infinite; report the
-        # Haldane-Anscombe corrected value so the statistic stays finite.
-        a, b = float(counts[0][0]), float(counts[0][1])
-        c, d = float(counts[1][0]), float(counts[1][1])
-        odds = ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5))
+    if bool((counts == 0).any()):
+        # A zero cell makes the sample odds ratio 0 or infinite; the
+        # Haldane-Anscombe 0.5 correction keeps the estimate (and its Woolf
+        # CI) finite and non-degenerate.
         correction_note = (
-            " The odds ratio is Haldane-Anscombe corrected because a zero cell "
-            "makes the sample odds ratio infinite."
+            " The odds ratio is Haldane-Anscombe corrected because the table "
+            "contains a zero cell."
         )
     return StatTestResult(
         dataset_id=dataset_id,
@@ -565,8 +609,9 @@ def _fisher_exact_2x2(
         category_column=category_column,
         statistic=_round_float(odds),
         p_value=_finite_float(p_value),
-        # Descriptive association strength from the observed table.
-        effect_size=_round_float(_cramers_v(chi_square_statistic, table)),
+        # The odds ratio is the reported effect for a 2x2 table; its Woolf CI
+        # comes from _effect_size_ci when effect_ci is requested.
+        effect_size=_round_float(odds),
         sample_size=int(counts.sum()),
         groups={str(index): int(table.loc[index].sum()) for index in table.index},
         assumptions=[
@@ -592,7 +637,7 @@ def _fisher_exact_2x2(
 
 
 # Tests whose effect size can be recomputed from (group, value) samples; the
-# paired test and contingency tests have no sample-resampling equivalent here.
+# paired test and contingency tests use the dedicated paths in _effect_size_ci.
 _EFFECT_CI_STATISTICS: dict[str, Callable[..., float]] = {}
 
 
@@ -602,9 +647,27 @@ def _effect_size_ci(
     test_type: str,
     group_column: str | None,
     value_column: str | None,
+    category_column: str | None = None,
+    pair_column: str | None = None,
 ) -> tuple[float | None, float | None, list[StatWarning]]:
-    """BCa bootstrap interval for the reported effect size (bounded, seeded)."""
+    """Effect-size interval for the reported effect (bounded, seeded bootstrap
+    for resampling paths; analytic Woolf interval for the Fisher odds ratio)."""
     notes: list[StatWarning] = []
+    if test_type == "paired_t_test" and group_column and value_column and pair_column:
+        return _paired_effect_ci(
+            frame,
+            group_column=group_column,
+            value_column=value_column,
+            pair_column=pair_column,
+        )
+    if test_type == "chi_square_independence" and group_column and category_column:
+        return _contingency_effect_ci(
+            frame, group_column=group_column, category_column=category_column
+        )
+    if test_type == "fisher_exact" and group_column and category_column:
+        return _fisher_effect_ci(
+            frame, group_column=group_column, category_column=category_column
+        )
     statistic = _EFFECT_CI_STATISTICS.get(test_type)
     if statistic is None or not group_column or not value_column:
         notes.append(
@@ -638,6 +701,18 @@ def _effect_size_ci(
             )
         )
     samples = tuple(values.to_numpy(dtype=float) for values in series_list)
+    low, high, bootstrap_notes = _bounded_bootstrap_ci(samples, statistic, paired=False)
+    notes.extend(bootstrap_notes)
+    return low, high, notes
+
+
+def _bounded_bootstrap_ci(
+    samples: tuple[np.ndarray, ...],
+    statistic: Callable[..., float],
+    *,
+    paired: bool,
+) -> tuple[float | None, float | None, list[StatWarning]]:
+    notes: list[StatWarning] = []
     stats = _scipy_stats()
     try:
         with warnings.catch_warnings():
@@ -647,6 +722,7 @@ def _effect_size_ci(
                 statistic,
                 n_resamples=_EFFECT_CI_RESAMPLES,
                 method="BCa",
+                paired=paired,
                 vectorized=False,
                 random_state=np.random.default_rng(_EFFECT_CI_SEED),
             )
@@ -673,6 +749,190 @@ def _effect_size_ci(
     return low, high, notes
 
 
+def _paired_effect_ci(
+    frame: pd.DataFrame,
+    *,
+    group_column: str,
+    value_column: str,
+    pair_column: str,
+) -> tuple[float | None, float | None, list[StatWarning]]:
+    """Bootstrap CI for Cohen's dz plus an analytic mean-difference CI note."""
+    notes: list[StatWarning] = []
+    paired_left, paired_right, _ = _matched_pair_values(
+        frame,
+        group_column=group_column,
+        value_column=value_column,
+        pair_column=pair_column,
+    )
+    differences = cast(pd.Series, paired_left - paired_right)
+    if len(differences) > _EFFECT_CI_MAX_TOTAL_N:
+        differences = differences.sample(
+            n=_EFFECT_CI_MAX_TOTAL_N, random_state=_EFFECT_CI_SEED
+        )
+        notes.append(
+            StatWarning(
+                code="effect_ci_subsampled",
+                severity="info",
+                message=(
+                    f"Effect-size bootstrap used a deterministic subsample of "
+                    f"{_EFFECT_CI_MAX_TOTAL_N} of {len(paired_left)} pairs."
+                ),
+            )
+        )
+    values = differences.to_numpy(dtype=float)
+    mean_ci = _mean_difference_ci(values)
+    if mean_ci is not None:
+        notes.append(
+            StatWarning(
+                code="paired_mean_difference_ci",
+                severity="info",
+                message=(
+                    f"Mean paired difference {np.mean(values):.6g} with 95% CI "
+                    f"[{mean_ci[0]:.6g}, {mean_ci[1]:.6g}]."
+                ),
+            )
+        )
+    low, high, bootstrap_notes = _bounded_bootstrap_ci(
+        (values,), _cohens_dz_np, paired=False
+    )
+    notes.extend(bootstrap_notes)
+    return low, high, notes
+
+
+def _mean_difference_ci(differences: np.ndarray) -> tuple[float, float] | None:
+    stats = _scipy_stats()
+    n = differences.size
+    if n < 2:
+        return None
+    spread = float(np.std(differences, ddof=1))
+    mean = float(np.mean(differences))
+    margin = float(stats.t.ppf(0.975, n - 1)) * spread / math.sqrt(n)
+    if not math.isfinite(margin):
+        return None
+    return mean - margin, mean + margin
+
+
+def _contingency_effect_ci(
+    frame: pd.DataFrame,
+    *,
+    group_column: str,
+    category_column: str,
+) -> tuple[float | None, float | None, list[StatWarning]]:
+    """Paired-rows bootstrap CI for the bias-corrected Cramér's V."""
+    notes: list[StatWarning] = []
+    working = cast(pd.DataFrame, frame[[group_column, category_column]]).dropna()
+    if len(working) > _EFFECT_CI_MAX_TOTAL_N:
+        working = working.sample(n=_EFFECT_CI_MAX_TOTAL_N, random_state=_EFFECT_CI_SEED)
+        notes.append(
+            StatWarning(
+                code="effect_ci_subsampled",
+                severity="info",
+                message=(
+                    f"Effect-size bootstrap used a deterministic subsample of "
+                    f"{_EFFECT_CI_MAX_TOTAL_N} rows."
+                ),
+            )
+        )
+    group_codes = pd.factorize(working[group_column].astype(str))[0]
+    category_codes = pd.factorize(working[category_column].astype(str))[0]
+    low, high, bootstrap_notes = _bounded_bootstrap_ci(
+        (group_codes, category_codes), _corrected_cramers_v_np, paired=True
+    )
+    notes.extend(bootstrap_notes)
+    return low, high, notes
+
+
+def _fisher_effect_ci(
+    frame: pd.DataFrame,
+    *,
+    group_column: str,
+    category_column: str,
+) -> tuple[float | None, float | None, list[StatWarning]]:
+    """Woolf logit interval for the (Haldane-Anscombe corrected) odds ratio."""
+    notes: list[StatWarning] = []
+    working = cast(pd.DataFrame, frame[[group_column, category_column]]).dropna()
+    counts = pd.crosstab(working[group_column], working[category_column]).to_numpy()
+    if counts.shape != (2, 2):
+        notes.append(
+            StatWarning(
+                code="effect_ci_unavailable",
+                severity="info",
+                message="The odds-ratio interval is only defined for a 2x2 table.",
+            )
+        )
+        return None, None, notes
+    odds = _haldane_anscombe_odds_ratio(counts)
+    shift = 0.5 if bool((counts == 0).any()) else 0.0
+    cells = counts.astype(float).ravel() + shift
+    if bool((cells <= 0).any()) or odds <= 0:
+        notes.append(
+            StatWarning(
+                code="effect_ci_failed",
+                severity="info",
+                message="The Woolf odds-ratio interval is undefined on this table.",
+            )
+        )
+        return None, None, notes
+    standard_error = math.sqrt(float((1.0 / cells).sum()))
+    z_975 = 1.959963984540054
+    log_odds = math.log(odds)
+    return (
+        _round_float(math.exp(log_odds - z_975 * standard_error)),
+        _round_float(math.exp(log_odds + z_975 * standard_error)),
+        notes,
+    )
+
+
+def _haldane_anscombe_odds_ratio(counts: np.ndarray) -> float:
+    """Sample odds ratio; 0.5 added to every cell when any cell is zero."""
+    shift = 0.5 if bool((counts == 0).any()) else 0.0
+    a, b = float(counts[0][0]) + shift, float(counts[0][1]) + shift
+    c, d = float(counts[1][0]) + shift, float(counts[1][1]) + shift
+    return (a * d) / (b * c)
+
+
+def _cohens_dz_np(differences: np.ndarray) -> float:
+    spread = float(np.std(differences, ddof=1))
+    if spread == 0:
+        return 0.0
+    return float(np.mean(differences)) / spread
+
+
+def _corrected_cramers_v_np(group_codes: np.ndarray, category_codes: np.ndarray) -> float:
+    group_codes = np.asarray(group_codes, dtype=int)
+    category_codes = np.asarray(category_codes, dtype=int)
+    table = np.zeros((int(group_codes.max()) + 1, int(category_codes.max()) + 1))
+    np.add.at(table, (group_codes, category_codes), 1.0)
+    return _corrected_cramers_v_from_counts(table)
+
+
+def _corrected_cramers_v_from_counts(counts: np.ndarray) -> float:
+    """Bergsma's bias-corrected Cramér's V (degrees-of-freedom corrected)."""
+    table = np.asarray(counts, dtype=float)
+    n = float(table.sum())
+    row_totals = table.sum(axis=1, keepdims=True)
+    column_totals = table.sum(axis=0, keepdims=True)
+    rows_observed = int((row_totals > 0).sum())
+    columns_observed = int((column_totals > 0).sum())
+    if n <= 1 or rows_observed < 2 or columns_observed < 2:
+        return 0.0
+    expected = row_totals @ column_totals / n
+    mask = expected > 0
+    chi_square = float(
+        (((table - expected) ** 2 / np.where(mask, expected, 1.0))[mask]).sum()
+    )
+    phi2 = chi_square / n
+    phi2_corrected = max(
+        0.0, phi2 - (rows_observed - 1) * (columns_observed - 1) / (n - 1)
+    )
+    rows_corrected = rows_observed - (rows_observed - 1) ** 2 / (n - 1)
+    columns_corrected = columns_observed - (columns_observed - 1) ** 2 / (n - 1)
+    denominator = min(rows_corrected - 1, columns_corrected - 1)
+    if denominator <= 0:
+        return 0.0
+    return math.sqrt(phi2_corrected / denominator)
+
+
 def _cohens_d_np(left: np.ndarray, right: np.ndarray) -> float:
     left_n, right_n = len(left), len(right)
     pooled = (
@@ -681,7 +941,7 @@ def _cohens_d_np(left: np.ndarray, right: np.ndarray) -> float:
     ) ** 0.5
     if pooled == 0:
         return 0.0
-    return abs(float(np.mean(left)) - float(np.mean(right))) / pooled
+    return (float(np.mean(left)) - float(np.mean(right))) / pooled
 
 
 def _rank_biserial_np(left: np.ndarray, right: np.ndarray) -> float:
@@ -690,7 +950,7 @@ def _rank_biserial_np(left: np.ndarray, right: np.ndarray) -> float:
     ranks = rankdata(np.concatenate([left, right]))
     left_n, right_n = len(left), len(right)
     u_statistic = float(ranks[:left_n].sum()) - left_n * (left_n + 1) / 2
-    return abs(1.0 - (2.0 * u_statistic) / (left_n * right_n))
+    return (2.0 * u_statistic) / (left_n * right_n) - 1.0
 
 
 def _eta_squared_np(*groups: np.ndarray) -> float:
@@ -1003,7 +1263,8 @@ def _cohens_d(left: pd.Series, right: pd.Series) -> float:
     ) ** 0.5
     if pooled == 0:
         return 0.0
-    return abs(float(left.mean()) - float(right.mean())) / pooled
+    # R4: the sign (first sorted group minus second) is the direction claim.
+    return (float(left.mean()) - float(right.mean())) / pooled
 
 
 def _paired_cohens_d(left: pd.Series, right: pd.Series) -> float:
@@ -1011,15 +1272,7 @@ def _paired_cohens_d(left: pd.Series, right: pd.Series) -> float:
     standard_deviation = float(cast(float, differences.std(ddof=1)))
     if standard_deviation == 0:
         return 0.0
-    return abs(float(differences.mean())) / standard_deviation
-
-
-def _cramers_v(statistic: float, table: pd.DataFrame) -> float:
-    sample_size = int(table.to_numpy().sum())
-    denominator_dimension = min(table.shape[0] - 1, table.shape[1] - 1)
-    if sample_size == 0 or denominator_dimension <= 0:
-        return 0.0
-    return math.sqrt(statistic / (sample_size * denominator_dimension))
+    return float(differences.mean()) / standard_deviation
 
 
 def _eta_squared(grouped: dict[str, pd.Series]) -> float:
@@ -1033,7 +1286,8 @@ def _eta_squared(grouped: dict[str, pd.Series]) -> float:
 
 
 def _rank_biserial(statistic: float, left: pd.Series, right: pd.Series) -> float:
-    return abs(1.0 - (2.0 * statistic) / (len(left) * len(right)))
+    # Signed: positive when the first sorted group is stochastically larger.
+    return (2.0 * statistic) / (len(left) * len(right)) - 1.0
 
 
 def _kruskal_epsilon_squared(
@@ -1083,3 +1337,165 @@ def _scipy_stats() -> Any:
             "scipy is required for M5 statistical tests. Install project dependencies."
         ) from exc
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Hardened correlation screen (E1.5): Holm default, Spearman, min pairwise n.
+# ---------------------------------------------------------------------------
+
+_CORRELATION_METHODS = ("pearson", "spearman")
+_CORRELATION_CORRECTIONS = ("holm", "fdr_bh")
+_CORRELATION_MAX_COLUMNS = 24
+_CORRELATION_MAX_PUBLISHED_ROWS = 50
+_CORRELATION_TRIVIAL_ABS = 0.999
+_CORRELATION_DEFAULT_MIN_PAIRWISE_N = 10
+
+
+@dataclass(slots=True)
+class CorrelationScreenResult:
+    """Correlation table plus the method/missingness facts a receipt needs."""
+
+    table: AnalysisTable
+    correlation_method: str
+    correction_method: str
+    min_pairwise_n: int
+    columns_considered: list[str]
+    pairs_tested: int
+    pairs_insufficient_n: int
+    pairs_degenerate: int
+
+
+def screen_correlations(
+    frame: pd.DataFrame,
+    *,
+    dataset_id: str,
+    dataset_name: str,
+    columns: list[str] | None = None,
+    method: str = "pearson",
+    correction_method: str = "holm",
+    min_pairwise_n: int = _CORRELATION_DEFAULT_MIN_PAIRWISE_N,
+) -> CorrelationScreenResult:
+    """Pairwise correlation screen with explicit method and missingness semantics.
+
+    Holm is the default correction: it controls the family-wise error rate with
+    no positive-dependence assumption, which an arbitrary correlation family
+    does not guarantee for Benjamini-Hochberg. Pairs with fewer than
+    ``min_pairwise_n`` complete rows are marked ``insufficient_n`` instead of
+    receiving a p-value.
+    """
+    if method not in _CORRELATION_METHODS:
+        raise ValueError("method must be `pearson` or `spearman`.")
+    if correction_method not in _CORRELATION_CORRECTIONS:
+        raise ValueError("correction_method must be `holm` or `fdr_bh`.")
+    if min_pairwise_n < 3:
+        raise ValueError("min_pairwise_n must be at least 3.")
+    if columns is None:
+        resolved = [
+            str(column) for column in frame.columns if is_numeric_dtype(frame[column])
+        ][:_CORRELATION_MAX_COLUMNS]
+    else:
+        missing = [column for column in columns if column not in frame.columns]
+        if missing:
+            raise ValueError(f"Columns not found in the dataset: {missing}.")
+        if len(columns) > _CORRELATION_MAX_COLUMNS:
+            raise ValueError(
+                f"At most {_CORRELATION_MAX_COLUMNS} columns can be tested in one call."
+            )
+        resolved = [str(column) for column in columns]
+    if len(resolved) < 2:
+        raise ValueError("Correlation needs at least two numeric columns.")
+    numeric_by_column = {
+        column: cast(pd.Series, pd.to_numeric(frame[column], errors="coerce"))
+        for column in resolved
+    }
+    stats = _scipy_stats()
+    tested: list[dict[str, Any]] = []
+    insufficient: list[dict[str, Any]] = []
+    p_values: list[float] = []
+    degenerate = 0
+    for column_a, column_b in combinations(resolved, 2):
+        paired = pd.DataFrame(
+            {"a": numeric_by_column[column_a], "b": numeric_by_column[column_b]}
+        ).dropna()
+        base_row: dict[str, Any] = {
+            "column_a": column_a,
+            "column_b": column_b,
+            "dataset": dataset_name,
+            "pairwise_complete_n": int(len(paired)),
+            "excluded_pair_n": int(len(frame) - len(paired)),
+            "missing_policy": "pairwise_complete",
+        }
+        if len(paired) < min_pairwise_n:
+            insufficient.append(
+                {
+                    **base_row,
+                    "coefficient": None,
+                    "p_value": None,
+                    "adjusted_p": None,
+                    "insufficient_n": True,
+                }
+            )
+            continue
+        series_a = cast(pd.Series, paired["a"])
+        series_b = cast(pd.Series, paired["b"])
+        if series_a.nunique() < 2 or series_b.nunique() < 2:
+            degenerate += 1
+            continue
+        with np.errstate(invalid="ignore", divide="ignore"):
+            if method == "pearson":
+                test = cast(Any, stats.pearsonr(series_a.to_numpy(), series_b.to_numpy()))
+            else:
+                test = cast(Any, stats.spearmanr(series_a.to_numpy(), series_b.to_numpy()))
+        coefficient = float(test.statistic)
+        p_value = float(test.pvalue)
+        if pd.isna(coefficient) or pd.isna(p_value):
+            degenerate += 1
+            continue
+        tested.append(
+            {
+                **base_row,
+                "coefficient": _round_float(coefficient, digits=4),
+                "p_value": p_value,
+                "insufficient_n": False,
+                "is_trivial_pair": abs(coefficient) >= _CORRELATION_TRIVIAL_ABS,
+            }
+        )
+        p_values.append(p_value)
+    if not tested and not insufficient:
+        raise ValueError(
+            "No column pair had enough pairwise-complete numeric rows to test."
+        )
+    if tested:
+        from statsmodels.stats.multitest import multipletests
+
+        _, adjusted, _, _ = multipletests(p_values, method=correction_method)
+        for row, adjusted_p in zip(tested, adjusted, strict=True):
+            row["adjusted_p"] = float(adjusted_p)
+        tested.sort(
+            key=lambda row: (-abs(float(row["coefficient"])), str(row["column_a"]))
+        )
+    published = (tested + insufficient)[:_CORRELATION_MAX_PUBLISHED_ROWS]
+    table = AnalysisTable(
+        dataset_id=dataset_id,
+        title=f"{dataset_name} - Correlation screen (multiplicity adjusted)",
+        kind="correlation",
+        description=(
+            f"{method} correlations over {len(tested)} tested pairs in {dataset_name}; "
+            f"p-values adjusted with {correction_method} across every tested pair. "
+            f"{len(insufficient)} pair(s) below the minimum pairwise n of "
+            f"{min_pairwise_n} are marked insufficient_n without a p-value; "
+            f"{degenerate} degenerate pair(s) were skipped. "
+            f"Showing {len(published)} of {len(tested) + len(insufficient)} rows."
+        ),
+        rows=published,
+    )
+    return CorrelationScreenResult(
+        table=table,
+        correlation_method=method,
+        correction_method=correction_method,
+        min_pairwise_n=min_pairwise_n,
+        columns_considered=resolved,
+        pairs_tested=len(tested),
+        pairs_insufficient_n=len(insufficient),
+        pairs_degenerate=degenerate,
+    )

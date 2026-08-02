@@ -377,6 +377,140 @@ def test_analyze_time_series_counts_gaps_and_infers_frequency() -> None:
     assert _fact(receipt, "n_periods").value == 21
 
 
+# ---------------------------------------------------------------------------
+# E1.5 hardening: resolved-column cap + projection precheck (slice_profile)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_slice_profile_reports_resolved_columns() -> None:
+    from eda_platform.tools.slice_profile import compute_slice_profile
+
+    profile = compute_slice_profile(
+        _slice_frame(),
+        dataset_id="ds_sales",
+        dataset_name="sales.csv",
+        where_sql=None,
+        columns=None,
+    )
+    assert profile.resolved_columns == ["region", "amount", "flag"]
+
+    narrowed = compute_slice_profile(
+        _slice_frame(),
+        dataset_id="ds_sales",
+        dataset_name="sales.csv",
+        where_sql="amount > 1000000",
+        columns=["amount"],
+    )
+    # Even an empty slice must disclose the scanned scope.
+    assert narrowed.rows_in_slice == 0
+    assert narrowed.resolved_columns == ["amount"]
+
+
+def test_compute_slice_profile_column_cap_applies_after_resolution() -> None:
+    from eda_platform.tools.slice_profile import compute_slice_profile
+
+    wide = pd.DataFrame({f"c{i}": [1.0, 2.0] for i in range(41)})
+    with pytest.raises(ValueError, match="40"):
+        compute_slice_profile(
+            wide,
+            dataset_id="ds_wide",
+            dataset_name="wide.csv",
+            where_sql=None,
+            columns=None,
+        )
+
+
+def test_compute_slice_profile_rejects_oversized_projection_with_advice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from eda_platform.tools import slice_profile
+
+    monkeypatch.setattr(slice_profile, "_MAX_SLICE_CELLS", 100)
+    with pytest.raises(ValueError, match="(?i)column|where"):
+        slice_profile.compute_slice_profile(
+            _slice_frame(),
+            dataset_id="ds_sales",
+            dataset_name="sales.csv",
+            where_sql=None,
+            columns=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# E1.5 hardening: robust STL, resample preflight, parse/duplicate facts
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_series_uses_robust_stl() -> None:
+    from eda_platform.tools.time_series import analyze_series
+
+    frame = _ts_frame()
+    result = analyze_series(
+        frame,
+        dataset_id="ds_daily",
+        dataset_name="daily.csv",
+        time_column="day",
+        value_column="sales",
+        freq="D",
+        period=7,
+    )
+    assert result.decomposition_performed is True
+    assert result.decomposition_method == "stl_robust"
+    assert result.seasonal_strength == pytest.approx(1.0, abs=0.05)
+    metric_names = [row["metric"] for row in (result.table.rows if result.table else [])]
+    assert "decomposition_method" in metric_names
+
+
+def test_analyze_series_rejects_explosive_resample_frequency() -> None:
+    from eda_platform.tools.time_series import analyze_series
+
+    days = pd.date_range("2022-01-01", periods=800, freq="D")
+    frame = pd.DataFrame({"day": days.astype(str), "sales": [1.0] * 800})
+    with pytest.raises(ValueError, match="(?i)period"):
+        analyze_series(
+            frame,
+            dataset_id="ds_daily",
+            dataset_name="daily.csv",
+            time_column="day",
+            value_column="sales",
+            freq="ns",
+        )
+    with pytest.raises(ValueError, match="(?i)period"):
+        analyze_series(
+            frame,
+            dataset_id="ds_daily",
+            dataset_name="daily.csv",
+            time_column="day",
+            value_column="sales",
+            freq="s",
+        )
+
+
+def test_analyze_series_reports_parse_loss_duplicates_and_gaps() -> None:
+    from eda_platform.tools.time_series import analyze_series
+
+    days = pd.date_range("2024-01-01", periods=30, freq="D").astype(str).tolist()
+    del days[10]  # one gap
+    days += [days[3], days[4]]  # two duplicate timestamps
+    days += ["oops-1", "oops-2", "oops-3"]  # three unparseable values
+    frame = pd.DataFrame({"day": days, "sales": [1.0] * len(days)})
+
+    result = analyze_series(
+        frame,
+        dataset_id="ds_daily",
+        dataset_name="daily.csv",
+        time_column="day",
+        value_column="sales",
+        freq="D",
+        period=7,
+    )
+    assert result.parse_loss_count == 3
+    assert result.duplicate_timestamp_count == 2
+    assert result.gap_count == 1
+    metric_names = [row["metric"] for row in (result.table.rows if result.table else [])]
+    assert {"parse_loss_count", "duplicate_timestamp_count", "gap_count"} <= set(metric_names)
+
+
 def test_analyze_time_series_captures_kpss_interpolation_warning() -> None:
     from statsmodels.tools.sm_exceptions import InterpolationWarning
 

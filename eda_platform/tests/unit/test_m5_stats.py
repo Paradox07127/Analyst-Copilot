@@ -32,7 +32,8 @@ def test_t_test_returns_effect_size_assumptions_and_multiple_comparison_warning(
     assert result.value_column == "revenue"
     assert result.sample_size == 20
     assert result.p_value is not None and result.p_value < 0.001
-    assert result.effect_size is not None and result.effect_size > 5.0
+    # Signed Cohen's d (R4): group A sits far below group B.
+    assert result.effect_size is not None and result.effect_size < -5.0
     assert any(warning.code == "multiple_comparisons" for warning in result.warnings)
     assert result.correction_method == "bonferroni"
     assert result.adjusted_p_value == min(1.0, result.p_value * 3)

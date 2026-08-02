@@ -237,7 +237,7 @@ function FindingCard({
           </p>
         )}
         {/* The readiness badge alone cannot say whether the blocker is the data
-         * or the method — findings_ui.py:273 always prints the reason. */}
+         * or the method, so always print the reason. */}
         <p className="text-xs text-status-neutral">
           Report status reason: {finding.report_readiness_reason}
         </p>
@@ -368,8 +368,8 @@ function FindingsPrimer({
   );
 }
 
-/* Mirrors the 5-metric row at findings_ui.py:188-193, but as one banded strip
- * carrying its own scope: the counts are the project's, not this session's. */
+/* One banded strip carrying its own scope: the counts are the project's,
+ * not this session's. */
 function FindingsMetrics({
   findings,
   records,
@@ -423,7 +423,6 @@ function FindingsMetrics({
   );
 }
 
-/* Mirrors _render_decision_coverage (findings_ui.py:132-167). */
 function DecisionCoverageBody({
   projectId,
   sessionId,
@@ -557,8 +556,8 @@ function InvestigationLog({
 }) {
   const statuses = [...new Set(records.map((record) => record.status))].sort();
   if (records.length === 0) {
-    /* Dropping the whole section makes "nothing recorded" and "failed to load"
-     * look identical — findings_ui.py:395-400 says which one it is. */
+    /* Dropping the whole section would make "nothing recorded" and "failed to
+     * load" look identical, so say which one it is. */
     return (
       <section className="flex flex-col gap-2">
         <SectionHeader

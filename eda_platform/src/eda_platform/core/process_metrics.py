@@ -48,11 +48,6 @@ def process_peak_rss(*, platform_name: str | None = None) -> PeakRssMeasurement:
     )
 
 
-def process_peak_rss_bytes() -> int | None:
-    """Convenience form for callers that persist the method separately."""
-    return process_peak_rss().bytes
-
-
 def _posix_peak_maxrss() -> int | None:
     try:
         import resource

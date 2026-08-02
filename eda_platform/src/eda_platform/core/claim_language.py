@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-# Causal-phrase family (English + Chinese). A finding or interpretation whose
-# text contains any of these phrases implies causation.
+# Causal-phrase family. A finding or interpretation whose text contains any of
+# these phrases implies causation. One table, not two: the claim gate used to
+# lack the bare infinitive, so "Discounts cause the 42 returns" passed the claim
+# gate while the identical sentence was blocked in report prose.
 CAUSAL_PHRASES: tuple[str, ...] = (
     "causes",
     "caused",
     "causal",
+    "cause ",
     "drives",
+    "drove",
     "driven by",
     "leads to",
     "led to",
@@ -18,20 +22,18 @@ CAUSAL_PHRASES: tuple[str, ...] = (
     "due to",
     "effect of",
     "results in",
+    "responsible for",
+    "attributable to",
+    "a consequence of",
+    "triggered",
+    # "explains" is causal in prose but is also the standard way to describe R²
+    # ("explains 45% of the variance"); it is on the table because the review
+    # walked a causal claim through it, and the variance form must be rephrased.
+    "explains",
 )
 
-# Report prose uses a narrower English-only gate than findings and interpretations.
-# Keep these families separate because they guard different trust boundaries.
-REPORT_BODY_CAUSAL_TERMS: tuple[str, ...] = (
-    "caused",
-    "causes",
-    "cause ",
-    "drives",
-    "drove",
-    "because of",
-    "leads to",
-    "led to",
-)
+# Same family under the name report_validator imports it by.
+REPORT_BODY_CAUSAL_TERMS: tuple[str, ...] = CAUSAL_PHRASES
 
 # Safe negated forms: a deliberate disclaimer ("not a causal claim") must not
 # trip the causal gate, while a genuine causal assertion still must. Ordered

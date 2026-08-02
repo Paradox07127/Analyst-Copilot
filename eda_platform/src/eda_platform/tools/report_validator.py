@@ -49,6 +49,39 @@ _ROW_LOCATOR_PATTERN = re.compile(
 # A comparison operator immediately before a number token marks an inequality
 # assertion ("p < 0.0001"): verified against the bound, not by equality.
 _THRESHOLD_PREFIX_PATTERN = re.compile(r"(<=|>=|<|>)\s*$")
+# R3-F1: an inequality is only exempt from value matching when the text names
+# the statistic it bounds, and it then verifies against that field alone.
+# Without the binding, "losses were < 1000000" verified against a 0.003 p-value
+# — any number preceded by "<" was unfalsifiable.
+_THRESHOLD_SUBJECT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "p_value",
+        re.compile(r"(?:^|[^0-9a-z_])(?:p|p[-_ ]?values?|significance)\s*$", re.I),
+    ),
+    (
+        "effect_size",
+        re.compile(
+            r"(?:^|[^0-9a-z_])(?:effect(?:[ -]sizes?)?|cohen'?s? ?d|cramer'?s? ?v"
+            r"|eta[ -]squared|epsilon[ -]squared|odds ratio"
+            r"|rank[- ]biserial(?: correlation)?)\s*$",
+            re.I,
+        ),
+    ),
+    (
+        "test_statistic",
+        re.compile(
+            r"(?:^|[^0-9a-z_])(?:test statistic|statistics?|[tzfuh][ -]statistic"
+            r"|z[ -]score|chi2|chi[ -]squared?)\s*$",
+            re.I,
+        ),
+    ),
+)
+# StatTestResult locator -> the threshold subject its value may verify.
+_STAT_LOCATOR_SUBJECTS = {
+    "p_value": "p_value",
+    "statistic": "test_statistic",
+    "effect_size": "effect_size",
+}
 _THRESHOLD_OPS = {
     "<": operator.lt,
     "<=": operator.le,
@@ -417,8 +450,12 @@ def _numeric_gate_outcome(
     for token in tokens:
         pool = percent_pool if token.is_percent else raw_pool
         eligible_values = (
-            [value for value, _policy, eligible in pool if eligible]
-            if token.threshold_op is not None
+            [
+                value
+                for value, _policy, subject in pool
+                if subject == token.threshold_subject
+            ]
+            if token.threshold_op is not None and token.threshold_subject is not None
             else []
         )
         if claim_resolves_nothing:
@@ -530,7 +567,7 @@ def _numeric_evidence_values(
     claim: ReportClaim,
     evidence_pack: EvidencePack,
     sql_results: dict[str, SqlResult],
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     values, _ = _numeric_evidence_values_with_sources(claim, evidence_pack, sql_results)
     return values
 
@@ -539,8 +576,8 @@ def _numeric_evidence_values_with_sources(
     claim: ReportClaim,
     evidence_pack: EvidencePack,
     sql_results: dict[str, SqlResult],
-) -> tuple[list[tuple[float, str, str, bool]], list[NumericEvidenceSource]]:
-    values: list[tuple[float, str, str, bool]] = []
+) -> tuple[list[tuple[float, str, str, str | None]], list[NumericEvidenceSource]]:
+    values: list[tuple[float, str, str, str | None]] = []
     sources: list[NumericEvidenceSource] = []
     for evidence in claim.evidence:
         # Only resolved persisted payloads feed the pool; the model-authored
@@ -569,7 +606,7 @@ def numeric_evidence_values_with_sources(
     claim: ReportClaim,
     evidence_pack: EvidencePack,
     sql_results: dict[str, SqlResult],
-) -> tuple[list[tuple[float, str, str, bool]], list[NumericEvidenceSource]]:
+) -> tuple[list[tuple[float, str, str, str | None]], list[NumericEvidenceSource]]:
     """Public shell over the per-ref numeric resolver (tools/evidence_display)."""
     return _numeric_evidence_values_with_sources(claim, evidence_pack, sql_results)
 
@@ -682,7 +719,7 @@ def _resolve_evidence_numbers(
     evidence: EvidenceRef,
     evidence_pack: EvidencePack,
     sql_results: dict[str, SqlResult],
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     """Dispatch on the artifact's persisted type, never the model-authored kind.
 
     Each entry is (value, unit, policy, threshold_eligible). Policy is derived
@@ -717,10 +754,10 @@ def _resolve_evidence_numbers(
 def _sql_result_numbers_with_policy(
     evidence: EvidenceRef,
     sql_result: SqlResult,
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     """Resolve numeric evidence from a SqlResult preview."""
     return [
-        (value, _coarse_numeric_unit(unit_label), policy, False)
+        (value, _coarse_numeric_unit(unit_label), policy, None)
         for value, unit_label, policy in _sql_result_number_cells(evidence, sql_result)
     ]
 
@@ -812,7 +849,7 @@ def _coarse_numeric_unit(unit_label: str | None) -> str:
 def _profile_numbers(
     evidence: EvidenceRef,
     evidence_pack: EvidencePack,
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     dataset = next(
         (
             dataset
@@ -829,29 +866,29 @@ def _profile_numbers(
     locator = evidence.locator.strip()
     if locator == "summary":
         return [
-            (float(dataset.row_count), "raw", "exact", False),
-            (float(dataset.column_count), "raw", "exact", False),
+            (float(dataset.row_count), "raw", "exact", None),
+            (float(dataset.column_count), "raw", "exact", None),
         ]
     if locator in {"rows", "row_count"}:
-        return [(float(dataset.row_count), "raw", "exact", False)]
+        return [(float(dataset.row_count), "raw", "exact", None)]
     if locator in {"columns", "column_count"}:
-        return [(float(dataset.column_count), "raw", "exact", False)]
+        return [(float(dataset.column_count), "raw", "exact", None)]
     if locator in {"missing_percent", "missing_percent.*"}:
         return [
-            (float(value), "percent", "rounded", False)
+            (float(value), "percent", "rounded", None)
             for value in dataset.missing_percent.values()
         ]
     if locator.startswith("missing_percent."):
         column = locator.removeprefix("missing_percent.")
         value = dataset.missing_percent.get(column)
-        return [] if value is None else [(float(value), "percent", "rounded", False)]
+        return [] if value is None else [(float(value), "percent", "rounded", None)]
     return []
 
 
 def _stat_test_numbers(
     evidence: EvidenceRef,
     evidence_pack: EvidencePack,
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     stat_test = next(
         (
             stat_test
@@ -870,12 +907,20 @@ def _stat_test_numbers(
     }
     if evidence.locator in values and values[evidence.locator] is not None:
         # sample_size is a cardinality; the test statistics are continuous and
-        # the only values inequality tokens may verify against.
+        # the only values inequality tokens may verify against — each against
+        # the token that names it, never across fields.
         if evidence.locator == "sample_size":
-            return [(float(stat_test.sample_size), "raw", "exact", False)]
-        return [(float(values[evidence.locator]), "raw", "rounded", True)]
+            return [(float(stat_test.sample_size), "raw", "exact", None)]
+        return [
+            (
+                float(values[evidence.locator]),
+                "raw",
+                "rounded",
+                _STAT_LOCATOR_SUBJECTS[evidence.locator],
+            )
+        ]
     return [
-        (value, "raw", policy, False)
+        (value, "raw", policy, None)
         for value, policy in _typed_numbers_from_object(stat_test.model_dump())
     ]
 
@@ -883,7 +928,7 @@ def _stat_test_numbers(
 def _model_card_numbers(
     evidence: EvidenceRef,
     evidence_pack: EvidencePack,
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     model_card = next(
         (
             model_card
@@ -899,9 +944,9 @@ def _model_card_numbers(
     if locator.startswith("metrics."):
         metric_name = locator.removeprefix("metrics.")
         value = model_card.metrics.get(metric_name)
-        return [] if value is None else [(float(value), "raw", "rounded", False)]
+        return [] if value is None else [(float(value), "raw", "rounded", None)]
     return [
-        (value, "raw", "rounded", False)
+        (value, "raw", "rounded", None)
         for value, _policy in _typed_numbers_from_object(model_card.metrics)
     ]
 
@@ -909,7 +954,7 @@ def _model_card_numbers(
 def _table_numbers(
     evidence: EvidenceRef,
     evidence_pack: EvidencePack,
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     table = next(
         (
             table
@@ -923,7 +968,7 @@ def _table_numbers(
 
     selected = _select_table_locator(table.rows, evidence.locator)
     return [
-        (value, "raw", policy, False)
+        (value, "raw", policy, None)
         for value, policy in _typed_numbers_from_object(selected)
     ]
 
@@ -931,7 +976,7 @@ def _table_numbers(
 def _quality_issue_numbers(
     evidence: EvidenceRef,
     evidence_pack: EvidencePack,
-) -> list[tuple[float, str, str, bool]]:
+) -> list[tuple[float, str, str, str | None]]:
     """Structured QualityIssue figures (analysis-v3 §11.3).
 
     Locators follow the produced grammar (agents/reporting.py emits
@@ -960,18 +1005,18 @@ def _quality_issue_numbers(
         return []
     locator = evidence.locator.strip()
     if locator in {"", "issues"}:
-        return [(float(len(issues)), "raw", "exact", False)]
+        return [(float(len(issues)), "raw", "exact", None)]
     code, separator, column = locator.removeprefix("quality_issue:").partition(":")
     if not separator:
         return []
-    values: list[tuple[float, str, str, bool]] = []
+    values: list[tuple[float, str, str, str | None]] = []
     for issue in structured:
         if issue.code != code or (issue.column or "") != column:
             continue
         if issue.metric_value is not None:
-            values.append((issue.metric_value, issue.metric_unit, "rounded", False))
+            values.append((issue.metric_value, issue.metric_unit, "rounded", None))
         if issue.affected_count is not None:
-            values.append((float(issue.affected_count), "raw", "exact", False))
+            values.append((float(issue.affected_count), "raw", "exact", None))
     return values
 
 
@@ -1021,12 +1066,26 @@ def extract_numbers(text: str) -> list[tuple[float, bool]]:
 @dataclass(frozen=True)
 class _NumericToken:
     """One claim-text number with its display precision and, when directly
-    preceded by a comparison operator, the asserted inequality."""
+    preceded by a comparison operator, the asserted inequality and the statistic
+    that inequality names (``threshold_subject``)."""
 
     value: float
     is_percent: bool
     decimals: int
     threshold_op: str | None = None
+    threshold_subject: str | None = None
+
+
+def _threshold_subject(prefix_text: str, value: float) -> str | None:
+    """Which statistic an inequality token names, or None when it names none."""
+    for name, pattern in _THRESHOLD_SUBJECT_PATTERNS:
+        if pattern.search(prefix_text) is None:
+            continue
+        # A bound outside (0, 1] is not a p-value however the sentence reads.
+        if name == "p_value" and not 0.0 < value <= 1.0:
+            return None
+        return name
+    return None
 
 
 def _numeric_tokens_from_text(text: str) -> list[_NumericToken]:
@@ -1049,6 +1108,11 @@ def _numeric_tokens_from_text(text: str) -> list[_NumericToken]:
                 is_percent=is_percent,
                 decimals=decimals,
                 threshold_op=prefix.group(1) if prefix else None,
+                threshold_subject=(
+                    _threshold_subject(text[: prefix.start()], value)
+                    if prefix is not None
+                    else None
+                ),
             )
         )
     return tokens
@@ -1056,6 +1120,21 @@ def _numeric_tokens_from_text(text: str) -> list[_NumericToken]:
 
 def _numbers_from_text(text: str) -> list[tuple[float, bool]]:
     return [(token.value, token.is_percent) for token in _numeric_tokens_from_text(text)]
+
+
+def numeric_tokens_from_text(text: str) -> list[_NumericToken]:
+    """Public alias of the numeric tokenizer (promoted in E3-B)."""
+    return _numeric_tokens_from_text(text)
+
+
+def value_supports_token(token: _NumericToken, value: float, policy: str) -> bool:
+    """Public alias of the exact/half-ULP token matcher (promoted in E3-B)."""
+    return _value_supports_token(token, value, policy)
+
+
+def satisfies_threshold(token: _NumericToken, values: Iterable[float]) -> bool:
+    """Public alias of the inequality-token verifier (promoted in E3-B)."""
+    return _satisfies_threshold(token, values)
 
 
 def _matches_any_evidence(
@@ -1192,7 +1271,7 @@ def _token_verifying_ref_indexes(
 ) -> set[int]:
     """Indexes of refs whose resolved values verified >=1 token, mirroring the
     _numeric_gate_outcome matching rules (unit pools, thresholds, policies)."""
-    per_ref: list[list[tuple[float, str, str, bool]]] = []
+    per_ref: list[list[tuple[float, str, str, str | None]]] = []
     for evidence in claim.evidence:
         if evidence_pack is not None:
             per_ref.append(_resolve_evidence_numbers(evidence, evidence_pack, sql_results))
@@ -1210,12 +1289,12 @@ def _token_verifying_ref_indexes(
             for value, unit, policy, eligible in values
             if (unit == "percent") == token.is_percent
         ]
-        if token.threshold_op is not None:
+        if token.threshold_op is not None and token.threshold_subject is not None:
             compare = _THRESHOLD_OPS[token.threshold_op]
             eligible_entries = [
                 (ref_index, value)
-                for ref_index, value, _policy, eligible in pool
-                if eligible
+                for ref_index, value, _policy, subject in pool
+                if subject == token.threshold_subject
             ]
             if eligible_entries:
                 verifying.update(

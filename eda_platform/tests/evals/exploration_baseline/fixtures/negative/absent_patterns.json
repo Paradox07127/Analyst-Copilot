@@ -1,0 +1,37 @@
+{
+  "_meta": {
+    "dataset": "../planted/planted_retail.csv",
+    "created": "2026-08-01",
+    "note": "Patterns verified ABSENT by construction and re-proven with pandas in test_harness.py. An agent claiming any of these fails the negative/absence check. direction '' means a claim in any direction violates."
+  },
+  "patterns": [
+    {
+      "pattern_id": "absent_trend_customer_age",
+      "kind": "trend",
+      "columns": ["customer_age"],
+      "direction": "",
+      "description": "customer_age is drawn independently of date (|spearman| < 0.2)."
+    },
+    {
+      "pattern_id": "absent_group_diff_region_units",
+      "kind": "group_difference",
+      "columns": ["units", "region"],
+      "direction": "",
+      "description": "units are region-independent (mean ratio within 0.9..1.1)."
+    },
+    {
+      "pattern_id": "absent_missing_revenue",
+      "kind": "missing_pattern",
+      "columns": ["revenue"],
+      "direction": "",
+      "description": "revenue has zero missing values."
+    },
+    {
+      "pattern_id": "absent_outlier_units",
+      "kind": "outlier",
+      "columns": ["units"],
+      "direction": "",
+      "description": "units are uniform 1..20 with no planted spikes."
+    }
+  ]
+}

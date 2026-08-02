@@ -939,8 +939,7 @@ function ProposalCard({
 }
 
 /* Verified relations — sunk automatically from Relationships review; this
- * page only deletes a wrong one (delete by content, not index: see
- * semantic_ui.py:216-239 for the reference layout). */
+ * page only deletes a wrong one (delete by content, not index). */
 function RelationEntry({
   sessionId,
   relation,

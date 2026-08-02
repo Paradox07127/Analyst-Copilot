@@ -129,38 +129,3 @@ export function LiveStatusCard({
   );
 }
 
-/* Whether a run/turn in "Configured provider" mode will actually spend money.
- * Selecting env is not enough: if the configured provider is Offline, or is
- * missing a key, the session makes zero paid calls. Both the Launchpad and Chat
- * badges asked only `llm === "env"` and so promised "Calls a paid model" for a
- * run that could not call anything. */
-export function costSignal(
-  mode: "env" | "offline",
-  settings: SettingsView | undefined,
-): { tone: Tone; label: string; paid: boolean; note: string | null } {
-  if (mode === "offline") {
-    return { tone: "ok", label: "No API calls", paid: false, note: null };
-  }
-  /* Settings not loaded yet — do not claim either way. */
-  if (!settings) {
-    return { tone: "neutral", label: "Checking provider…", paid: false, note: null };
-  }
-  const state = liveState(settings);
-  if (state === "ready") {
-    return { tone: "warn", label: "Calls a paid model", paid: true, note: null };
-  }
-  if (state === "offline") {
-    return {
-      tone: "ok",
-      label: "No API calls",
-      paid: false,
-      note: "The configured provider is Offline, so this stays deterministic.",
-    };
-  }
-  return {
-    tone: "critical",
-    label: "Provider not usable yet",
-    paid: false,
-    note: "Finish the provider setup in Settings, or switch to Offline.",
-  };
-}

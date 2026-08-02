@@ -1,0 +1,30 @@
+{
+  "suite": "capability",
+  "items": [
+    {
+      "item_id": "planted_retail_v1",
+      "bucket": "planted",
+      "dataset": "fixtures/planted/planted_retail.csv",
+      "ground_truth": "fixtures/planted/ground_truth.json",
+      "task": "Autonomously explore this retail orders dataset and report every material insight (trends, group differences, data-quality patterns, anomalies) with evidence references.",
+      "status": "ready"
+    },
+    {
+      "item_id": "negative_retail_v1",
+      "bucket": "negative",
+      "dataset": "fixtures/planted/planted_retail.csv",
+      "ground_truth": "fixtures/negative/absent_patterns.json",
+      "task": "Autonomously explore this retail orders dataset and report every material insight with evidence references. Do not report patterns you have not verified.",
+      "status": "ready"
+    },
+    {
+      "item_id": "external_insighteval_subset_v1",
+      "bucket": "external",
+      "dataset": "",
+      "ground_truth": "",
+      "task": "InsightEval 100-instance subset (goal + table -> graded insights).",
+      "status": "blocked_no_license",
+      "notes": "Upstream repo has no LICENSE (README: 'No license has been selected'); cannot vendor. Local clone + adapter documented in ../external/adapter_notes.md."
+    }
+  ]
+}

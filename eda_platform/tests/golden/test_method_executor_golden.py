@@ -31,7 +31,8 @@ def test_group_comparison_detects_known_difference_and_null() -> None:
 
     assert result.p_value is not None and result.p_value < 0.001
     assert result.statistic is not None and result.statistic < 0
-    assert result.effect_size is not None and 2.5 <= result.effect_size <= 5.5
+    # Signed Cohen's d (R4): direction matches the negative t statistic.
+    assert result.effect_size is not None and -5.5 <= result.effect_size <= -2.5
 
     null_frame = pd.DataFrame(
         {

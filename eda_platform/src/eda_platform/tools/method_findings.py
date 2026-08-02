@@ -137,8 +137,12 @@ def stat_findings(
 def _stat_deviation(result: StatTestResult) -> float | None:
     """Calculate a normalized departure-from-baseline signal."""
     if result.effect_size is not None:
+        absolute = abs(result.effect_size)
+        if result.test_type == "fisher_exact" and absolute > 0:
+            # OR is symmetric on the log scale: OR and 1/OR are equal-strength effects.
+            absolute = max(absolute, 1.0 / absolute)
         large = _effect_cutoffs(result.test_type)[1]
-        return _clamp01(abs(result.effect_size) / large)
+        return _clamp01(absolute / large)
     effective_p = (
         result.p_value if result.adjusted_p_value is None else result.adjusted_p_value
     )
@@ -254,6 +258,7 @@ def _effect_name(test_type: str) -> str:
         "independent_t_test": "Cohen d",
         "paired_t_test": "Cohen d",
         "chi_square_independence": "Cramer V",
+        "fisher_exact": "odds ratio",
         "one_way_anova": "eta squared",
         "welch_anova": "descriptive eta squared",
         "mann_whitney_u": "rank-biserial correlation",
@@ -267,11 +272,17 @@ def _effect_cutoffs(test_type: str) -> tuple[float, float]:
         return 0.5, 0.8
     if test_type in {"one_way_anova", "welch_anova", "kruskal_wallis"}:
         return 0.06, 0.14
+    if test_type == "fisher_exact":
+        # Odds-ratio cutoffs mapping to Cohen's d 0.5/0.8 (Chen, Cohen & Chen 2010).
+        return 3.0, 5.0
     return 0.3, 0.5
 
 
 def _effect_magnitude(test_type: str, value: float) -> str:
     absolute = abs(value)
+    if test_type == "fisher_exact" and absolute > 0:
+        # OR is symmetric on the log scale: OR and 1/OR are equal-strength effects.
+        absolute = max(absolute, 1.0 / absolute)
     medium, large = _effect_cutoffs(test_type)
     if absolute >= large:
         return "large"

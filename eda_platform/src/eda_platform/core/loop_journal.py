@@ -2,28 +2,30 @@
 
 The journal is the source of truth. Snapshots are optional caches and are
 never used by :meth:`JsonlLoopJournal.rebuild`, so corruption in an older
-event cannot be hidden by a newer snapshot.
+event cannot be hidden by a newer snapshot. File mechanics (locking, fsync,
+tail truncation, epoch fencing) live in the generic
+:class:`~eda_platform.core.event_journal.JsonlEventJournal`; this module owns
+only the investigation event/state semantics.
 """
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
-from eda_platform.core.file_lock import lock_exclusive, unlock
+from pydantic import TypeAdapter
+
+from eda_platform.core.event_journal import EventJournalError, JsonlEventJournal
 from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.deep_investigation import (
     LOOP_JOURNAL_SCHEMA_VERSION,
     InvestigationLoopEvent,
     InvestigationLoopState,
-    LoopJournalEventType,
 )
 
 
-class LoopJournalError(RuntimeError):
+class LoopJournalError(EventJournalError):
     """Base error for journal persistence or transition failures."""
 
 
@@ -37,18 +39,6 @@ class LoopTransitionError(LoopJournalError):
 
 class LoopResumeIncompatibleError(LoopJournalError):
     """Raised when policy or code fingerprints do not match a persisted loop."""
-
-
-class LoopJournal(Protocol):
-    """Persistence contract consumed by a future loop executor."""
-
-    def events(self) -> list[InvestigationLoopEvent]: ...
-
-    def rebuild(self) -> InvestigationLoopState | None: ...
-
-    def append(self, event: InvestigationLoopEvent) -> InvestigationLoopState: ...
-
-    def write_snapshot(self, state: InvestigationLoopState | None = None) -> Path: ...
 
 
 def make_investigation_id(
@@ -243,23 +233,29 @@ def assert_resume_compatible(
         )
 
 
-class JsonlLoopJournal:
+_LOOP_EVENT_ADAPTER: TypeAdapter[InvestigationLoopEvent] = TypeAdapter(
+    InvestigationLoopEvent
+)
+_LOOP_STATE_ADAPTER: TypeAdapter[InvestigationLoopState] = TypeAdapter(
+    InvestigationLoopState
+)
+
+
+class JsonlLoopJournal(JsonlEventJournal[InvestigationLoopEvent, InvestigationLoopState]):
     """A flushed, fsynced JSONL journal with an investigation-level file lock."""
 
     def __init__(self, path: Path | str) -> None:
-        self.path = Path(path)
-        self.snapshot_path = self.path.with_suffix(".snapshot.json")
-        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        self.executor_lock_path = self.path.with_suffix(self.path.suffix + ".executor.lock")
-        self._claimed_attempt_epoch: int | None = None
-
-    def events(self) -> list[InvestigationLoopEvent]:
-        if not self.path.exists():
-            return []
-        return list(_read_events(self.path))
-
-    def rebuild(self) -> InvestigationLoopState | None:
-        return rebuild_loop_state(self.events())
+        super().__init__(
+            path,
+            event_adapter=_LOOP_EVENT_ADAPTER,
+            state_adapter=_LOOP_STATE_ADAPTER,
+            reducer=reduce_loop_event,
+            id_field="investigation_id",
+            label="loop",
+            executor_lock_prefix="loop-executor",
+            corruption_error=LoopJournalCorruptionError,
+            transition_error=LoopTransitionError,
+        )
 
     def initialize(
         self,
@@ -287,11 +283,7 @@ class JsonlLoopJournal:
             llm_call_cap=llm_call_cap,
         )
         with self._locked():
-            state = (
-                rebuild_loop_state(list(_read_events(self.path)))
-                if self.path.exists()
-                else None
-            )
+            state = self._rebuild_unlocked()
             if state is not None:
                 assert_resume_compatible(
                     state,
@@ -313,205 +305,6 @@ class JsonlLoopJournal:
             state = reduce_loop_event(None, event)
             self._append_unlocked(event)
             return state
-
-    def append(self, event: InvestigationLoopEvent) -> InvestigationLoopState:
-        with self._locked():
-            current = (
-                rebuild_loop_state(list(_read_events(self.path)))
-                if self.path.exists()
-                else None
-            )
-            if (
-                current is not None
-                and self._claimed_attempt_epoch is not None
-                and current.attempt_epoch != self._claimed_attempt_epoch
-            ):
-                raise LoopTransitionError(
-                    "stale loop executor attempt epoch; another owner claimed the journal."
-                )
-            updated = reduce_loop_event(current, event)
-            self._append_unlocked(event)
-            return updated
-
-    def append_new(
-        self,
-        event_type: LoopJournalEventType,
-        **fields: object,
-    ) -> InvestigationLoopState:
-        """Build and append the next event while holding the single-writer lock."""
-        with self._locked():
-            current = (
-                rebuild_loop_state(list(_read_events(self.path)))
-                if self.path.exists()
-                else None
-            )
-            if current is None:
-                raise LoopTransitionError("initialize the journal before appending events.")
-            if (
-                event_type != "attempt_started"
-                and self._claimed_attempt_epoch is not None
-                and current.attempt_epoch != self._claimed_attempt_epoch
-            ):
-                raise LoopTransitionError(
-                    "stale loop executor attempt epoch; another owner claimed the journal."
-                )
-            event_epoch = (
-                self._claimed_attempt_epoch
-                if self._claimed_attempt_epoch is not None
-                else current.attempt_epoch
-            )
-            event = InvestigationLoopEvent.model_validate(
-                {
-                    **fields,
-                    "seq": current.last_seq + 1,
-                    "investigation_id": current.investigation_id,
-                    "event_type": event_type,
-                    "attempt_epoch": fields.get("attempt_epoch", event_epoch),
-                }
-            )
-            updated = reduce_loop_event(current, event)
-            self._append_unlocked(event)
-            return updated
-
-    def claim_attempt(self) -> InvestigationLoopState:
-        """Advance the fencing epoch for a new executor owner."""
-        current = self.rebuild()
-        if current is None:
-            raise LoopTransitionError("initialize the journal before claiming an attempt.")
-        claimed = self.append_new(
-            "attempt_started",
-            attempt_epoch=current.attempt_epoch + 1,
-        )
-        self._claimed_attempt_epoch = claimed.attempt_epoch
-        return claimed
-
-    @contextmanager
-    def execution_lock(self) -> Iterator[None]:
-        """Serialize one investigation executor for the whole primary+loop lifecycle."""
-        session_dir = next(
-            (parent for parent in self.path.parents if parent.parent.name == "sessions"),
-            None,
-        )
-        lock_path = self.executor_lock_path
-        if session_dir is not None:
-            workspace = session_dir.parent.parent.parent.parent
-            lock_path = (
-                workspace
-                / ".storage-operations"
-                / "locks"
-                / f"loop-executor-{stable_hash(str(self.path.resolve(strict=False)))}.lock"
-            )
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+b") as handle:
-            lock_exclusive(handle.fileno())
-            try:
-                yield
-            finally:
-                unlock(handle.fileno())
-
-    @contextmanager
-    def fenced_side_effect(self) -> Iterator[int]:
-        """Hold the journal lock while committing an epoch-fenced external result."""
-        with self._locked():
-            current = (
-                rebuild_loop_state(list(_read_events(self.path)))
-                if self.path.exists()
-                else None
-            )
-            if current is None or self._claimed_attempt_epoch is None:
-                raise LoopTransitionError(
-                    "claim an executor attempt before committing loop side effects."
-                )
-            if current.attempt_epoch != self._claimed_attempt_epoch:
-                raise LoopTransitionError(
-                    "stale loop executor attempt epoch; refusing side-effect commit."
-                )
-            yield current.attempt_epoch
-
-    def write_snapshot(self, state: InvestigationLoopState | None = None) -> Path:
-        """Atomically write an optional state cache; the journal remains authoritative."""
-        with self._locked():
-            rebuilt = rebuild_loop_state(list(_read_events(self.path)))
-            if rebuilt is None:
-                raise LoopTransitionError("cannot snapshot an empty journal.")
-            if state is not None and state != rebuilt:
-                raise LoopTransitionError("snapshot state does not match the journal.")
-            self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.snapshot_path.with_suffix(self.snapshot_path.suffix + ".tmp")
-            body = rebuilt.model_dump_json(indent=2).encode("utf-8")
-            with temporary.open("wb") as handle:
-                handle.write(body)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.snapshot_path)
-            return self.snapshot_path
-
-    def read_snapshot(self) -> InvestigationLoopState | None:
-        if not self.snapshot_path.exists():
-            return None
-        try:
-            return InvestigationLoopState.model_validate_json(
-                self.snapshot_path.read_bytes()
-            )
-        except (OSError, ValueError) as exc:
-            raise LoopJournalCorruptionError(
-                f"Invalid loop snapshot {self.snapshot_path}: {exc}"
-            ) from exc
-
-    def _append_unlocked(self, event: InvestigationLoopEvent) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._truncate_unterminated_tail_unlocked()
-        encoded = event.model_dump_json().encode("utf-8") + b"\n"
-        with self.path.open("ab") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-
-    def _truncate_unterminated_tail_unlocked(self) -> None:
-        """Discard an uncommitted crash tail before appending the next event."""
-        if not self.path.exists():
-            return
-        raw = self.path.read_bytes()
-        if not raw or raw.endswith(b"\n"):
-            return
-        committed_end = raw.rfind(b"\n") + 1
-        with self.path.open("r+b") as handle:
-            handle.truncate(committed_end)
-            handle.flush()
-            os.fsync(handle.fileno())
-
-    @contextmanager
-    def _locked(self) -> Iterator[None]:
-        from eda_platform.core.store import ArtifactStore
-
-        session_dir = next(
-            (
-                parent
-                for parent in self.path.parents
-                if parent.parent.name == "sessions"
-            ),
-            None,
-        )
-        if session_dir is None:
-            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.lock_path.open("a+b") as handle:
-                lock_exclusive(handle.fileno())
-                try:
-                    yield
-                finally:
-                    unlock(handle.fileno())
-            return
-        project_dir = session_dir.parent.parent
-        workspace = project_dir.parent.parent
-        store = ArtifactStore(workspace, init_db=False)
-        with store.session_write_guard(project_dir.name, session_dir.name):
-            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.lock_path.open("a+b") as handle:
-                lock_exclusive(handle.fileno())
-                try:
-                    yield
-                finally:
-                    unlock(handle.fileno())
 
 
 def _start_loop(event: InvestigationLoopEvent) -> InvestigationLoopState:
@@ -589,34 +382,3 @@ def _require(event: InvestigationLoopEvent, *fields: str) -> None:
 def _require_no_pending(state: InvestigationLoopState) -> None:
     if state.pending_call_id is not None or state.pending_probe_id is not None:
         raise LoopTransitionError("cannot terminate while a loop operation is pending.")
-
-
-def _read_events(path: Path) -> Iterator[InvestigationLoopEvent]:
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise LoopJournalCorruptionError(f"Cannot read loop journal {path}: {exc}") from exc
-    if not raw:
-        return
-
-    chunks = raw.split(b"\n")
-    has_trailing_newline = raw.endswith(b"\n")
-    last_record_index = len(chunks) - (2 if has_trailing_newline else 1)
-    for index, line in enumerate(chunks):
-        if has_trailing_newline and index == len(chunks) - 1:
-            continue
-        is_unterminated_tail = not has_trailing_newline and index == last_record_index
-        if not line:
-            if is_unterminated_tail:
-                continue
-            raise LoopJournalCorruptionError(
-                f"Blank committed record at line {index + 1} in {path}."
-            )
-        try:
-            yield InvestigationLoopEvent.model_validate_json(line)
-        except (ValueError, UnicodeDecodeError) as exc:
-            if is_unterminated_tail:
-                return
-            raise LoopJournalCorruptionError(
-                f"Invalid committed record at line {index + 1} in {path}: {exc}"
-            ) from exc

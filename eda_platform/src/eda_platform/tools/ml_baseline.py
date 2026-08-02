@@ -17,6 +17,7 @@ from eda_platform.core.tool_guard import (
     GuardViolation,
     check_column_exists,
     check_column_semantic_type,
+    check_enum,
     check_non_empty,
     check_range,
     raise_for_violations,
@@ -46,12 +47,18 @@ def run_baseline_model(
     target_column: str,
     time_column: str | None = None,
     random_state: int = 42,
+    split_policy: str = "auto",
+    group_column: str | None = None,
+    cv_folds: int = 0,
 ) -> ModelCard:
     guard_baseline_model_params(
         frame,
         target_column=target_column,
         time_column=time_column,
         random_state=random_state,
+        split_policy=split_policy,
+        group_column=group_column,
+        cv_folds=cv_folds,
     )
     _ensure_sklearn()
     if target_column not in frame.columns:
@@ -59,19 +66,26 @@ def run_baseline_model(
 
     task_type = _infer_task_type(_series(frame, target_column))
     detected_time_column = time_column or _detect_time_column(frame, exclude={target_column})
+    if split_policy == "time" and detected_time_column is None:
+        raise ValueError(
+            "split_policy `time` requires a time column: pass `time_column` or "
+            "include a parseable datetime column."
+        )
     leakage_checks: list[LeakageCheck] = []
     feature_columns, excluded = _select_features(
         frame,
         target_column=target_column,
         task_type=task_type,
         time_column=detected_time_column,
+        group_column=group_column,
         leakage_checks=leakage_checks,
     )
     if not feature_columns:
         raise ValueError("No usable feature columns remain after leakage checks")
 
+    use_time_order = detected_time_column is not None and split_policy in ("auto", "time")
     working = _frame(frame, [*feature_columns, target_column]).copy()
-    if detected_time_column is not None and detected_time_column in frame.columns:
+    if use_time_order and detected_time_column is not None:
         working[detected_time_column] = pd.to_datetime(
             frame[detected_time_column],
             errors="coerce",
@@ -91,19 +105,54 @@ def run_baseline_model(
             )
         )
         split_strategy: SplitStrategy = "time_ordered"
+    elif split_policy == "group":
+        split_strategy = "group"
+        leakage_checks.append(
+            LeakageCheck(
+                code="group_split",
+                severity="info",
+                column=group_column,
+                action="passed",
+                message=(
+                    f"Group-aware split: train and test contain disjoint "
+                    f"`{group_column}` groups, so per-group memorization cannot "
+                    "inflate the test metrics."
+                ),
+            )
+        )
     elif task_type == "classification":
         split_strategy = "random_stratified"
     else:
         split_strategy = "random"
+    if split_policy == "random" and detected_time_column is not None:
+        leakage_checks.append(
+            LeakageCheck(
+                code="random_split_on_time_data",
+                severity="warn",
+                column=detected_time_column,
+                action="warned",
+                message=(
+                    f"A time column (`{detected_time_column}`) is present but a random "
+                    "split was explicitly requested; training rows may postdate test "
+                    "rows. Use split_policy `time` for any forecasting-style claim."
+                ),
+            )
+        )
 
     working = cast(pd.DataFrame, working.dropna(subset=[target_column]))
     raw_features = _frame(working, feature_columns)
     y = _series(working, target_column)
+    groups = (
+        cast(pd.Series, frame.loc[working.index, group_column]).astype(str)
+        if split_policy == "group" and group_column is not None
+        else None
+    )
     train_idx, test_idx = _split_indexes(
         y,
         task_type=task_type,
         split_strategy=split_strategy,
         random_state=random_state,
+        groups=groups,
     )
     # ML-3/ML-7: preprocessing is fit on the TRAIN rows only, then applied to test.
     raw_train = cast(pd.DataFrame, raw_features.iloc[train_idx])
@@ -113,8 +162,8 @@ def run_baseline_model(
     X_test = encoder.transform(raw_test)
     y_train = y.iloc[train_idx]
     y_test = y.iloc[test_idx]
-
     if task_type == "classification":
+        y_test_for_scoring = y_test
         model, metrics = _fit_classification(
             X_train,
             X_test,
@@ -123,11 +172,12 @@ def run_baseline_model(
             random_state=random_state,
         )
     else:
+        y_test_for_scoring = cast(pd.Series, pd.to_numeric(y_test, errors="coerce"))
         model, metrics = _fit_regression(
             X_train,
             X_test,
             cast(pd.Series, pd.to_numeric(y_train, errors="coerce")),
-            cast(pd.Series, pd.to_numeric(y_test, errors="coerce")),
+            y_test_for_scoring,
             random_state=random_state,
         )
 
@@ -139,14 +189,28 @@ def run_baseline_model(
     if task_type == "classification":
         baseline_accuracy = _majority_class_baseline(y_train, metrics, limitations)
 
+    if cv_folds >= 2:
+        metrics.update(
+            _cross_validation_metrics(
+                raw_features,
+                y,
+                task_type=task_type,
+                cv_policy=(
+                    "time"
+                    if use_time_order
+                    else ("group" if split_policy == "group" else "random")
+                ),
+                groups=groups,
+                cv_folds=cv_folds,
+                random_state=random_state,
+            )
+        )
+
     feature_importance = _feature_importance(
         model,
         X_test,
-        (
-            y_test
-            if task_type == "classification"
-            else cast(pd.Series, pd.to_numeric(y_test, errors="coerce"))
-        ),
+        y_test_for_scoring,
+        encoder=encoder,
         random_state=random_state,
         limitations=limitations,
     )
@@ -193,6 +257,9 @@ def guard_baseline_model_params(
     target_column: Any,
     time_column: Any = None,
     random_state: Any = 42,
+    split_policy: Any = "auto",
+    group_column: Any = None,
+    cv_folds: Any = 0,
 ) -> None:
     violations: list[GuardViolation | None] = [
         check_non_empty("target_column", target_column),
@@ -205,7 +272,42 @@ def guard_baseline_model_params(
                 "Set `random_state` to an integer seed from 0 through 4294967295."
             ),
         ),
+        check_enum(
+            "split_policy",
+            split_policy,
+            ("auto", "random", "group", "time"),
+            fix_hint=(
+                "Use `auto` (time-ordered when a time column exists), `random`, "
+                "`group` (requires `group_column`), or `time`."
+            ),
+        ),
+        check_range(
+            "cv_folds",
+            cv_folds,
+            minimum=0.0,
+            maximum=10.0,
+            fix_hint="Set `cv_folds` to 0 (no cross-validation) or 2 through 10.",
+        ),
     ]
+    if split_policy == "group":
+        violations.append(
+            check_non_empty(
+                "group_column",
+                group_column,
+                fix_hint=(
+                    "Provide the column whose groups must stay entirely inside "
+                    "either the train or the test split."
+                ),
+            )
+        )
+    if _is_non_empty_string(group_column):
+        violations.append(
+            check_column_exists(
+                "group_column",
+                group_column,
+                [str(column) for column in frame.columns],
+            )
+        )
     if _is_non_empty_string(target_column):
         violations.append(
             check_column_exists(
@@ -330,6 +432,7 @@ def _select_features(
     target_column: str,
     task_type: TaskType,
     time_column: str | None,
+    group_column: str | None = None,
     leakage_checks: list[LeakageCheck],
 ) -> tuple[list[str], list[str]]:
     selected: list[str] = []
@@ -338,7 +441,7 @@ def _select_features(
     for column in map(str, frame.columns):
         if column == target_column:
             continue
-        if column == time_column:
+        if column == time_column or column == group_column:
             excluded.append(column)
             continue
         feature = _series(frame, column)
@@ -569,6 +672,16 @@ class _PreprocessEncoder:
             numeric_medians=numeric_medians,
         )
 
+    def origin_by_encoded(self) -> dict[str, str]:
+        """Map every encoded output column back to its original feature."""
+        origin: dict[str, str] = {column: column for column in self._numeric_columns}
+        for column in self._categorical_columns:
+            for value in self._categories[column]:
+                origin[f"{column}={value!r}"] = column
+            if column in self._nan_indicator_columns:
+                origin[f"{column}=<NA>"] = column
+        return origin
+
     def transform(self, features: pd.DataFrame) -> pd.DataFrame:
         data: dict[str, np.ndarray] = {}
         index = features.index
@@ -598,6 +711,7 @@ def _split_indexes(
     task_type: TaskType,
     split_strategy: SplitStrategy,
     random_state: int,
+    groups: pd.Series | None = None,
 ) -> tuple[list[int], list[int]]:
     if len(y) < 10:
         raise ValueError("At least 10 labeled rows are required for a baseline model")
@@ -605,6 +719,21 @@ def _split_indexes(
         split_at = max(1, int(len(y) * 0.8))
         split_at = min(split_at, len(y) - 1)
         return list(range(split_at)), list(range(split_at, len(y)))
+    if groups is not None:
+        from sklearn.model_selection import GroupShuffleSplit
+
+        group_labels = pd.Series(np.asarray(groups)).astype(str)
+        if int(group_labels.nunique()) < 2:
+            raise ValueError(
+                "split_policy `group` requires at least two distinct groups"
+            )
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=random_state)
+        train_positions, test_positions = next(
+            splitter.split(np.zeros(len(y)), groups=group_labels)
+        )
+        return [int(index) for index in train_positions], [
+            int(index) for index in test_positions
+        ]
 
     from sklearn.model_selection import train_test_split
 
@@ -621,6 +750,90 @@ def _split_indexes(
         stratify=stratify,
     )
     return list(train_idx), list(test_idx)
+
+
+def _cross_validation_metrics(
+    raw_features: pd.DataFrame,
+    y: pd.Series,
+    *,
+    task_type: TaskType,
+    cv_policy: str,
+    groups: pd.Series | None,
+    cv_folds: int,
+    random_state: int,
+) -> dict[str, float]:
+    """Policy-aware CV (KFold / GroupKFold / TimeSeriesSplit) with a per-fold
+    train-only-fit encoder so CV cannot leak preprocessing statistics."""
+    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+    from sklearn.metrics import accuracy_score, r2_score
+    from sklearn.model_selection import (
+        GroupKFold,
+        KFold,
+        StratifiedKFold,
+        TimeSeriesSplit,
+    )
+
+    n = len(y)
+    if n < cv_folds * 2:
+        return {}
+    group_labels = None if groups is None else pd.Series(np.asarray(groups)).astype(str)
+    stratify = None
+    if cv_policy == "time":
+        splitter: Any = TimeSeriesSplit(n_splits=cv_folds)
+    elif cv_policy == "group" and group_labels is not None:
+        folds = min(cv_folds, int(group_labels.nunique()))
+        if folds < 2:
+            return {}
+        splitter = GroupKFold(n_splits=folds)
+    elif task_type == "classification" and int(y.value_counts().min()) >= cv_folds:
+        splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        stratify = y
+    else:
+        splitter = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+
+    y_numeric = (
+        y if task_type == "classification" else cast(pd.Series, pd.to_numeric(y, errors="coerce"))
+    )
+    scores: list[float] = []
+    for train_positions, test_positions in splitter.split(
+        np.zeros(n), stratify, groups=group_labels
+    ):
+        fold_encoder = _PreprocessEncoder.fit(
+            cast(pd.DataFrame, raw_features.iloc[train_positions])
+        )
+        X_fold_train = fold_encoder.transform(
+            cast(pd.DataFrame, raw_features.iloc[train_positions])
+        )
+        X_fold_test = fold_encoder.transform(
+            cast(pd.DataFrame, raw_features.iloc[test_positions])
+        )
+        if task_type == "classification":
+            fold_model: Any = RandomForestClassifier(
+                n_estimators=80, random_state=random_state
+            )
+            fold_model.fit(X_fold_train, y_numeric.iloc[train_positions])
+            score = float(
+                accuracy_score(
+                    y_numeric.iloc[test_positions], fold_model.predict(X_fold_test)
+                )
+            )
+        else:
+            fold_model = RandomForestRegressor(n_estimators=80, random_state=random_state)
+            fold_model.fit(X_fold_train, y_numeric.iloc[train_positions])
+            score = float(
+                r2_score(y_numeric.iloc[test_positions], fold_model.predict(X_fold_test))
+            )
+        if math.isfinite(score):
+            scores.append(score)
+    if not scores:
+        return {}
+    name = "cv_accuracy" if task_type == "classification" else "cv_r2"
+    values = np.asarray(scores, dtype=float)
+    return {
+        f"{name}_mean": round(float(values.mean()), 4),
+        f"{name}_std": round(float(values.std(ddof=0)), 4),
+        "cv_folds": float(len(scores)),
+    }
 
 
 def _fit_classification(
@@ -642,11 +855,22 @@ def _fit_classification(
         "f1_weighted": round(float(f1_score(y_test, predictions, average="weighted")), 4),
     }
     if len(model.classes_) == 2 and hasattr(model, "predict_proba"):
+        from sklearn.metrics import average_precision_score, brier_score_loss
+
         probabilities = cast(Any, model.predict_proba(X_test))[:, 1]
+        positive_indicator = (y_test == model.classes_[1]).astype(int)
         try:
             metrics["auc"] = round(float(roc_auc_score(y_test, probabilities)), 4)
+            metrics["pr_auc"] = round(
+                float(average_precision_score(positive_indicator, probabilities)), 4
+            )
         except ValueError:
             pass
+        # Brier score: mean squared distance between the predicted probability
+        # and the outcome; the calibration disclosure for the binary baseline.
+        metrics["brier"] = round(
+            float(brier_score_loss(positive_indicator, probabilities)), 4
+        )
     return model, metrics
 
 
@@ -672,18 +896,53 @@ def _fit_regression(
     }
 
 
+def _aggregate_importances(
+    importances: np.ndarray,
+    *,
+    encoded_columns: list[str],
+    origin_by_encoded: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Sum per-repeat importances of one-hot columns back onto the original
+    feature, keeping the signed mean and the across-repeat std."""
+    matrix = np.asarray(importances, dtype=float)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(-1, 1)
+    per_feature: dict[str, np.ndarray] = {}
+    encoded_counts: dict[str, int] = {}
+    for encoded_column, repeats in zip(encoded_columns, matrix, strict=True):
+        feature = origin_by_encoded.get(encoded_column, encoded_column)
+        if feature in per_feature:
+            per_feature[feature] = per_feature[feature] + repeats
+        else:
+            per_feature[feature] = repeats.copy()
+        encoded_counts[feature] = encoded_counts.get(feature, 0) + 1
+    rows = [
+        {
+            "feature": feature,
+            "importance_mean": float(repeats.mean()),
+            "importance_std": float(repeats.std(ddof=0)),
+            "encoded_column_count": encoded_counts[feature],
+        }
+        for feature, repeats in per_feature.items()
+    ]
+    rows.sort(key=lambda row: (-abs(float(row["importance_mean"])), str(row["feature"])))
+    return rows
+
+
 def _feature_importance(
     model: Any,
     X_test: pd.DataFrame,
     y_test: pd.Series,
     *,
+    encoder: _PreprocessEncoder,
     random_state: int,
     limitations: list[str],
     limit: int = 10,
 ) -> list[FeatureImportance]:
-    """Test-set permutation importance; sklearn documents impurity-based (MDI)
-    importances as biased toward high-cardinality features, so MDI is only the
-    disclosed fallback."""
+    """Test-set permutation importance aggregated per original feature; sklearn
+    documents impurity-based (MDI) importances as biased toward high-cardinality
+    features, so MDI is only the disclosed fallback."""
+    origin_by_encoded = encoder.origin_by_encoded()
     try:
         import sklearn.inspection as inspection
 
@@ -697,23 +956,43 @@ def _feature_importance(
                 random_state=random_state,
             ),
         )
-        # Small negative means are permutation noise, not evidence of harm.
-        importances = [max(0.0, float(value)) for value in permuted.importances_mean]
+        detail = _aggregate_importances(
+            np.asarray(permuted.importances),
+            encoded_columns=[str(column) for column in X_test.columns],
+            origin_by_encoded=origin_by_encoded,
+        )
     except Exception:
         raw = getattr(model, "feature_importances_", None)
         if raw is None:
             return []
-        importances = [float(value) for value in raw]
+        detail = _aggregate_importances(
+            np.asarray(raw, dtype=float),
+            encoded_columns=[str(column) for column in X_test.columns],
+            origin_by_encoded=origin_by_encoded,
+        )
         limitations.append(
             "Feature importance fell back to impurity-based (MDI) values, which are "
             "biased toward high-cardinality features; rank them with caution."
         )
+    detail = detail[:limit]
+    clipped = [row["feature"] for row in detail if float(row["importance_mean"]) < 0.0]
+    if clipped:
+        # The FeatureImportance schema is non-negative; negative signed means
+        # (permutation noise / harmful features) display as 0.0 in the card.
+        limitations.append(
+            "Permutation importance means were negative (no positive signal) for: "
+            + ", ".join(sorted(clipped))
+            + "; they display as 0.0 in this card."
+        )
     rows = [
-        FeatureImportance(feature=str(feature), importance=round(importance, 6))
-        for feature, importance in zip(X_test.columns, importances, strict=True)
+        FeatureImportance(
+            feature=str(row["feature"]),
+            importance=round(max(0.0, float(row["importance_mean"])), 6),
+        )
+        for row in detail
     ]
     rows.sort(key=lambda row: row.importance, reverse=True)
-    return rows[:limit]
+    return rows
 
 
 def _ensure_sklearn() -> None:

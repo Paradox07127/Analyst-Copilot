@@ -1,0 +1,47 @@
+{
+  "_meta": {
+    "dataset": "planted_retail.csv",
+    "generator": "make_planted_fixture.py (seed 20260801, stdlib LCG, fully deterministic)",
+    "created": "2026-08-01",
+    "exhaustive": true,
+    "note": "Ground truth is exhaustive by construction: all other structure is independent noise, so unmatched reports count against precision."
+  },
+  "insights": [
+    {
+      "insight_id": "planted_trend_revenue",
+      "kind": "trend",
+      "columns": ["revenue", "order_date"],
+      "direction": "increasing",
+      "family": "Descriptive",
+      "description": "Revenue grows ~0.8%/day Jan-Jun 2025 (daily-total spearman vs day index = 0.784)."
+    },
+    {
+      "insight_id": "planted_group_diff_region_revenue",
+      "kind": "group_difference",
+      "columns": ["revenue", "region"],
+      "direction": "higher",
+      "family": "Diagnostic",
+      "value": 1.911,
+      "value_tolerance": 0.35,
+      "description": "North mean revenue is ~1.9x South (unit price 12.0 vs 6.5; units are region-independent)."
+    },
+    {
+      "insight_id": "planted_missing_satisfaction_phone",
+      "kind": "missing_pattern",
+      "columns": ["satisfaction", "channel"],
+      "direction": "",
+      "family": "Diagnostic",
+      "value": 0.718,
+      "value_tolerance": 0.1,
+      "description": "satisfaction is missing on ~72% of phone-channel rows vs <3% elsewhere (structured missingness)."
+    },
+    {
+      "insight_id": "planted_outlier_20250415_revenue",
+      "kind": "outlier",
+      "columns": ["revenue", "order_date"],
+      "direction": "spike",
+      "family": "Exploratory",
+      "description": "2025-04-15 daily revenue is ~9x the median daily total (6x multiplier planted on every row that day)."
+    }
+  ]
+}

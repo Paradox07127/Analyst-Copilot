@@ -1,7 +1,13 @@
-"""Optional OpenInference/OTel span export mirroring TraceEvents."""
+"""Single adapter seam mapping platform TraceEvents onto OTel GenAI spans.
+
+Journal/trace files stay the source of truth; this mirror is optional,
+off by default, and redacts content by default.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -12,10 +18,73 @@ if TYPE_CHECKING:
 
 MirrorResult = Literal["disabled", "mirrored", "error"]
 
-# Mirrors the spend-ledger event name (core.llm_ledger.LLM_USAGE_EVENT); kept as
-# a literal so this optional-dependency module stays import-light.
-_LLM_EVENT_TYPES = {"llm_call", "llm_usage"}
+# --- platform event families -> GenAI operations --------------------------- #
+# "llm_usage" mirrors core.llm_ledger.LLM_USAGE_EVENT; kept as a literal so
+# this optional-dependency module stays import-light.
+_CHAT_EVENT_TYPES = {"llm_call", "llm_error"}
+_USAGE_EVENT_TYPES = {"llm_usage"}
 _TOOL_EVENT_TYPES = {"tool_completed", "tool_failed", "run_sql", "code_agent_attempt"}
+_EVALUATION_EVENT_TYPES = {
+    "evaluation",
+    "evaluation_result",
+    "validator_result",
+    "report_validation",
+}
+
+# Summary keys allowed into span attributes verbatim. Everything else is
+# treated as content (prompts, tool results, cell values) and reduced to
+# chars + digest unless EDA_LLM_DEBUG_FULL opts in.
+_METADATA_KEYS = frozenset(
+    {
+        "provider",
+        "model",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_creation_tokens",
+        "reasoning_tokens",
+        "cache_hit_rate",
+        "estimated_cost_usd",
+        "cost_basis",
+        "pricing_version",
+        "provider_usage_reported",
+        "usage_reported",
+        "request_id",
+        "response_id",
+        "finish_reason",
+        "endpoint_host",
+        "request_bytes",
+        "response_bytes",
+        "duration_s",
+        "dataset",
+        "question_id",
+        "tool",
+        "tool_call_id",
+        "source",
+        "score",
+        "passed",
+    }
+)
+_METRIC_SUFFIXES = ("_count", "_tokens", "_bytes")
+
+# Platform summary key -> semconv attribute. gen_ai.* limited to the stable
+# subset; cached/reasoning tokens, cost, and evaluation attrs stay under
+# eda.* until the GenAI conventions for them stabilise.
+_ATTR_NAMES = {
+    "model": "gen_ai.request.model",
+    "provider": "gen_ai.provider.name",
+    "prompt_tokens": "gen_ai.usage.input_tokens",
+    "completion_tokens": "gen_ai.usage.output_tokens",
+    "response_id": "gen_ai.response.id",
+    "tool": "gen_ai.tool.name",
+    "tool_call_id": "gen_ai.tool.call.id",
+    "score": "eda.evaluation.score",
+    "passed": "eda.evaluation.passed",
+}
+
+_FULL_CAPTURE_ENV = "EDA_LLM_DEBUG_FULL"  # same opt-in as core.dev_log
+_CONTENT_EXCERPT_CHARS = 2_000
 
 
 @dataclass(frozen=True)
@@ -92,7 +161,7 @@ def _build_exporter(config: ObservabilityConfig) -> _Exporter | None:
 
 
 def mirror_trace_event(event: TraceEvent | dict[str, Any]) -> MirrorResult:
-    """Mirror one persisted TraceEvent into an OpenInference span. No-op when off."""
+    """The adapter seam: mirror one platform event into a GenAI span. No-op when off."""
     exporter = _active_exporter()
     if exporter is None:
         return "disabled"
@@ -110,6 +179,10 @@ def _as_fields(event: TraceEvent | dict[str, Any]) -> dict[str, Any]:
         "session_id": event.session_id,
         "event_type": event.event_type,
         "name": event.name,
+        "call_id": event.call_id,
+        "trial_id": event.trial_id,
+        "investigation_id": event.investigation_id,
+        "attempt_id": event.attempt_id,
         "started_at": event.started_at,
         "finished_at": event.finished_at,
         "summary": dict(event.summary),
@@ -124,11 +197,7 @@ def _emit_span(exporter: _Exporter, fields: dict[str, Any]) -> None:
     ctx = otel_trace.set_span_in_context(root)
 
     start = _epoch_nanos(fields.get("started_at"))
-    span = exporter.tracer.start_span(
-        str(fields.get("name", fields.get("event_type", "event"))),
-        context=ctx,
-        start_time=start,
-    )
+    span = exporter.tracer.start_span(_span_name(fields), context=ctx, start_time=start)
     try:
         _set_event_attributes(span, fields)
     finally:
@@ -136,38 +205,130 @@ def _emit_span(exporter: _Exporter, fields: dict[str, Any]) -> None:
 
 
 def _run_root(exporter: _Exporter, session_id: str) -> Any:
+    """One invoke_agent root span per run; children nest under it."""
     root = exporter.run_roots.get(session_id)
     if root is None:
-        root = exporter.tracer.start_span(f"run:{session_id}")
-        _safe_set(root, "openinference.span.kind", "CHAIN")
+        root = exporter.tracer.start_span(f"invoke_agent {session_id}")
+        _safe_set(root, "openinference.span.kind", "AGENT")
+        _safe_set(root, "gen_ai.operation.name", "invoke_agent")
+        _safe_set(root, "gen_ai.conversation.id", session_id)
         _safe_set(root, "eda.session_id", session_id)
         exporter.run_roots[session_id] = root
     return root
 
 
+def _span_name(fields: dict[str, Any]) -> str:
+    event_type = str(fields.get("event_type", ""))
+    name = str(fields.get("name", "") or event_type or "event")
+    summary = fields.get("summary") or {}
+    if event_type in _CHAT_EVENT_TYPES:
+        model = str(summary.get("model") or "").strip()
+        return f"chat {model}" if model else "chat"
+    if event_type in _TOOL_EVENT_TYPES:
+        return f"execute_tool {str(summary.get('tool') or name).strip()}"
+    if event_type in _EVALUATION_EVENT_TYPES:
+        return f"evaluation {name}"
+    return name
+
+
 def _set_event_attributes(span: Any, fields: dict[str, Any]) -> None:
     event_type = str(fields.get("event_type", ""))
     summary = fields.get("summary") or {}
+    session_id = str(fields.get("session_id", ""))
     _safe_set(span, "eda.event_type", event_type)
-    _safe_set(span, "eda.session_id", str(fields.get("session_id", "")))
+    _safe_set(span, "eda.session_id", session_id)
+    _safe_set(span, "gen_ai.conversation.id", session_id)
+    name = str(fields.get("name", ""))
+    if name:
+        _safe_set(span, "eda.task", name)
+    for key in ("call_id", "trial_id", "investigation_id", "attempt_id"):
+        value = fields.get(key)
+        if value:
+            _safe_set(span, f"eda.{key}", str(value))
 
-    if event_type in _LLM_EVENT_TYPES:
+    if event_type in _CHAT_EVENT_TYPES:
         _safe_set(span, "openinference.span.kind", "LLM")
-        _copy_attr(span, summary, "model", "llm.model_name")
-        _copy_attr(span, summary, "total_tokens", "llm.token_count.total")
-        _copy_attr(span, summary, "prompt_tokens", "llm.token_count.prompt")
-        _copy_attr(span, summary, "completion_tokens", "llm.token_count.completion")
-        _copy_attr(span, summary, "estimated_cost_usd", "eda.estimated_cost_usd")
+        _safe_set(span, "gen_ai.operation.name", "chat")
+        if event_type == "llm_error":
+            _safe_set(span, "error.type", "llm_error")
+    elif event_type in _USAGE_EVENT_TYPES:
+        # Ledger settlement is a billing fact, not a second chat call, so it
+        # carries usage attributes without a gen_ai.operation.name.
+        _safe_set(span, "openinference.span.kind", "LLM")
     elif event_type in _TOOL_EVENT_TYPES:
         _safe_set(span, "openinference.span.kind", "TOOL")
+        _safe_set(span, "gen_ai.operation.name", "execute_tool")
+        _safe_set(span, "gen_ai.tool.name", str(summary.get("tool") or name))
+        if event_type == "tool_failed":
+            _safe_set(span, "error.type", "tool_failed")
+    elif event_type in _EVALUATION_EVENT_TYPES:
+        _safe_set(span, "openinference.span.kind", "EVALUATOR")
+        if name:
+            # Pending alignment with gen_ai.evaluation.* once those stabilise.
+            _safe_set(span, "eda.evaluation.name", name)
     else:
         _safe_set(span, "openinference.span.kind", "CHAIN")
 
+    _apply_summary(span, summary)
 
-def _copy_attr(span: Any, summary: dict[str, Any], src_key: str, attr: str) -> None:
-    value = summary.get(src_key)
-    if value is not None:
-        _safe_set(span, attr, value)
+
+# --- default-deny summary mapping ------------------------------------------ #
+def _apply_summary(span: Any, summary: dict[str, Any]) -> None:
+    full_capture = _full_capture_enabled()
+    for key, value in summary.items():
+        if value is None:
+            continue
+        if key == "status":
+            _apply_status(span, value)
+        elif _is_metadata(key, value):
+            _apply_metadata(span, key, value)
+        else:
+            _apply_redacted(span, key, value, full_capture)
+
+
+def _is_metadata(key: str, value: Any) -> bool:
+    if not isinstance(value, bool | int | float | str):
+        return False
+    if key in _METADATA_KEYS:
+        return True
+    return key.endswith(_METRIC_SUFFIXES) and isinstance(value, int | float)
+
+
+def _apply_metadata(span: Any, key: str, value: Any) -> None:
+    if isinstance(value, str) and not value.strip():
+        return
+    if key == "finish_reason":
+        span.set_attribute("gen_ai.response.finish_reasons", [str(value)])
+        return
+    _safe_set(span, _ATTR_NAMES.get(key, f"eda.{key}"), value)
+
+
+def _apply_status(span: Any, value: Any) -> None:
+    # "error: ValueError: <message>" may embed payload text; keep only the
+    # outcome token and the exception class.
+    head, sep, rest = str(value).partition(":")
+    _safe_set(span, "eda.status", head.strip()[:64])
+    if sep:
+        error_type = rest.strip().partition(":")[0].strip()
+        if error_type:
+            _safe_set(span, "error.type", error_type[:128])
+
+
+def _apply_redacted(span: Any, key: str, value: Any, full_capture: bool) -> None:
+    text = (
+        value
+        if isinstance(value, str)
+        else json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+    )
+    _safe_set(span, f"eda.redacted.{key}.chars", len(text))
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    _safe_set(span, f"eda.redacted.{key}.sha256", digest)
+    if full_capture:
+        _safe_set(span, f"eda.content.{key}", text[:_CONTENT_EXCERPT_CHARS])
+
+
+def _full_capture_enabled() -> bool:
+    return os.environ.get(_FULL_CAPTURE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _safe_set(span: Any, key: str, value: Any) -> None:
@@ -189,7 +350,7 @@ def _epoch_nanos(value: Any) -> int | None:
 
 
 def flush_run(session_id: str) -> None:
-    """Close a run's root span so the exported tree is complete for that run."""
+    """Close a run's invoke_agent root span so the exported tree is complete."""
     exporter = _active_exporter()
     if exporter is None:
         return

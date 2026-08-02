@@ -244,3 +244,72 @@ def test_concurrent_reservations_cannot_cross_request_limit() -> None:
     assert outcomes.count("reserved") == 1
     assert outcomes.count("rejected") == 7
     assert len(state.active_reservations) == 1
+
+
+def test_settlement_enforces_the_nonprotected_sub_cap() -> None:
+    # R3-F5: reserve() honours max - protected, settle() only compared against
+    # max, so an ordinary call whose actuals exceeded its reservation ate the
+    # finalization reserve without raising.
+    state = SessionBudgetState(
+        SessionBudgetPolicy(
+            max_requests=10,
+            max_total_tokens=1000,
+            max_input_tokens=1000,
+            max_output_tokens=1000,
+            max_cost_usd=Decimal("1.00"),
+            protected_requests=2,
+            protected_total_tokens=400,
+            protected_input_tokens=400,
+            protected_output_tokens=400,
+            protected_cost_usd=Decimal("0.40"),
+        )
+    )
+    state.reserve("call-1", input_tokens=300, output_tokens=300, cost_usd=Decimal("0.30"))
+
+    with pytest.raises(SessionBudgetExceeded) as caught:
+        state.settle(
+            "call-1",
+            input_tokens=500,
+            output_tokens=500,
+            total_tokens=1000,
+            cost_usd=Decimal("0.95"),
+        )
+
+    assert caught.value.stage == "settlement"
+    assert caught.value.limit == 600
+
+
+def test_settlement_within_the_nonprotected_sub_cap_is_untouched() -> None:
+    state = SessionBudgetState(
+        SessionBudgetPolicy(
+            max_requests=10,
+            max_total_tokens=1000,
+            protected_requests=2,
+            protected_total_tokens=400,
+        )
+    )
+    state.reserve("call-1", total_tokens=500)
+    settled = state.settle("call-1", input_tokens=300, output_tokens=300, total_tokens=600)
+
+    assert settled.status == "settled"
+    assert state.remaining("total_tokens", protected=True) == 400
+
+
+def test_a_protected_call_may_still_settle_into_its_own_reserve() -> None:
+    state = SessionBudgetState(
+        SessionBudgetPolicy(
+            max_requests=10,
+            max_total_tokens=1000,
+            protected_requests=2,
+            protected_total_tokens=400,
+        )
+    )
+    state.reserve("normal", total_tokens=600)
+    state.settle("normal", input_tokens=300, output_tokens=300, total_tokens=600)
+    state.reserve("finalize", total_tokens=300, protected=True)
+    settled = state.settle(
+        "finalize", input_tokens=200, output_tokens=200, total_tokens=400
+    )
+
+    assert settled.status == "settled"
+    assert state.total_tokens_used == 1000

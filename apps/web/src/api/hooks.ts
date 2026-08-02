@@ -62,7 +62,6 @@ export const queryKeys = {
     ["artifact", sessionId, artifactId] as const,
   quality: (sessionId: string) => ["quality", sessionId] as const,
   edaHandoff: (sessionId: string) => ["eda-handoff", sessionId] as const,
-  agentHandoff: (sessionId: string) => ["agent-handoff", sessionId] as const,
   profiles: (sessionId: string) => ["profiles", sessionId] as const,
   charts: (sessionId: string) => ["charts", sessionId] as const,
   chart: (sessionId: string, chartId: string) => ["chart", sessionId, chartId] as const,
@@ -311,16 +310,6 @@ export function useEdaHandoff(sessionId: string) {
   });
 }
 
-/* Final, versioned contract for downstream analysis agents. Unlike the
- * early EdaHandoff gate, this exists only after the completed publish barrier. */
-export function useAgentHandoff(sessionId: string, enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.agentHandoff(sessionId),
-    queryFn: ({ signal }) => api.getAgentHandoff(sessionId, signal),
-    enabled: enabled && Boolean(sessionId),
-  });
-}
-
 export function useProfiles(sessionId: string) {
   return useQuery({
     queryKey: queryKeys.profiles(sessionId),
@@ -352,13 +341,6 @@ export function useQuestions(sessionId: string, enabled = true) {
     queryKey: queryKeys.questions(sessionId),
     queryFn: ({ signal }) => api.listQuestions(sessionId, signal),
     enabled: enabled && Boolean(sessionId),
-  });
-}
-
-export function useInvestigations(sessionId: string) {
-  return useQuery({
-    queryKey: queryKeys.investigations(sessionId),
-    queryFn: ({ signal }) => api.getInvestigations(sessionId, signal),
   });
 }
 

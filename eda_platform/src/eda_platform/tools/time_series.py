@@ -28,6 +28,30 @@ _MAX_LJUNG_BOX_LAG = 10
 # the additive decomposition then runs on log values (fpp3 §3.6).
 _LOG_SPREAD_CORRELATION = 0.6
 
+# Hard ceiling on the regular-grid size a resample may allocate; a hostile
+# freq (ns/minute against multi-year data) is rejected BEFORE index allocation.
+_MAX_RESAMPLE_PERIODS = 100_000
+
+# Nominal step for non-fixed offsets (week/month/quarter/year have no exact
+# nanosecond length); only used to ESTIMATE the resampled period count.
+_NOMINAL_STEP_SECONDS = {
+    "B": 86_400.0,
+    "W": 7 * 86_400.0,
+    "SM": 15 * 86_400.0,
+    "SMS": 15 * 86_400.0,
+    "M": 30 * 86_400.0,
+    "ME": 30 * 86_400.0,
+    "MS": 30 * 86_400.0,
+    "Q": 91 * 86_400.0,
+    "QE": 91 * 86_400.0,
+    "QS": 91 * 86_400.0,
+    "Y": 365 * 86_400.0,
+    "YE": 365 * 86_400.0,
+    "YS": 365 * 86_400.0,
+    "A": 365 * 86_400.0,
+    "AS": 365 * 86_400.0,
+}
+
 # Default seasonal period per pandas offset alias family; None = no meaningful
 # sub-cycle at that granularity, so decomposition needs an explicit period.
 _PERIOD_BY_FREQ_BASE = {
@@ -53,7 +77,10 @@ class TimeSeriesDiagnostics:
     regular_frequency: str
     period: int | None
     decomposition_performed: bool
+    decomposition_method: str | None
     log_transformed: bool
+    parse_loss_count: int
+    duplicate_timestamp_count: int
     trend_direction: Literal["increasing", "decreasing", "flat"]
     seasonal_strength: float | None
     ljung_box_p: float | None
@@ -94,9 +121,22 @@ def analyze_series(
         .sort_values("t")
         .set_index("t")
     )
+    parse_loss_count = int(len(frame) - len(data))
+    if parse_loss_count:
+        notes.append(
+            f"{parse_loss_count} row(s) had a missing or unparseable time value and "
+            "were excluded from the series."
+        )
+    duplicate_timestamp_count = int(len(data.index) - data.index.nunique())
+    if duplicate_timestamp_count:
+        notes.append(
+            f"{duplicate_timestamp_count} row(s) share a timestamp with another row; "
+            "they are combined by the aggregation."
+        )
     if freq is None:
         freq = _infer_frequency(data.index)
         notes.append(f"Frequency was not supplied; inferred `{freq}` from the timestamps.")
+    _reject_explosive_resample(data.index, freq)
     sizes = data.resample(freq).size()
     gap_count = int((sizes == 0).sum())
     if agg == "count":
@@ -128,15 +168,20 @@ def analyze_series(
             f"No seasonal period is known for frequency `{freq}`; decomposition "
             "skipped, descriptive trend only."
         )
+    elif resolved_period < 2:
+        notes.append(
+            f"Seasonal period {resolved_period} is below 2; decomposition skipped, "
+            "descriptive trend only."
+        )
     elif len(series) < 2 * resolved_period:
-        # statsmodels seasonal_decompose precondition, verbatim from its docs:
-        # "x must contain 2 complete cycles."
+        # STL shares seasonal_decompose's precondition: the series must contain
+        # 2 complete cycles.
         notes.append(
             f"Series has {len(series)} periods, fewer than 2 complete cycles of "
             f"period {resolved_period}; decomposition refused, descriptive trend only."
         )
     else:
-        from statsmodels.tsa.seasonal import seasonal_decompose
+        from statsmodels.tsa.seasonal import STL
 
         log_transformed = _prefers_log(series, resolved_period)
         target = cast(pd.Series, np.log(series)) if log_transformed else series
@@ -145,7 +190,10 @@ def analyze_series(
                 "Values are strictly positive with level-dependent spread; the "
                 "additive decomposition was run on log values."
             )
-        decomposed = seasonal_decompose(target, model="additive", period=resolved_period)
+        # Robust STL: outliers are downweighted into the remainder instead of
+        # contaminating the trend/seasonal components (classical moving-average
+        # decomposition smears them into both).
+        decomposed = STL(target, period=resolved_period, robust=True).fit()
 
     if decomposed is not None:
         trend_values = np.asarray(decomposed.trend, dtype="float64")
@@ -175,7 +223,10 @@ def analyze_series(
         regular_frequency=str(freq),
         period=resolved_period,
         decomposition_performed=decomposed is not None,
+        decomposition_method="stl_robust" if decomposed is not None else None,
         log_transformed=log_transformed,
+        parse_loss_count=parse_loss_count,
+        duplicate_timestamp_count=duplicate_timestamp_count,
         trend_direction=trend_direction,
         seasonal_strength=seasonal_strength,
         ljung_box_p=ljung_box_p,
@@ -208,6 +259,40 @@ def _parse_time(series: pd.Series, time_column: str) -> pd.Series:
             f"({success_percent:.1f}% of values parse)."
         )
     return parsed
+
+
+def _reject_explosive_resample(index: pd.Index, freq: str) -> None:
+    """Estimate the regular-grid size and refuse before any large allocation."""
+    timestamps = pd.DatetimeIndex(index)
+    if len(timestamps) < 2:
+        return
+    first = cast(pd.Timestamp, timestamps.min())
+    last = cast(pd.Timestamp, timestamps.max())
+    span_seconds = float((last - first).total_seconds())
+    try:
+        offset = pd.tseries.frequencies.to_offset(freq)
+    except ValueError:
+        return  # let resample raise its own error for unknown aliases
+    if offset is None:
+        return
+    try:
+        step_seconds = float(offset.nanos) / 1e9
+    except ValueError:
+        base = str(getattr(offset, "name", freq)).split("-")[0].upper()
+        base = base.lstrip("0123456789")
+        nominal = _NOMINAL_STEP_SECONDS.get(base)
+        if nominal is None:
+            return
+        step_seconds = nominal * max(1, int(getattr(offset, "n", 1)))
+    if step_seconds <= 0:
+        return
+    estimated_periods = int(span_seconds / step_seconds) + 1
+    if estimated_periods > _MAX_RESAMPLE_PERIODS:
+        raise ValueError(
+            f"Resampling this time range at frequency `{freq}` would create about "
+            f"{estimated_periods} periods, above the {_MAX_RESAMPLE_PERIODS} period "
+            "limit. Use a coarser frequency for this time span."
+        )
 
 
 def _infer_frequency(index: pd.Index) -> str:
@@ -361,9 +446,12 @@ def _diagnostics_table(
         for name, value in (
             ("n_periods", result.n_periods),
             ("gap_count", result.gap_count),
+            ("parse_loss_count", result.parse_loss_count),
+            ("duplicate_timestamp_count", result.duplicate_timestamp_count),
             ("regular_frequency", result.regular_frequency),
             ("period", result.period),
             ("decomposition_performed", result.decomposition_performed),
+            ("decomposition_method", result.decomposition_method),
             ("log_transformed", result.log_transformed),
             ("trend_direction", result.trend_direction),
             ("seasonal_strength", result.seasonal_strength),

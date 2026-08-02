@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from eda_platform.core.provider_registry import LLMProvider, provider_spec
 
-CAPABILITY_CATALOG_VERSION = "agent-models-2026-07-30"
+CAPABILITY_CATALOG_VERSION = "agent-models-2026-08-01"
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,10 @@ class AgentModelProfile:
     temperature_policy: str = "send"
     tool_choice_policy: str = "auto"
     reasoning_state_policy: str = "none"
+    # Non-empty: value to send as `reasoning_effort` on tools requests. Empty
+    # leaves the provider default alone, which is the only safe answer for
+    # reasoning models (sol/terra) and for models that reject the parameter.
+    tools_reasoning_effort: str = ""
     docs_url: str = ""
     checked_at: str = "2026-07-30"
 
@@ -41,6 +45,7 @@ def _profiles(
     temperature_policy: str = "send",
     tool_choice_policy: str = "auto",
     reasoning_state_policy: str = "none",
+    tools_reasoning_effort: str = "",
     docs_url: str,
 ) -> tuple[AgentModelProfile, ...]:
     return tuple(
@@ -51,6 +56,7 @@ def _profiles(
             temperature_policy=temperature_policy,
             tool_choice_policy=tool_choice_policy,
             reasoning_state_policy=reasoning_state_policy,
+            tools_reasoning_effort=tools_reasoning_effort,
             docs_url=docs_url,
         )
         for model_id in model_ids
@@ -58,11 +64,28 @@ def _profiles(
 
 
 AGENT_MODEL_REGISTRY: dict[LLMProvider, tuple[AgentModelProfile, ...]] = {
-    LLMProvider.OPENAI: _profiles(
-        ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-4.1-mini", "gpt-4.1"),
-        parallel=True,
-        structured_output="json_schema",
-        docs_url="https://developers.openai.com/api/docs/models",
+    LLMProvider.OPENAI: (
+        *_profiles(
+            ("gpt-5.6-sol", "gpt-5.6-terra"),
+            parallel=True,
+            structured_output="json_schema",
+            docs_url="https://developers.openai.com/api/docs/models",
+        ),
+        # luna 400s on function tools at any non-none reasoning effort on
+        # /v1/chat/completions (observed 2026-08-01), so tools requests pin it.
+        *_profiles(
+            ("gpt-5.6-luna",),
+            parallel=True,
+            structured_output="json_schema",
+            tools_reasoning_effort="none",
+            docs_url="https://developers.openai.com/api/docs/models",
+        ),
+        *_profiles(
+            ("gpt-4.1-mini", "gpt-4.1"),
+            parallel=True,
+            structured_output="json_schema",
+            docs_url="https://developers.openai.com/api/docs/models",
+        ),
     ),
     LLMProvider.ANTHROPIC: (
         *_profiles(

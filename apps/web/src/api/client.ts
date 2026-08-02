@@ -494,11 +494,6 @@ export const api = {
       { signal },
     ),
 
-  getAgentHandoff: (sessionId: string, signal?: AbortSignal) =>
-    apiFetch<AgentHandoffDetail>(`/sessions/${enc(sessionId)}/agent-handoff`, {
-      signal,
-    }),
-
   getQuality: (sessionId: string, signal?: AbortSignal) =>
     apiFetch<QualityView>(`/sessions/${enc(sessionId)}/quality`, { signal }),
 
@@ -1190,94 +1185,6 @@ export const api = {
     idempotencyKey: string,
   ) =>
     apiFetch<QuestionDraftStarted>(`/sessions/${enc(sessionId)}/questions`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: { "Idempotency-Key": idempotencyKey },
-    }),
-
-  getInvestigations: (sessionId: string, signal?: AbortSignal) =>
-    apiFetch<InvestigationsView>(`/sessions/${enc(sessionId)}/investigations`, { signal }),
-
-  /* Plan building is deterministic and spends no model budget, so it needs no
-     approval — the plans it writes are what gets reviewed. */
-  buildInvestigationPlans: (
-    sessionId: string,
-    body: InvestigationPlanRequest,
-    idempotencyKey: string,
-  ) =>
-    apiFetch<InvestigationPlanBuildStarted>(
-      `/sessions/${enc(sessionId)}/investigations/plan`,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-        headers: { "Idempotency-Key": idempotencyKey },
-      },
-    ),
-
-  prepareInvestigationDecision: (
-    sessionId: string,
-    planId: string,
-    body: InvestigationDecisionPrepareRequest,
-  ) =>
-    apiFetch<InvestigationDecisionPrepared>(
-      `/sessions/${enc(sessionId)}/investigations/${enc(planId)}/prepare-decision`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
-  /* No decision or reason: the approval binds both, plus the plan's content. */
-  decideInvestigationPlan: (
-    sessionId: string,
-    planId: string,
-    decision: "approved" | "rejected",
-    body: InvestigationDecisionRequest,
-  ) =>
-    apiFetch<InvestigationDecisionRecorded>(
-      `/sessions/${enc(sessionId)}/investigations/${enc(planId)}/${
-        decision === "approved" ? "approve" : "reject"
-      }`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
-  prepareInvestigationExecution: (
-    sessionId: string,
-    body: InvestigationExecutePrepareRequest,
-  ) =>
-    apiFetch<InvestigationExecutionPrepared>(
-      `/sessions/${enc(sessionId)}/investigations/prepare-execute`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
-  /* No plan ids: execution runs exactly the set the approval froze. */
-  executeInvestigationPlans: (
-    sessionId: string,
-    body: InvestigationExecuteRequest,
-    idempotencyKey: string,
-  ) =>
-    apiFetch<InvestigationExecutionStarted>(
-      `/sessions/${enc(sessionId)}/investigations/execute`,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-        headers: { "Idempotency-Key": idempotencyKey },
-      },
-    ),
-
-  /* The response states how many follow-up rounds approving would authorize. */
-  prepareMacroLoop: (
-    sessionId: string,
-    body: MacroLoopPrepareRequest,
-  ) =>
-    apiFetch<MacroLoopPrepared>(
-      `/sessions/${enc(sessionId)}/investigations/prepare-macro-loop`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
-  startMacroLoop: (
-    sessionId: string,
-    body: MacroLoopRequest,
-    idempotencyKey: string,
-  ) =>
-    apiFetch<MacroLoopStarted>(`/sessions/${enc(sessionId)}/investigations/macro-loop`, {
       method: "POST",
       body: JSON.stringify(body),
       headers: { "Idempotency-Key": idempotencyKey },

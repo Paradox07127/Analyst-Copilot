@@ -224,7 +224,7 @@ def test_structured_affected_count_is_exact() -> None:
         kind="artifact", artifact_id=quality.id, locator="duplicate_rows:"
     )
     values = rv._resolve_evidence_numbers(evidence, pack, {})
-    assert values == [(7.0, "raw", "exact", False)]
+    assert values == [(7.0, "raw", "exact", None)]
 
 
 def test_structured_count_rejects_off_by_one() -> None:
@@ -318,7 +318,7 @@ def test_produced_column_locator_grammar_resolves() -> None:
             kind="artifact", artifact_id="qual_probe", locator=locator
         )
         assert rv._resolve_evidence_numbers(evidence, pack, {}) == [
-            (88.34, "percent", "rounded", False)
+            (88.34, "percent", "rounded", None)
         ], locator
 
 
@@ -329,7 +329,7 @@ def test_produced_dataset_level_locator_grammar_resolves() -> None:
             kind="artifact", artifact_id="qual_probe", locator=locator
         )
         assert rv._resolve_evidence_numbers(evidence, pack, {}) == [
-            (42.0, "raw", "exact", False)
+            (42.0, "raw", "exact", None)
         ], locator
 
 
@@ -350,7 +350,7 @@ def test_whole_set_locator_resolves_cardinality_only() -> None:
             kind="artifact", artifact_id="qual_probe", locator=locator
         )
         assert rv._resolve_evidence_numbers(evidence, pack, {}) == [
-            (2.0, "raw", "exact", False)
+            (2.0, "raw", "exact", None)
         ], locator
 
 

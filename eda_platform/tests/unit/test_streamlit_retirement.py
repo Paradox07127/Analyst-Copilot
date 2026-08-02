@@ -8,13 +8,16 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).parents[3]
 _PACKAGE = _ROOT / "eda_platform" / "src" / "eda_platform"
 _WEB_SRC = _ROOT / "apps" / "web" / "src"
 
-# Retired Streamlit module paths that must not reappear in production source
-# (comments, docstrings, or strings). Example: ui/synthesis_ui.py
-_LEGACY_UI_MODULE_PATH = re.compile(r"\bui/[a-z0-9_]+_ui\.py\b", re.IGNORECASE)
+# Retired Streamlit module names that must not reappear in production source
+# (comments, docstrings, or strings), with or without the ui/ prefix — bare
+# `findings_ui.py` references survived the prefixed pattern for weeks.
+_LEGACY_UI_MODULE_PATH = re.compile(r"\b(?:ui/)?[a-z0-9_]+_ui\.py\b", re.IGNORECASE)
 
 _WEB_SKIP_DIR_NAMES = frozenset({"generated", "test", "e2e", "node_modules"})
 _WEB_SOURCE_SUFFIXES = frozenset({".ts", ".tsx", ".css", ".js", ".jsx"})
@@ -50,19 +53,30 @@ def test_production_python_has_no_streamlit_imports() -> None:
 
 
 def test_launcher_and_current_docs_have_no_legacy_entrypoint() -> None:
-    launch = json.loads((_ROOT / ".claude" / "launch.json").read_text(encoding="utf-8"))
-    names = {str(item["name"]) for item in launch["configurations"]}
-    assert "legacy-streamlit" not in names
+    # launch.json and the cutover runbook are local ops artifacts, gitignored on
+    # purpose (.claude/, /docs/) — validate them when present, skip otherwise.
+    launch_path = _ROOT / ".claude" / "launch.json"
+    runbook_path = _ROOT / "docs" / "infrastructure" / "react-cutover-runbook.md"
 
-    current_docs = "\n".join(
-        [
-            (_ROOT / "README.md").read_text(encoding="utf-8"),
-            (_ROOT / "docs" / "infrastructure" / "react-cutover-runbook.md").read_text(
-                encoding="utf-8"
-            ),
-        ]
-    )
-    assert "uv run streamlit" not in current_docs
+    if launch_path.is_file():
+        launch = json.loads(launch_path.read_text(encoding="utf-8"))
+        names = {str(item["name"]) for item in launch["configurations"]}
+        assert "legacy-streamlit" not in names
+
+    current_docs = [(_ROOT / "README.md").read_text(encoding="utf-8")]
+    if runbook_path.is_file():
+        current_docs.append(runbook_path.read_text(encoding="utf-8"))
+    assert "uv run streamlit" not in "\n".join(current_docs)
+
+    missing = [
+        str(path.relative_to(_ROOT))
+        for path in (launch_path, runbook_path)
+        if not path.is_file()
+    ]
+    if missing:
+        pytest.skip(
+            "local ops artifacts intentionally not committed: " + ", ".join(missing)
+        )
 
 
 def _legacy_ui_path_hits(path: Path) -> list[str]:

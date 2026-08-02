@@ -34,13 +34,6 @@ htmlcov/
 /datasets/
 
 
-# Legacy generated artifacts retained only as read-only historical reference
-single_eda_agent Ver1.0/**/__pycache__/
-single_eda_agent Ver1.0/**/.DS_Store
-
-# Dummy workspace some UI tests point at; never commit
-unused/
-
 # Playwright CLI debug dumps (console/page snapshots); never commit
 .playwright-cli/
 

@@ -1,8 +1,56 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Annotated, Any
+
+from pydantic import BaseModel, BeforeValidator, Field, WithJsonSchema
+
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.llm import StructuredLLM
 from eda_platform.schemas.plans import Intent, IntentKind
+
+
+def _fold_param_pairs(value: Any) -> Any:
+    """Fold the wire's [{name, value}] list back into a mapping.
+
+    Providers on json_object mode still send a plain mapping, which passes through.
+    Unreadable entries are skipped rather than raised: params is routing metadata,
+    and failing the whole intent would discard a good classification.
+    """
+    if not isinstance(value, list):
+        return value
+    folded: dict[str, Any] = {}
+    for entry in value:
+        if isinstance(entry, Mapping) and isinstance(entry.get("name"), str):
+            folded[entry["name"]] = entry.get("value")
+    return folded
+
+
+_PARAM_PAIRS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "value": {"type": "string"}},
+    },
+}
+
+
+class RoutedIntent(Intent):
+    """Wire form of `Intent`: params travel as pairs, not as a dynamic-key object.
+
+    OpenAI's json_schema strict mode rejects `additionalProperties: true` objects
+    with HTTP 400 (observed 2026-08-01 on gpt-5.6-luna), which broke every OpenAI
+    model on the chat path. Runtime stays a plain dict with arbitrary keys.
+    """
+
+    params: Annotated[
+        dict[str, Any],
+        BeforeValidator(_fold_param_pairs),
+        WithJsonSchema(_PARAM_PAIRS_SCHEMA),
+    ] = Field(default_factory=dict)
+
+
+STRUCTURED_OUTPUT_SCHEMAS: tuple[type[BaseModel], ...] = (RoutedIntent,)
 
 _INTENTS: tuple[IntentKind, ...] = (
     "ask_from_artifacts",
@@ -23,9 +71,9 @@ def route_intent(
     """Classify a chat turn, falling back to deterministic rules when needed."""
     if llm is not None:
         try:
-            intent = llm.structured(
+            routed = llm.structured(
                 task="m3_route_intent",
-                schema=Intent,
+                schema=RoutedIntent,
                 payload={
                     "message": message,
                     "allowed_intents": list(_INTENTS),
@@ -46,8 +94,8 @@ def route_intent(
                     },
                 },
             )
-            if intent.confidence >= confidence_threshold:
-                return intent
+            if routed.confidence >= confidence_threshold:
+                return Intent.model_validate(routed.model_dump())
         except BudgetExceeded:
             raise
         except Exception:

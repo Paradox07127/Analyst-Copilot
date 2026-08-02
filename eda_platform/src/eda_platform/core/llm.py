@@ -390,6 +390,10 @@ class OpenAICompatibleLLMClient:
         # objects, `tool_choice` is repairable and the next attempt drops it.
         if capability is None or capability.tool_choice_policy != "omit":
             body["tool_choice"] = "auto"
+        # Catalog pin for models that reject function tools at their default
+        # reasoning effort (gpt-5.6-luna, 400 observed 2026-08-01).
+        if capability is not None and capability.tools_reasoning_effort:
+            body["reasoning_effort"] = capability.tools_reasoning_effort
         response = self._post_json("/chat/completions", body)
         self._record_usage(response)
         return _openai_tool_response(response)

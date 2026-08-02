@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 TaskType = Literal["classification", "regression"]
-SplitStrategy = Literal["random", "random_stratified", "time_ordered"]
+SplitStrategy = Literal["random", "random_stratified", "time_ordered", "group"]
 
 
 class LeakageCheck(BaseModel):

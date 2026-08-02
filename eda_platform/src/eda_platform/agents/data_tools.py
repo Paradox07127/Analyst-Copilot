@@ -12,11 +12,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eda_platform.agents.receipts import build_receipt
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
+from eda_platform.agents.tool_context import (
+    ToolExecutionContext,
+    current_execution_context,
+    mint_local_execution_context,
+)
 from eda_platform.core.column_roles import ColumnRoleSet
 from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.permissions import PermissionTier, require_permission
 from eda_platform.core.query import DuckDBQueryEngine
+from eda_platform.core.receipt_outbox import ReceiptOutbox
 from eda_platform.core.skills_store import load_skills
+from eda_platform.core.stat_registry import StatTestRegistry, derive_family_id
 from eda_platform.core.store import ArtifactStore
 from eda_platform.schemas.artifacts import (
     Artifact,
@@ -26,10 +33,15 @@ from eda_platform.schemas.artifacts import (
 )
 from eda_platform.schemas.receipts import (
     EvidenceReceipt,
+    ReceiptExecution,
     ReceiptFact,
+    ReceiptFactManifest,
+    ReceiptManifestEntry,
     ReceiptMethod,
     ReceiptScope,
     ReceiptStatistics,
+    data_state_witness_digest,
+    load_verified_receipt,
 )
 from eda_platform.schemas.relations import (
     RelationshipCandidate,
@@ -37,7 +49,7 @@ from eda_platform.schemas.relations import (
     RelationshipSignals,
 )
 from eda_platform.schemas.stats import StatTestType
-from eda_platform.tools.analysis import correlate_column_pairs
+from eda_platform.tools.analysis import resolve_numeric_correlation_columns
 from eda_platform.tools.anomaly import create_anomaly_artifact
 from eda_platform.tools.anomaly import screen_anomalies as screen_anomaly_column
 from eda_platform.tools.cleaning_advice import recommended_cleaning_operations
@@ -57,7 +69,10 @@ from eda_platform.tools.relationship_discovery import (
 )
 from eda_platform.tools.slice_profile import compute_slice_profile
 from eda_platform.tools.sql_runner import SqlCatalog, rewrite_relation_names, run_sql
-from eda_platform.tools.stat_tests import create_stat_test_artifact
+from eda_platform.tools.stat_tests import (
+    create_stat_test_artifact,
+    screen_correlations,
+)
 from eda_platform.tools.stat_tests import run_stat_test as run_stat_test_frame
 from eda_platform.tools.time_series import analyze_series
 
@@ -143,14 +158,12 @@ class RunStatTestArguments(BaseModel):
 
     dataset_id: str = Field(min_length=1)
     test_type: AgentStatTestType
-    # Multiple-comparison ledger key; recorded in the receipt for later
-    # family-wise auditing, not yet enforced.
-    test_family_id: str = Field(min_length=1, max_length=200)
+    # No family, sequence or comparison count: all three are derived by the
+    # system-owned stat registry from the dataset and columns under test.
     group_column: str | None = None
     value_column: str | None = None
     category_column: str | None = None
     pair_column: str | None = None
-    comparison_count: int = Field(default=1, ge=1, le=1_000)
 
 
 class CorrelateColumnsArguments(BaseModel):
@@ -158,7 +171,9 @@ class CorrelateColumnsArguments(BaseModel):
 
     dataset_id: str = Field(min_length=1)
     columns: list[str] | None = Field(default=None, min_length=2, max_length=24)
-    correction_method: Literal["holm", "fdr_bh"] = "fdr_bh"
+    method: Literal["pearson", "spearman"] = "pearson"
+    correction_method: Literal["holm", "fdr_bh"] = "holm"
+    min_pairwise_n: int = Field(default=10, ge=3, le=10_000)
 
 
 class ProfileSliceArguments(BaseModel):
@@ -197,12 +212,24 @@ class DataToolContext:
     payload_policy: PayloadPolicy
     artifacts: list[Artifact] = field(default_factory=list)
     open_analysis: OpenAnalysisExecutor | None = None
+    stat_registry: StatTestRegistry | None = None
     _artifacts_by_id: dict[str, Artifact] = field(init=False, repr=False)
     _datasets_by_id: dict[str, LoadedDataset] = field(init=False, repr=False)
+    # logical_step_id -> receipt artifact id: in-process replay deduplication.
+    _receipt_by_step: dict[str, str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._artifacts_by_id = {artifact.id: artifact for artifact in self.artifacts}
         self._datasets_by_id = {dataset.record.dataset_id: dataset for dataset in self.datasets}
+        self._receipt_by_step = {}
+        if self.stat_registry is None:
+            registry_path = (
+                self.store.session_dir(self.project_id, self.session_id)
+                / "stat_registry.jsonl"
+                if self.store is not None
+                else None
+            )
+            self.stat_registry = StatTestRegistry(registry_path)
 
     def add_artifact(self, artifact: Artifact, *, persist: bool = True) -> None:
         self._artifacts_by_id[artifact.id] = artifact
@@ -340,7 +367,10 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 "Run one guarded statistical test with assumption checks, automatic robust "
                 "fallbacks (Welch ANOVA, Fisher exact) and a BCa bootstrap effect-size CI, "
                 "recorded in an evidence receipt. Use it for group comparisons and "
-                "independence questions; do not use it for correlation screens."
+                "independence questions; do not use it for correlation screens. "
+                "Multiplicity bookkeeping is automatic: the comparison family is "
+                "derived from the dataset and the columns under test, so repeating a "
+                "comparison always tightens its own Bonferroni-adjusted p-value."
             ),
             args_schema=RunStatTestArguments,
             execute=lambda args: _run_stat_test(context, cast(RunStatTestArguments, args)),
@@ -348,7 +378,7 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
         AgentTool(
             name="correlate_columns",
             description=(
-                "Screen numeric column pairs with Pearson correlation plus "
+                "Screen numeric column pairs with Pearson or Spearman correlation plus "
                 "multiplicity-adjusted p-values (holm or fdr_bh across every tested pair). "
                 "Use it to find related measures; do not use it to claim causation or to "
                 "compare categorical columns."
@@ -465,6 +495,10 @@ def _list_artifacts(context: DataToolContext) -> AgentToolResult:
 
 def _read_artifact(context: DataToolContext, args: ReadArtifactArguments) -> AgentToolResult:
     artifact = context.artifact(args.artifact_id)
+    if artifact.type is ArtifactType.EVIDENCE_RECEIPT:
+        # Fail closed: a receipt observation must never be served from a
+        # payload whose content digest no longer verifies.
+        load_verified_receipt(artifact.payload)
     payload: dict[str, Any] | None
     if context.payload_policy == "schema_only":
         payload = None
@@ -583,6 +617,70 @@ _ANALYSIS_TOOL_VERSION = "1"
 _MAX_FACT_PROPOSALS = 20
 _MAX_FACT_PAIRS = 5
 _MAX_SKIP_WARNINGS = 10
+_MAX_MANIFEST_ENTRIES = 512
+
+
+def _row_content_digest(row: dict[str, Any]) -> str:
+    import hashlib
+
+    canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _build_fact_manifest(
+    rows: list[dict[str, Any]],
+    fact_ids: list[str],
+    *,
+    evaluated_count: int,
+    total_rows: int,
+) -> ReceiptFactManifest | None:
+    """One manifest entry per published row; rows past the inline-fact cap are
+    explicitly unevaluated, rows past the manifest bound are counted unlisted."""
+    if not rows:
+        return None
+    entries = tuple(
+        ReceiptManifestEntry(
+            fact_id=fact_id,
+            row_index=index,
+            status="evaluated" if index < evaluated_count else "unevaluated",
+            row_digest=_row_content_digest(row),
+        )
+        # fact_ids always covers every row; only rows are bounded by the cap.
+        for index, (row, fact_id) in enumerate(
+            zip(rows[:_MAX_MANIFEST_ENTRIES], fact_ids, strict=False)
+        )
+    )
+    return ReceiptFactManifest(
+        total_rows=total_rows,
+        unlisted_rows=total_rows - len(entries),
+        entries=entries,
+    )
+
+
+def _resolve_execution(context: DataToolContext) -> ToolExecutionContext:
+    execution = current_execution_context()
+    if execution is not None:
+        return execution
+    return mint_local_execution_context(
+        f"local:{context.project_id}:{context.session_id}"
+    )
+
+
+def _witness_entries(context: DataToolContext) -> list[tuple[str, str | None, str]]:
+    profile_ids: dict[str, str] = {}
+    for artifact in context.artifacts:
+        if artifact.type is ArtifactType.DATASET_PROFILE:
+            dataset_id = artifact.payload.get("dataset_id")
+            if isinstance(dataset_id, str):
+                profile_ids[dataset_id] = artifact.id
+    return [
+        (
+            dataset.record.dataset_id,
+            profile_ids.get(dataset.record.dataset_id),
+            dataset.record.content_hash,
+        )
+        for dataset in context.datasets
+    ]
 
 
 def _emit_receipt(
@@ -598,10 +696,23 @@ def _emit_receipt(
     facts: tuple[ReceiptFact, ...],
     method: ReceiptMethod,
     statistics: ReceiptStatistics | None = None,
-) -> EvidenceReceipt:
-    """Build, register and persist the EvidenceReceipt for one tool call."""
+    fact_manifest: ReceiptFactManifest | None = None,
+    execution: ToolExecutionContext | None = None,
+) -> tuple[EvidenceReceipt, Artifact]:
+    """Build, register and durably commit the EvidenceReceipt for one tool call.
+
+    Replaying the same logical step returns the already-committed receipt
+    instead of minting a second one (outbox exactly-once logical commit).
+    """
+    if execution is None:
+        execution = _resolve_execution(context)
+    step_id = execution.logical_step_id
+    cached_id = context._receipt_by_step.get(step_id)
+    if cached_id is not None:
+        cached = context.artifact(cached_id)
+        return load_verified_receipt(cached.payload), cached
     receipt = build_receipt(
-        tool_call_id=f"{tool_name}:{stable_hash(arguments)}",
+        tool_call_id=execution.call_identity(),
         tool_name=tool_name,
         tool_version=_ANALYSIS_TOOL_VERSION,
         arguments=arguments,
@@ -612,9 +723,15 @@ def _emit_receipt(
         facts=facts,
         method=method,
         statistics=statistics,
-        data_state_witness=stable_hash(
-            sorted(dataset.record.dataset_id for dataset in context.datasets)
+        fact_manifest=fact_manifest,
+        execution=ReceiptExecution(
+            run_id=execution.run_id,
+            provider_call_id=execution.provider_call_id,
+            logical_step_id=execution.logical_step_id,
+            attempt_epoch=execution.attempt_epoch,
+            sequence_index=execution.sequence_index,
         ),
+        data_state_witness=data_state_witness_digest(_witness_entries(context)),
         created_at=datetime.now(UTC).isoformat(),
     )
     payload = receipt.model_dump(mode="json")
@@ -626,8 +743,48 @@ def _emit_receipt(
         parents=list(artifact_ids) if parent_ids is None else parent_ids,
         payload=payload,
     )
-    context.add_artifact(artifact, persist=True)
-    return receipt
+    store = context.store
+    if store is None:
+        context.add_artifact(artifact, persist=True)
+        context._receipt_by_step[step_id] = artifact.id
+        return receipt, artifact
+
+    outbox = ReceiptOutbox(
+        store.session_dir(context.project_id, context.session_id) / "receipt_outbox.jsonl"
+    )
+
+    def artifact_exists(artifact_id: str) -> bool:
+        return store.artifact_path(
+            context.project_id, context.session_id, artifact_id
+        ).exists()
+
+    resolution = outbox.prepare(
+        logical_step_id=step_id,
+        receipt_id=receipt.receipt_id,
+        artifact_id=artifact.id,
+        artifact_exists=artifact_exists,
+    )
+    if resolution.phase == "committed":
+        stored = store.get_artifact(
+            resolution.artifact_id,
+            project_id=context.project_id,
+            session_id=context.session_id,
+        )
+        verified = load_verified_receipt(stored.payload)
+        context.add_artifact(stored, persist=False)
+        context._receipt_by_step[step_id] = stored.id
+        return verified, stored
+    # Durable write first: the receipt only becomes observable in the session
+    # context after the artifact survives a crash at any boundary.
+    store.save_artifact(artifact)
+    # Fence the rest of the transaction to the receipt this worker prepared:
+    # a concurrent worker that took the step over must not have its artifact
+    # marked durable by us.
+    outbox.mark_artifact_written(step_id, expected_receipt_id=resolution.receipt_id)
+    outbox.commit(step_id, expected_receipt_id=resolution.receipt_id)
+    context.add_artifact(artifact, persist=False)
+    context._receipt_by_step[step_id] = artifact.id
+    return receipt, artifact
 
 
 def _fact(
@@ -755,7 +912,7 @@ def _assess_join_keys(context: DataToolContext, args: AssessJoinKeysArguments) -
             _fact("cardinality", validation.cardinality, "string"),
         ]
     )
-    receipt = _emit_receipt(
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="assess_join_keys",
         arguments=args.model_dump(mode="json"),
@@ -787,6 +944,7 @@ def _assess_join_keys(context: DataToolContext, args: AssessJoinKeysArguments) -
             "warnings": [*method_warnings, *validation.warnings],
         },
         artifacts=[primary],
+        receipt_artifact=receipt_artifact,
     )
 
 
@@ -813,7 +971,7 @@ def _screen_anomalies(context: DataToolContext, args: ScreenAnomaliesArguments) 
         _fact("q1", result.q1, "number"),
         _fact("q3", result.q3, "number"),
     )
-    receipt = _emit_receipt(
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="screen_anomalies",
         arguments=args.model_dump(mode="json"),
@@ -842,6 +1000,7 @@ def _screen_anomalies(context: DataToolContext, args: ScreenAnomaliesArguments) 
             "notes": result.notes,
         },
         artifacts=[primary],
+        receipt_artifact=receipt_artifact,
     )
 
 
@@ -873,11 +1032,13 @@ def _run_domain_metrics(
     skip_warnings = tuple(
         f"{skip.metric_id}: {skip.reason}" for skip in resolution.skipped
     )[:_MAX_SKIP_WARNINGS]
-    scope = ReceiptScope(dataset_ids=tuple(sorted(loaded_ids)))
+    scope = ReceiptScope(
+        dataset_ids=tuple(sorted(loaded_ids)), scope_resolution="whole_dataset"
+    )
     arguments = args.model_dump(mode="json")
 
     if not resolution.resolved:
-        receipt = _emit_receipt(
+        receipt, receipt_artifact = _emit_receipt(
             context,
             tool_name="run_domain_metrics",
             arguments=arguments,
@@ -897,7 +1058,8 @@ def _run_domain_metrics(
                 "receipt_id": receipt.receipt_id,
                 "metrics": [],
                 "skipped": list(skip_warnings),
-            }
+            },
+            receipt_artifact=receipt_artifact,
         )
 
     relation_map = {
@@ -958,7 +1120,7 @@ def _run_domain_metrics(
                 "contract_reason": contract.reason,
             }
         )
-    receipt = _emit_receipt(
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="run_domain_metrics",
         arguments=arguments,
@@ -985,6 +1147,7 @@ def _run_domain_metrics(
             ),
         ),
         artifacts=list(sql_artifacts),
+        receipt_artifact=receipt_artifact,
     )
 
 
@@ -1033,7 +1196,7 @@ def _recommend_cleaning(
             )
     else:
         facts.append(_absence_fact("no_recommended_operations"))
-    receipt = _emit_receipt(
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="recommend_cleaning",
         arguments=args.model_dump(mode="json"),
@@ -1043,7 +1206,9 @@ def _recommend_cleaning(
         artifact_ids=(),
         parent_ids=[profile_artifact.id, quality_artifact.id],
         result_count=len(proposals),
-        scope=ReceiptScope(dataset_ids=(args.dataset_id,)),
+        scope=ReceiptScope(
+            dataset_ids=(args.dataset_id,), scope_resolution="whole_dataset"
+        ),
         facts=tuple(facts),
         method=ReceiptMethod(
             family="cleaning_recommendation",
@@ -1061,12 +1226,32 @@ def _recommend_cleaning(
                     "note": "Proposals only; nothing was applied to the data.",
                 }
             ),
-        )
+        ),
+        receipt_artifact=receipt_artifact,
     )
 
 
 def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> AgentToolResult:
     dataset = _single_dataset(context, args.dataset_id)
+    execution = _resolve_execution(context)
+    registry = cast(StatTestRegistry, context.stat_registry)
+    tested_columns = tuple(
+        column
+        for column in (
+            args.group_column,
+            args.value_column,
+            args.category_column,
+            args.pair_column,
+        )
+        if column
+    )
+    family_id = derive_family_id(dataset_id=args.dataset_id, columns=tested_columns)
+    attempt = registry.begin_attempt(
+        family_id=family_id,
+        requested_test_type=args.test_type,
+        arguments_digest=stable_hash(args.model_dump(mode="json"), length=32),
+        logical_step_id=execution.logical_step_id,
+    )
     switch_notes: list[str] = []
 
     def _run(test_type: StatTestType) -> Any:
@@ -1078,22 +1263,28 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
             value_column=args.value_column,
             category_column=args.category_column,
             pair_column=args.pair_column,
-            comparison_count=args.comparison_count,
+            comparison_count=attempt.sequence_index,
             effect_ci=True,
         )
 
-    result = _run(args.test_type)
-    if args.test_type == "one_way_anova" and any(
-        check.name == "variance_homogeneity" and check.status == "warn"
-        for check in result.assumptions
-    ):
-        # Precondition gate: heterogeneous variances invalidate classic ANOVA,
-        # so the robust alternative runs instead of a warning being waved through.
-        result = _run("welch_anova")
-        switch_notes.append(
-            "Levene variance-homogeneity check failed for one_way_anova; "
-            "automatically switched to Welch ANOVA."
-        )
+    try:
+        result = _run(args.test_type)
+        if args.test_type == "one_way_anova" and any(
+            check.name == "variance_homogeneity" and check.status == "warn"
+            for check in result.assumptions
+        ):
+            # Precondition gate: heterogeneous variances invalidate classic ANOVA,
+            # so the robust alternative runs instead of a warning being waved through.
+            result = _run("welch_anova")
+            switch_notes.append(
+                "Levene variance-homogeneity check failed for one_way_anova; "
+                "automatically switched to Welch ANOVA."
+            )
+    except Exception as exc:
+        # Failed attempts stay on the multiplicity ledger; selective reporting
+        # must not shrink the family.
+        registry.record_failure(attempt.attempt_id, error=str(exc)[:500])
+        raise
     primary = create_stat_test_artifact(
         result,
         project_id=context.project_id,
@@ -1114,7 +1305,7 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
         )
         if fact is not None
     )
-    receipt = _emit_receipt(
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="run_stat_test",
         arguments=args.model_dump(mode="json"),
@@ -1123,16 +1314,7 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
         result_count=1,
         scope=ReceiptScope(
             dataset_ids=(args.dataset_id,),
-            columns=tuple(
-                column
-                for column in (
-                    args.group_column,
-                    args.value_column,
-                    args.category_column,
-                    args.pair_column,
-                )
-                if column
-            ),
+            columns=tested_columns,
         ),
         facts=facts,
         method=ReceiptMethod(
@@ -1141,8 +1323,12 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
             family=result.test_type,
             parameters={
                 "requested_test_type": args.test_type,
-                "test_family_id": args.test_family_id,
-                "comparison_count": args.comparison_count,
+                "test_family_id": family_id,
+                "comparison_count": attempt.sequence_index,
+                # Session-wide attempt total: a partition sliced into many tiny
+                # families shows up as session_attempt_count >> comparison_count.
+                "session_attempt_count": len(registry.attempts()),
+                "stat_attempt_id": attempt.attempt_id,
             },
             assumptions=tuple(
                 f"{check.name}={check.status}" for check in result.assumptions
@@ -1152,7 +1338,7 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
             ),
         ),
         statistics=ReceiptStatistics(
-            hypothesis_id=args.test_family_id,
+            hypothesis_id=family_id,
             test_name=result.test_type,
             test_statistic=result.statistic,
             p_value=result.p_value,
@@ -1161,8 +1347,11 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
             ci_low=result.effect_ci_low,
             ci_high=result.effect_ci_high,
             sample_size=result.sample_size,
+            sequence_index=attempt.sequence_index,
         ),
+        execution=execution,
     )
+    registry.record_completion(attempt.attempt_id, receipt_id=receipt.receipt_id)
     return AgentToolResult(
         content={
             "artifact_id": primary.id,
@@ -1180,6 +1369,7 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
             "warnings": [*switch_notes, *(warning.message for warning in result.warnings)],
         },
         artifacts=[primary],
+        receipt_artifact=receipt_artifact,
     )
 
 
@@ -1188,14 +1378,41 @@ def _correlate_columns(
     args: CorrelateColumnsArguments,
 ) -> AgentToolResult:
     dataset = _single_dataset(context, args.dataset_id)
-    table = correlate_column_pairs(
+    omitted: list[str] = []
+    if args.columns is None:
+        resolved, omitted = resolve_numeric_correlation_columns(dataset.frame)
+        scope_resolution: Literal["explicit", "resolved"] = "resolved"
+    else:
+        resolved = [str(column) for column in args.columns]
+        scope_resolution = "explicit"
+    if len(resolved) < 2:
+        raise ValueError(
+            "Correlation needs at least two numeric columns; "
+            f"resolved {len(resolved)} usable column(s)."
+        )
+    result = screen_correlations(
         dataset.frame,
         dataset_id=args.dataset_id,
         dataset_name=dataset.record.name,
-        columns=args.columns,
+        columns=resolved,
+        method=args.method,
         correction_method=args.correction_method,
+        min_pairwise_n=args.min_pairwise_n,
     )
-    payload = table.model_dump(mode="json")
+    resolved = [str(column) for column in result.columns_considered]
+    table = result.table
+    # Result-level method facts ride on the payload so the artifact stays
+    # self-describing; AnalysisTable readers ignore the extra keys.
+    payload = {
+        **table.model_dump(mode="json"),
+        "correlation_method": result.correlation_method,
+        "correction_method": result.correction_method,
+        "min_pairwise_n": result.min_pairwise_n,
+        "columns_considered": resolved,
+        "pairs_tested": result.pairs_tested,
+        "pairs_insufficient_n": result.pairs_insufficient_n,
+        "pairs_degenerate": result.pairs_degenerate,
+    }
     primary = Artifact(
         id=make_artifact_id("table", payload),
         type=ArtifactType.TABLE,
@@ -1205,18 +1422,28 @@ def _correlate_columns(
         plain_language=table.description,
     )
     context.add_artifact(primary)
-    rows = table.rows
-    pairs_tested = int(rows[0]["pairs_tested"]) if rows else 0
-    significant = sum(1 for row in rows if float(row["adjusted_p"]) < 0.05)
+    rows = cast(list[dict[str, Any]], payload["rows"])
+    tested_rows = [row for row in rows if not row.get("insufficient_n")]
+    significant = sum(
+        1
+        for row in tested_rows
+        if row["adjusted_p"] is not None and float(row["adjusted_p"]) < 0.05
+    )
     facts: list[ReceiptFact] = [
-        _fact("pairs_tested", pairs_tested, "count"),
-        _fact("correction_method", args.correction_method, "string"),
+        _fact("pairs_tested", result.pairs_tested, "count"),
+        _fact("pairs_insufficient_n", result.pairs_insufficient_n, "count"),
+        _fact("correlation_method", result.correlation_method, "string"),
+        _fact("correction_method", result.correction_method, "string"),
+        _fact("min_pairwise_n", result.min_pairwise_n, "count"),
         _fact("significant_adjusted_pairs", significant, "count"),
     ]
-    for index, row in enumerate(rows[:_MAX_FACT_PAIRS]):
+    # Published rows are ordered tested-first, so evaluated entries can never
+    # land on an insufficient_n row.
+    evaluated_count = min(_MAX_FACT_PAIRS, len(tested_rows))
+    for index, row in enumerate(rows[:evaluated_count]):
         facts.extend(
             [
-                _fact(f"pair{index}.pearson", row["pearson"], "number"),
+                _fact(f"pair{index}.coefficient", row["coefficient"], "number"),
                 _fact(f"pair{index}.adjusted_p", row["adjusted_p"], "number"),
                 _fact(
                     f"pair{index}.columns",
@@ -1226,23 +1453,41 @@ def _correlate_columns(
             ]
         )
     trivial = sum(1 for row in rows if row.get("is_trivial_pair"))
-    receipt = _emit_receipt(
+    # insufficient_n rows carry no coefficient, so their manifest ids name the
+    # marker they actually back instead of posing as an evaluated pair.
+    fact_ids = [
+        f"pair{index}.insufficient_n" if row.get("insufficient_n") else f"pair{index}"
+        for index, row in enumerate(rows)
+    ]
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="correlate_columns",
         arguments=args.model_dump(mode="json"),
         raw_output=payload,
         artifact_ids=(primary.id,),
-        result_count=pairs_tested,
+        result_count=result.pairs_tested,
         scope=ReceiptScope(
             dataset_ids=(args.dataset_id,),
-            columns=tuple(args.columns or ()),
+            columns=tuple(resolved),
+            omitted_columns=tuple(omitted),
+            scope_resolution=scope_resolution,
         ),
         facts=tuple(facts),
+        fact_manifest=_build_fact_manifest(
+            rows,
+            fact_ids,
+            evaluated_count=evaluated_count,
+            total_rows=result.pairs_tested + result.pairs_insufficient_n,
+        ),
         method=ReceiptMethod(
-            family="pearson_correlation_screen",
+            family=f"{result.correlation_method}_correlation_screen",
             parameters={
-                "correction_method": args.correction_method,
-                "pairs_tested": pairs_tested,
+                "correlation_method": result.correlation_method,
+                "correction_method": result.correction_method,
+                "min_pairwise_n": result.min_pairwise_n,
+                "pairs_tested": result.pairs_tested,
+                "pairs_insufficient_n": result.pairs_insufficient_n,
+                "pairs_degenerate": result.pairs_degenerate,
             },
             warnings=(
                 (f"{trivial} published pair(s) look trivially coupled (is_trivial_pair).",)
@@ -1258,14 +1503,17 @@ def _correlate_columns(
                 {
                     "artifact_id": primary.id,
                     "receipt_id": receipt.receipt_id,
-                    "pairs_tested": pairs_tested,
-                    "correction_method": args.correction_method,
+                    "pairs_tested": result.pairs_tested,
+                    "pairs_insufficient_n": result.pairs_insufficient_n,
+                    "correlation_method": result.correlation_method,
+                    "correction_method": result.correction_method,
                     "significant_adjusted_pairs": significant,
                     "top_pairs": rows[:10],
                 }
             ),
         ),
         artifacts=[primary],
+        receipt_artifact=receipt_artifact,
     )
 
 
@@ -1274,6 +1522,17 @@ _MAX_FACT_COLUMNS = 8
 
 def _profile_slice(context: DataToolContext, args: ProfileSliceArguments) -> AgentToolResult:
     dataset = _single_dataset(context, args.dataset_id)
+    if args.columns is None:
+        resolved = [str(column) for column in dataset.frame.columns]
+        scope_resolution: Literal["explicit", "resolved"] = "resolved"
+    else:
+        resolved = [str(column) for column in args.columns]
+        scope_resolution = "explicit"
+    if not resolved:
+        raise ValueError(
+            "profile_slice resolved no columns; an empty column scope cannot "
+            "stand in for full coverage."
+        )
     profile = compute_slice_profile(
         dataset.frame,
         dataset_id=args.dataset_id,
@@ -1281,9 +1540,15 @@ def _profile_slice(context: DataToolContext, args: ProfileSliceArguments) -> Age
         where_sql=args.where_sql,
         columns=args.columns,
     )
+    # Cross-agent contract: prefer the scanned columns reported by the
+    # underlying tool when it starts disclosing them.
+    underlying_resolved = getattr(profile, "resolved_columns", None)
+    if underlying_resolved:
+        resolved = [str(column) for column in underlying_resolved]
     scope = ReceiptScope(
         dataset_ids=(args.dataset_id,),
-        columns=tuple(args.columns or ()),
+        columns=tuple(resolved),
+        scope_resolution=scope_resolution,
         filters=args.where_sql,
     )
     facts: list[ReceiptFact] = [
@@ -1298,7 +1563,7 @@ def _profile_slice(context: DataToolContext, args: ProfileSliceArguments) -> Age
     }
     if profile.table is None:
         facts.append(_absence_fact("empty_slice"))
-        receipt = _emit_receipt(
+        receipt, receipt_artifact = _emit_receipt(
             context,
             tool_name="profile_slice",
             arguments=args.model_dump(mode="json"),
@@ -1319,7 +1584,8 @@ def _profile_slice(context: DataToolContext, args: ProfileSliceArguments) -> Age
                 "rows_in_slice": 0,
                 "slice_share_percent": profile.slice_share_percent,
                 "note": "The WHERE condition matched no rows.",
-            }
+            },
+            receipt_artifact=receipt_artifact,
         )
     payload = profile.table.model_dump(mode="json")
     primary = Artifact(
@@ -1344,7 +1610,7 @@ def _profile_slice(context: DataToolContext, args: ProfileSliceArguments) -> Age
         if row.get("mean") is not None:
             facts.append(_fact(f"{column}.mean", row["mean"], "number"))
             facts.append(_fact(f"{column}.median", row["median"], "number"))
-    receipt = _emit_receipt(
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="profile_slice",
         arguments=args.model_dump(mode="json"),
@@ -1353,6 +1619,12 @@ def _profile_slice(context: DataToolContext, args: ProfileSliceArguments) -> Age
         result_count=profile.rows_in_slice,
         scope=scope,
         facts=tuple(facts),
+        fact_manifest=_build_fact_manifest(
+            payload["rows"],
+            [str(row["column"]) for row in payload["rows"]],
+            evaluated_count=_MAX_FACT_COLUMNS,
+            total_rows=len(payload["rows"]),
+        ),
         method=ReceiptMethod(family="slice_profile", parameters=method_parameters),
     )
     return AgentToolResult(
@@ -1370,6 +1642,7 @@ def _profile_slice(context: DataToolContext, args: ProfileSliceArguments) -> Age
             ),
         ),
         artifacts=[primary],
+        receipt_artifact=receipt_artifact,
     )
 
 
@@ -1417,7 +1690,7 @@ def _analyze_time_series(
         _numeric_fact("kpss_p", result.kpss_p),
         _fact("stationarity_verdict", result.stationarity_verdict, "string"),
     )
-    receipt = _emit_receipt(
+    receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="analyze_time_series",
         arguments=args.model_dump(mode="json"),
@@ -1464,6 +1737,7 @@ def _analyze_time_series(
             "warnings": list(result.warnings),
         },
         artifacts=[primary],
+        receipt_artifact=receipt_artifact,
     )
 
 

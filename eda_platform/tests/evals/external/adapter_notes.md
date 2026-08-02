@@ -48,7 +48,52 @@ git clone --depth 1 https://github.com/mitdbg/Kramabench
 - 两者都超出纯 SQL 范畴(需要文档阅读/多步推理/建模),预期得分口径是"记分观测",
   不纳入 M4 DoD(D7:只记分不追分)。
 
-## 4. 推迟原因记录
+## 4. InsightEval(Eval-0 追加,2026-08-01)
+
+**License 结论:不可 vendor。** 仓库 `zhenghaozhu23/InsightEval`(检查于 commit
+`7bf3e160`,2026-07-16)无 LICENSE 文件,README §License 原文:
+"No license has been selected for this repository yet. Add an explicit `LICENSE`
+file before distributing the code or dataset for reuse." —— 明确禁止再分发,
+因此本仓库不落任何实例(哪怕 10 条),只写 adapter + 下载说明。
+
+下载(用户执行,~几 MB):
+
+```bash
+git clone --depth 1 https://github.com/zhenghaozhu23/InsightEval
+# 数据:data/csvs/data_<id>.csv(+ 可选 data_<id>_sysuser.csv)
+#       data/jsons/data_<id>.json(metadata/goal/insights_detail/insights/summary)
+# 官方 loader:src/insighteval/dataset.py::load_instance(instance_id, data_dir)
+```
+
+接入 `exploration_baseline` harness 的映射:
+
+- 每个 instance = 一个 item(`item_id = insighteval_<id>`,bucket `external`,
+  capability suite;占位条目已在 `../exploration_baseline/suites/capability.json`,
+  status `blocked_no_license`,拿到本地 clone 后改为指向 clone 路径即可)。
+- 输入:`data/csvs/data_<id>.csv` 上传 + `goal` 作为 business_context;
+  agent 走 auto-EDA/question 基线(与 planted 同一 adapter)。
+- 判分:`insights_detail` 的 10 条参照 insight 为 ground truth;
+  `data_type` 字面(Descriptive/Diagnostic/Predictive/Prescriptive/Evaluative/
+  Exploratory)与 harness 的 `SIX_INSIGHT_FAMILIES` 逐字一致(六类覆盖直接可算)。
+  逐条命中判定语义模糊,确定性 checker 只算:六类覆盖率、条数、grounding;
+  insight 相似度匹配属 LLM-as-judge 范畴,按 R7 规则与确定性指标分开报告,不进硬门。
+- 首轮建议子集:每个 category 取 1–2 条、难度覆盖 1–4,共 ≤10 instance,
+  id 列表写在运行命令里(`--items insighteval_3,insighteval_17,...`),不落库。
+
+## 5. BLADE(Eval-0 追加,只记 adapter notes,不 vendor)
+
+- 来源:`behavioral-data/BLADE`(GitHub)。任务形态 = 研究问题 + 数据集 +
+  专家标注的分析决策空间(conceptual variables / transforms / statistical model),
+  评的是**分析决策轨迹**,不是单值答案。
+- 判分器:仓库自带 LLM-assisted 匹配(把 agent 的分析决策与标注决策空间对齐),
+  含 judge 成分 → 按 R7 只进 capability suite 的"记分观测",不进确定性硬门。
+- 映射:数据文件走平台上传;research question 作为 business_context;
+  agent 的 transform/model 选择从 receipt/trace 里抽取后喂 BLADE 的 matcher。
+  在 E2 journal(工具调用账本)落地前,决策轨迹抽取不完整,故 Eval-0 只登记
+  adapter,不跑分。
+- DABStep 见 §1(已本地化 7 条 hard 样本);本轮不再动。
+
+## 6. 推迟原因记录
 
 - 无 live LLM key → agent 侧无法产生候选答案(与 NL2SQL live 跑分同因)。
 - 上下文数据数百 MB,不宜进 git 仓库;按上文命令在用户机器上按需拉取。

@@ -8,7 +8,7 @@ the robust alternative path (not a warning) when its preconditions fail.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -16,9 +16,11 @@ import pytest
 from pydantic import ValidationError
 
 from eda_platform.agents.data_tools import (
+    AnalyzeTimeSeriesArguments,
     AssessJoinKeysArguments,
     CorrelateColumnsArguments,
     DataToolContext,
+    ProfileSliceArguments,
     RecommendCleaningArguments,
     RunDomainMetricsArguments,
     RunStatTestArguments,
@@ -444,7 +446,6 @@ def test_run_stat_test_receipt_records_family_id_and_effect_ci() -> None:
             test_type="independent_t_test",
             group_column="segment",
             value_column="revenue",
-            test_family_id="fam_revenue_by_segment",
         )
     )
     primary = next(a for a in context.artifacts if a.type is ArtifactType.STAT_TEST_RESULT)
@@ -453,7 +454,7 @@ def test_run_stat_test_receipt_records_family_id_and_effect_ci() -> None:
     assert receipt.artifact_ids == (primary.id,)
     assert receipt_artifact.parents == [primary.id]
     assert receipt.statistics is not None
-    assert receipt.statistics.hypothesis_id == "fam_revenue_by_segment"
+    assert receipt.statistics.hypothesis_id == receipt.method.parameters["test_family_id"]
     assert receipt.statistics.test_name == "independent_t_test"
     assert receipt.statistics.p_value is not None
     assert receipt.statistics.ci_low is not None
@@ -466,19 +467,11 @@ def test_run_stat_test_receipt_records_family_id_and_effect_ci() -> None:
     assert receipt.method.assumptions, "assumption checks must be recorded"
 
 
-def test_run_stat_test_requires_test_family_id() -> None:
-    with pytest.raises(ValidationError):
-        RunStatTestArguments(
-            dataset_id="ds_sales",
-            test_type="independent_t_test",
-            group_column="segment",
-            value_column="revenue",
-        )  # type: ignore[call-arg]
+def test_run_stat_test_rejects_an_unknown_test_type() -> None:
     with pytest.raises(ValidationError):
         RunStatTestArguments(
             dataset_id="ds_sales",
             test_type="no_such_test",  # type: ignore[arg-type]
-            test_family_id="fam",
         )
 
 
@@ -499,7 +492,6 @@ def test_run_stat_test_heteroscedastic_anova_switches_to_welch() -> None:
             test_type="one_way_anova",
             group_column="grp",
             value_column="val",
-            test_family_id="fam_var",
         )
     )
     _, receipt = _last_receipt(context)
@@ -524,7 +516,6 @@ def test_run_stat_test_sparse_2x2_receipt_is_fisher_not_chi2() -> None:
             test_type="chi_square_independence",
             group_column="grp",
             category_column="cat",
-            test_family_id="fam_sparse",
         )
     )
     _, receipt = _last_receipt(context)
@@ -621,6 +612,140 @@ def test_stat_test_result_payloads_without_ci_fields_still_load() -> None:
 
 
 # ---------------------------------------------------------------------------
+# E1.5: registry-allocated statistical sequences
+# ---------------------------------------------------------------------------
+
+
+def test_run_stat_test_rejects_a_model_supplied_comparison_count() -> None:
+    with pytest.raises(ValidationError):
+        RunStatTestArguments(
+            dataset_id="ds_sales",
+            test_type="independent_t_test",
+            group_column="segment",
+            value_column="revenue",
+            comparison_count=1,  # type: ignore[call-arg]
+        )
+    with pytest.raises(ValidationError):
+        RunStatTestArguments(
+            dataset_id="ds_sales",
+            test_type="independent_t_test",
+            group_column="segment",
+            value_column="revenue",
+            sequence_index=7,  # type: ignore[call-arg]
+        )
+
+
+def test_run_stat_test_rejects_a_model_supplied_test_family_id() -> None:
+    with pytest.raises(ValidationError):
+        RunStatTestArguments(
+            dataset_id="ds_sales",
+            test_type="independent_t_test",
+            group_column="segment",
+            value_column="revenue",
+            test_family_id="fam_whatever_i_want",  # type: ignore[call-arg]
+        )
+
+
+def test_renaming_a_family_cannot_escape_the_multiplicity_ledger() -> None:
+    """Five reruns of one comparison stay one family however the model phrases them."""
+    context = _context([_dataset("sales.csv", _t_test_frame(), "ds_sales")])
+    tool = _tool(context, "run_stat_test")
+    sequences: list[int] = []
+    adjusted: list[float | None] = []
+    families: set[str] = set()
+    for _ in range(5):
+        tool.execute(
+            RunStatTestArguments(
+                dataset_id="ds_sales",
+                test_type="independent_t_test",
+                group_column="segment",
+                value_column="revenue",
+            )
+        )
+        _, receipt = _last_receipt(context)
+        assert receipt.statistics is not None
+        sequences.append(receipt.statistics.sequence_index)
+        adjusted.append(receipt.statistics.adjusted_p_value)
+        families.add(str(receipt.method.parameters["test_family_id"]))
+
+    assert sequences == [1, 2, 3, 4, 5]
+    assert len(families) == 1, "one comparison repeated is one family"
+    family_id = families.pop()
+    assert family_id.startswith("fam_")
+    assert adjusted[0] is None, "a single comparison needs no correction"
+    assert all(value is not None for value in adjusted[1:]), (
+        "every repeat must carry a Bonferroni-adjusted p-value"
+    )
+    registry = context.stat_registry
+    assert registry is not None
+    assert registry.comparison_count(family_id) == 5
+    assert registry.attempts(family_id) == registry.attempts()
+
+
+def test_stat_families_split_by_dataset_and_columns_under_test() -> None:
+    frame = _t_test_frame()
+    frame["cost"] = [float(i % 11) + 1.0 for i in range(len(frame))]
+    context = _context([_dataset("sales.csv", frame, "ds_sales")])
+    tool = _tool(context, "run_stat_test")
+
+    def _family(value_column: str) -> str:
+        tool.execute(
+            RunStatTestArguments(
+                dataset_id="ds_sales",
+                test_type="independent_t_test",
+                group_column="segment",
+                value_column=value_column,
+            )
+        )
+        _, receipt = _last_receipt(context)
+        return str(receipt.method.parameters["test_family_id"])
+
+    assert _family("revenue") != _family("cost")
+    assert _family("revenue") == _family("revenue")
+
+
+def test_stat_receipts_carry_registry_allocated_sequences() -> None:
+    context = _context([_dataset("sales.csv", _t_test_frame(), "ds_sales")])
+    tool = _tool(context, "run_stat_test")
+
+    def _args(test_type: str = "independent_t_test", **overrides: Any) -> Any:
+        return RunStatTestArguments(
+            dataset_id="ds_sales",
+            test_type=cast(Any, test_type),
+            group_column="segment",
+            value_column="revenue",
+            **overrides,
+        )
+
+    tool.execute(_args())
+    _, first = _last_receipt(context)
+    assert first.statistics is not None
+    assert first.statistics.sequence_index == 1
+    assert first.method.parameters["comparison_count"] == 1
+    family_id = str(first.method.parameters["test_family_id"])
+
+    # A rejected attempt must still consume a sequence: selective reporting
+    # cannot hide failures from the multiplicity ledger.
+    with pytest.raises(Exception, match="pair_column|column"):
+        tool.execute(_args(test_type="paired_t_test"))
+
+    tool.execute(_args(test_type="mann_whitney_u"))
+    _, third = _last_receipt(context)
+    assert third.statistics is not None
+    assert third.statistics.sequence_index == 3
+    assert third.method.parameters["comparison_count"] == 3
+    assert third.method.parameters["test_family_id"] == family_id
+    assert third.method.parameters["session_attempt_count"] == 3
+    assert str(third.method.parameters["stat_attempt_id"]).startswith("att_")
+
+    registry = context.stat_registry
+    assert registry is not None
+    assert registry.comparison_count(family_id) == 3
+    statuses = [attempt.status for attempt in registry.attempts(family_id)]
+    assert statuses == ["completed", "failed", "completed"]
+
+
+# ---------------------------------------------------------------------------
 # correlate_columns
 # ---------------------------------------------------------------------------
 
@@ -643,10 +768,13 @@ def test_correlate_columns_reports_adjusted_p_for_every_pair() -> None:
 
     table_artifact = next(a for a in context.artifacts if a.type is ArtifactType.TABLE)
     assert table_artifact.payload["kind"] == "correlation"
+    assert table_artifact.payload["correction_method"] == "holm"
+    assert table_artifact.payload["correlation_method"] == "pearson"
+    assert table_artifact.payload["pairs_tested"] == 3
+    assert table_artifact.payload["min_pairwise_n"] == 10
     rows = table_artifact.payload["rows"]
     assert rows and all("adjusted_p" in row and row["adjusted_p"] is not None for row in rows)
-    assert all(row["correction_method"] == "fdr_bh" for row in rows)
-    assert all(row["pairs_tested"] == 3 for row in rows)
+    assert all("coefficient" in row for row in rows)
     assert all("pairwise_complete_n" in row for row in rows)
     assert all("is_trivial_pair" in row for row in rows)
 
@@ -655,7 +783,8 @@ def test_correlate_columns_reports_adjusted_p_for_every_pair() -> None:
     assert receipt.artifact_ids == (table_artifact.id,)
     assert receipt_artifact.parents == [table_artifact.id]
     assert _fact(receipt, "pairs_tested").value == 3
-    assert _fact(receipt, "correction_method").value == "fdr_bh"
+    assert _fact(receipt, "correction_method").value == "holm"
+    assert _fact(receipt, "correlation_method").value == "pearson"
     assert isinstance(result.content, dict)
 
 
@@ -666,6 +795,10 @@ def test_correlate_columns_rejects_bad_arguments() -> None:
         CorrelateColumnsArguments(dataset_id="ds_c", columns=["only_one"])
     with pytest.raises(ValidationError):
         CorrelateColumnsArguments(dataset_id="ds_c", nope=1)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        CorrelateColumnsArguments(dataset_id="ds_c", method="kendall")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        CorrelateColumnsArguments(dataset_id="ds_c", min_pairwise_n=2)
 
 
 def test_correlate_columns_needs_two_numeric_columns() -> None:
@@ -676,15 +809,239 @@ def test_correlate_columns_needs_two_numeric_columns() -> None:
         tool.execute(CorrelateColumnsArguments(dataset_id="ds_c"))
 
 
-def test_correlate_columns_supports_holm_correction() -> None:
+def test_correlate_columns_still_supports_fdr_bh_correction() -> None:
     context = _context([_dataset("c.csv", _corr_frame(), "ds_c")])
     tool = _tool(context, "correlate_columns")
     tool.execute(
-        CorrelateColumnsArguments(dataset_id="ds_c", correction_method="holm")
+        CorrelateColumnsArguments(dataset_id="ds_c", correction_method="fdr_bh")
     )
     _, receipt = _last_receipt(context)
     assert verify_receipt_digest(receipt)
-    assert _fact(receipt, "correction_method").value == "holm"
+    assert _fact(receipt, "correction_method").value == "fdr_bh"
+
+
+def test_correlate_columns_supports_spearman_end_to_end() -> None:
+    x = [float(i) for i in range(40)]
+    frame = pd.DataFrame(
+        {
+            "x": x,
+            "y": [v**3 for v in x],  # monotone but nonlinear
+            "z": [float((i * 11) % 17) for i in range(40)],
+        }
+    )
+    context = _context([_dataset("s.csv", frame, "ds_s")])
+    _tool(context, "correlate_columns").execute(
+        CorrelateColumnsArguments(dataset_id="ds_s", method="spearman")
+    )
+    table_artifact = next(a for a in context.artifacts if a.type is ArtifactType.TABLE)
+    assert table_artifact.payload["correlation_method"] == "spearman"
+    top = table_artifact.payload["rows"][0]
+    assert {top["column_a"], top["column_b"]} == {"x", "y"}
+    assert top["coefficient"] == pytest.approx(1.0)
+
+    _, receipt = _last_receipt(context)
+    assert verify_receipt_digest(receipt)
+    assert _fact(receipt, "correlation_method").value == "spearman"
+    assert receipt.method.family == "spearman_correlation_screen"
+
+
+def test_correlate_columns_publishes_signed_coefficients() -> None:
+    x = [float(i) for i in range(30)]
+    frame = pd.DataFrame(
+        {
+            "x": x,
+            "neg": [100.0 - 2.0 * v + ((i * 5) % 3) * 0.4 for i, v in enumerate(x)],
+        }
+    )
+    context = _context([_dataset("n.csv", frame, "ds_n")])
+    _tool(context, "correlate_columns").execute(CorrelateColumnsArguments(dataset_id="ds_n"))
+    table_artifact = next(a for a in context.artifacts if a.type is ArtifactType.TABLE)
+    assert table_artifact.payload["rows"][0]["coefficient"] < -0.9
+
+    _, receipt = _last_receipt(context)
+    fact = _fact(receipt, "pair0.coefficient")
+    assert fact.value is not None and float(fact.value) < -0.9
+
+
+def test_correlate_columns_marks_insufficient_pairs_in_the_manifest() -> None:
+    frame = pd.DataFrame(
+        {
+            "x": [float(i) for i in range(30)],
+            "y": [1.5 * i + ((i * 7) % 5) * 0.3 for i in range(30)],
+            "w": [float(i) if i < 4 else np.nan for i in range(30)],
+        }
+    )
+    context = _context([_dataset("i.csv", frame, "ds_i")])
+    _tool(context, "correlate_columns").execute(CorrelateColumnsArguments(dataset_id="ds_i"))
+
+    table_artifact = next(a for a in context.artifacts if a.type is ArtifactType.TABLE)
+    payload = table_artifact.payload
+    assert payload["pairs_tested"] == 1
+    assert payload["pairs_insufficient_n"] == 2
+    rows = payload["rows"]
+    assert len(rows) == 3
+    insufficient = [row for row in rows if row["insufficient_n"]]
+    assert len(insufficient) == 2
+    assert all(
+        row["coefficient"] is None and row["p_value"] is None and row["adjusted_p"] is None
+        for row in insufficient
+    )
+    assert all(row["pairwise_complete_n"] == 4 for row in insufficient)
+
+    _, receipt = _last_receipt(context)
+    assert verify_receipt_digest(receipt)
+    assert _fact(receipt, "pairs_insufficient_n").value == 2
+    assert _fact(receipt, "min_pairwise_n").value == 10
+    manifest = receipt.fact_manifest
+    assert manifest is not None
+    assert manifest.total_rows == 3
+    assert len(manifest.entries) == 3
+    assert manifest.unlisted_rows == 0
+    assert manifest.entries[0].fact_id == "pair0"
+    assert manifest.entries[0].status == "evaluated"
+    for index in (1, 2):
+        entry = manifest.entries[index]
+        assert entry.fact_id == f"pair{index}.insufficient_n", (
+            "insufficient_n rows must be explicitly discernible, never evaluated pairs"
+        )
+        assert entry.status == "unevaluated"
+        assert entry.row_digest == _row_digest(rows[index])
+    inline_fact_ids = {fact.fact_id for fact in receipt.facts}
+    assert "pair0.coefficient" in inline_fact_ids
+    assert not any(
+        fact_id.startswith("pair1") or fact_id.startswith("pair2")
+        for fact_id in inline_fact_ids
+    )
+
+
+# ---------------------------------------------------------------------------
+# E1.5: resolved scope + bounded fact manifest
+# ---------------------------------------------------------------------------
+
+
+def _row_digest(row: dict[str, Any]) -> str:
+    import hashlib
+    import json
+
+    canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_correlate_columns_receipt_records_the_resolved_scope() -> None:
+    frame = _corr_frame().assign(label=[f"c{i}" for i in range(60)])
+    context = _context([_dataset("c.csv", frame, "ds_c")])
+    _tool(context, "correlate_columns").execute(CorrelateColumnsArguments(dataset_id="ds_c"))
+    _, receipt = _last_receipt(context)
+    assert receipt.scope.columns == ("x", "y", "z"), (
+        "columns=None must resolve to the columns actually scanned"
+    )
+    assert receipt.scope.scope_resolution == "resolved"
+    assert receipt.scope.omitted_columns == ()
+
+
+def test_correlate_columns_discloses_columns_omitted_by_the_cap() -> None:
+    frame = pd.DataFrame(
+        {f"c{i:02d}": [float((i + 1) * j % 17) for j in range(40)] for i in range(30)}
+    )
+    context = _context([_dataset("wide.csv", frame, "ds_w")])
+    _tool(context, "correlate_columns").execute(CorrelateColumnsArguments(dataset_id="ds_w"))
+    _, receipt = _last_receipt(context)
+    assert len(receipt.scope.columns) == 24
+    assert receipt.scope.omitted_columns == tuple(f"c{i:02d}" for i in range(24, 30))
+    assert receipt.scope.scope_resolution == "resolved"
+
+
+def test_correlate_columns_explicit_scope_stays_explicit() -> None:
+    context = _context([_dataset("c.csv", _corr_frame(), "ds_c")])
+    _tool(context, "correlate_columns").execute(
+        CorrelateColumnsArguments(dataset_id="ds_c", columns=["x", "y"])
+    )
+    _, receipt = _last_receipt(context)
+    assert receipt.scope.columns == ("x", "y")
+    assert receipt.scope.scope_resolution == "explicit"
+
+
+def test_profile_slice_resolves_the_full_column_scope() -> None:
+    frame = pd.DataFrame(
+        {
+            "amount": [float(i) for i in range(20)],
+            "region": ["e", "w"] * 10,
+            "note": [f"n{i}" for i in range(20)],
+        }
+    )
+    context = _context([_dataset("s.csv", frame, "ds_s")])
+    tool = _tool(context, "profile_slice")
+    tool.execute(ProfileSliceArguments(dataset_id="ds_s", where_sql="amount >= 10"))
+    _, receipt = _last_receipt(context)
+    assert receipt.scope.columns == ("amount", "region", "note")
+    assert receipt.scope.scope_resolution == "resolved"
+
+    # The empty-slice branch must carry the same resolved scope, never ().
+    tool.execute(ProfileSliceArguments(dataset_id="ds_s", where_sql="amount > 99999"))
+    _, empty_receipt = _last_receipt(context)
+    assert empty_receipt.scope.columns == ("amount", "region", "note")
+    assert empty_receipt.scope.scope_resolution == "resolved"
+
+
+def test_profile_slice_refuses_an_empty_resolved_scope() -> None:
+    dataset = _dataset("e.csv", pd.DataFrame({"amount": [1.0, 2.0]}), "ds_e")
+    context = _context([dataset])
+    # DuckDB refuses zero-column relations at catalog build, so degrade the
+    # frame after registration to reach the wrapper's own guard.
+    object.__setattr__(dataset, "frame", pd.DataFrame(index=range(3)))
+    with pytest.raises(ValueError, match="column"):
+        _tool(context, "profile_slice").execute(ProfileSliceArguments(dataset_id="ds_e"))
+
+
+def test_correlation_manifest_gives_every_published_row_a_fact_id() -> None:
+    rng = np.random.RandomState(7)
+    frame = pd.DataFrame({f"v{i}": rng.rand(50) for i in range(5)})  # 10 pairs
+    context = _context([_dataset("m.csv", frame, "ds_m")])
+    _tool(context, "correlate_columns").execute(CorrelateColumnsArguments(dataset_id="ds_m"))
+    table_artifact = next(a for a in context.artifacts if a.type is ArtifactType.TABLE)
+    rows = table_artifact.payload["rows"]
+    _, receipt = _last_receipt(context)
+
+    manifest = receipt.fact_manifest
+    assert manifest is not None
+    assert manifest.total_rows == table_artifact.payload["pairs_tested"] == 10
+    assert len(manifest.entries) == len(rows)
+    assert manifest.unlisted_rows == manifest.total_rows - len(manifest.entries)
+    inline_fact_ids = {fact.fact_id for fact in receipt.facts}
+    for index, entry in enumerate(manifest.entries):
+        assert entry.fact_id == f"pair{index}"
+        assert entry.row_index == index
+        assert entry.row_digest == _row_digest(rows[index]), (
+            "each published row must be anchorable through its manifest digest"
+        )
+        if index < 5:
+            assert entry.status == "evaluated"
+            assert f"pair{index}.coefficient" in inline_fact_ids
+        else:
+            assert entry.status == "unevaluated"
+            assert f"pair{index}.coefficient" not in inline_fact_ids
+
+
+def test_slice_manifest_marks_columns_beyond_the_fact_cap_unevaluated() -> None:
+    frame = pd.DataFrame(
+        {f"col{i:02d}": [float(i + j) for j in range(15)] for i in range(12)}
+    )
+    context = _context([_dataset("wide.csv", frame, "ds_w")])
+    _tool(context, "profile_slice").execute(
+        ProfileSliceArguments(dataset_id="ds_w", where_sql="col00 >= 0")
+    )
+    table_artifact = next(a for a in context.artifacts if a.type is ArtifactType.TABLE)
+    rows = table_artifact.payload["rows"]
+    _, receipt = _last_receipt(context)
+
+    manifest = receipt.fact_manifest
+    assert manifest is not None
+    assert manifest.total_rows == len(rows) == 12
+    statuses = [entry.status for entry in manifest.entries]
+    assert statuses == ["evaluated"] * 8 + ["unevaluated"] * 4
+    for entry, row in zip(manifest.entries, rows, strict=True):
+        assert entry.fact_id == str(row["column"])
+        assert entry.row_digest == _row_digest(row)
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +1121,324 @@ def test_baseline_importance_falls_back_to_mdi_with_disclosed_bias(
         "impurity" in limitation.lower() or "mdi" in limitation.lower()
         for limitation in card.limitations
     ), "the MDI bias must be disclosed in limitations"
+
+
+# ---------------------------------------------------------------------------
+# E1.5: call identity, receipt-on-result, data-state witness
+# ---------------------------------------------------------------------------
+
+
+def test_same_arguments_twice_yield_distinct_call_identities() -> None:
+    """The call id must come from the execution context, never from the
+    tool name + arguments hash, so two identical calls stay distinguishable."""
+    values = [10.0] * 40 + [11.0] * 40 + [500.0]
+    context = _context([_dataset("a.csv", pd.DataFrame({"amount": values}), "ds_a")])
+    tool = _tool(context, "screen_anomalies")
+    args = ScreenAnomaliesArguments(dataset_id="ds_a", column="amount")
+    tool.execute(args)
+    tool.execute(args)
+
+    receipts = [EvidenceReceipt.model_validate(a.payload) for a in _receipts(context)]
+    assert len(receipts) == 2
+    assert receipts[0].tool_call_id != receipts[1].tool_call_id
+    assert not receipts[0].tool_call_id.startswith("screen_anomalies:")
+    assert receipts[0].receipt_id != receipts[1].receipt_id
+    for receipt in receipts:
+        assert receipt.execution is not None
+        assert receipt.execution.provider_call_id
+        assert receipt.execution.logical_step_id
+
+
+def test_runtime_scope_binds_the_provider_call_id_into_the_receipt() -> None:
+    from eda_platform.agents.tool_context import (
+        ToolExecutionContext,
+        tool_execution_scope,
+    )
+
+    values = [10.0] * 40 + [11.0] * 40 + [500.0]
+    context = _context([_dataset("a.csv", pd.DataFrame({"amount": values}), "ds_a")])
+    tool = _tool(context, "screen_anomalies")
+    execution = ToolExecutionContext(
+        run_id="run_r1",
+        provider_call_id="prov_call_77",
+        logical_step_id="step_lg1",
+        attempt_epoch=2,
+        sequence_index=5,
+    )
+    with tool_execution_scope(execution):
+        tool.execute(ScreenAnomaliesArguments(dataset_id="ds_a", column="amount"))
+    _, receipt = _last_receipt(context)
+    assert receipt.execution is not None
+    assert receipt.execution.provider_call_id == "prov_call_77"
+    assert receipt.execution.run_id == "run_r1"
+    assert receipt.execution.attempt_epoch == 2
+    assert receipt.execution.sequence_index == 5
+    assert "prov_call_77" in receipt.tool_call_id
+
+
+def test_every_emitting_tool_returns_its_receipt_artifact() -> None:
+    """Item 2: the receipt must ride on AgentToolResult so trace/journal/result
+    can reconcile, at every _emit_receipt call site."""
+    values = [10.0] * 40 + [11.0] * 40 + [500.0]
+    frame = pd.DataFrame(
+        {
+            "amount": values,
+            "other": [float(i % 9) for i in range(81)],
+            "grp": ["A"] * 40 + ["B"] * 41,
+            "when": pd.date_range("2024-01-01", periods=81, freq="D").astype(str),
+        }
+    )
+    events = _events_dataset()
+    context = _context(
+        [_dataset("a.csv", frame, "ds_a"), events],
+        artifacts=_cleaning_artifacts(events, []),
+    )
+
+    executions = [
+        ("screen_anomalies", ScreenAnomaliesArguments(dataset_id="ds_a", column="amount")),
+        ("recommend_cleaning", RecommendCleaningArguments(dataset_id="ds_events")),
+        ("run_domain_metrics", RunDomainMetricsArguments()),
+        (
+            "run_stat_test",
+            RunStatTestArguments(
+                dataset_id="ds_a",
+                test_type="mann_whitney_u",
+                group_column="grp",
+                value_column="amount",
+            ),
+        ),
+        ("correlate_columns", CorrelateColumnsArguments(dataset_id="ds_a")),
+        (
+            "profile_slice",
+            ProfileSliceArguments(dataset_id="ds_a", where_sql="amount > 100"),
+        ),
+        (
+            "profile_slice",
+            ProfileSliceArguments(dataset_id="ds_a", where_sql="amount > 99999"),
+        ),
+        (
+            "analyze_time_series",
+            AnalyzeTimeSeriesArguments(
+                dataset_id="ds_a", time_column="when", value_column="amount"
+            ),
+        ),
+        (
+            "assess_join_keys",
+            AssessJoinKeysArguments(
+                left_dataset_id="ds_a",
+                right_dataset_id="ds_events",
+                left_columns=["when"],
+                right_columns=["created_at"],
+            ),
+        ),
+    ]
+    for name, arguments in executions:
+        try:
+            result = _tool(context, name).execute(arguments)
+        except ValueError:
+            continue  # data-shape guards may reject; receipt wiring is what is under test
+        receipt_artifact = result.receipt_artifact
+        assert receipt_artifact is not None, f"{name} did not return its receipt artifact"
+        assert receipt_artifact.type is ArtifactType.EVIDENCE_RECEIPT
+        receipt = EvidenceReceipt.model_validate(receipt_artifact.payload)
+        assert verify_receipt_digest(receipt)
+        assert isinstance(result.content, dict)
+        assert result.content.get("receipt_id") == receipt.receipt_id
+
+
+def _stored_context(tmp_path: Path) -> DataToolContext:
+    store = ArtifactStore(tmp_path / "workspace")
+    store.ensure_project("project_t", name="T")
+    store.start_session("project_t", "run_t")
+    values = [10.0] * 40 + [11.0] * 40 + [500.0]
+    return _context(
+        [_dataset("a.csv", pd.DataFrame({"amount": values}), "ds_a")], store=store
+    )
+
+
+def _replay_execution() -> Any:
+    from eda_platform.agents.tool_context import ToolExecutionContext
+
+    return ToolExecutionContext(
+        run_id="run_replay",
+        provider_call_id="prov_call_1",
+        logical_step_id="step_replay_1",
+        attempt_epoch=1,
+        sequence_index=1,
+    )
+
+
+def test_replaying_the_same_logical_step_yields_exactly_one_receipt(
+    tmp_path: Path,
+) -> None:
+    from eda_platform.agents.tool_context import tool_execution_scope
+
+    context = _stored_context(tmp_path)
+    tool = _tool(context, "screen_anomalies")
+    args = ScreenAnomaliesArguments(dataset_id="ds_a", column="amount")
+    with tool_execution_scope(_replay_execution()):
+        first = tool.execute(args)
+    with tool_execution_scope(_replay_execution()):  # crash replay, same step
+        second = tool.execute(args)
+
+    assert len(_receipts(context)) == 1
+    assert first.receipt_artifact is not None and second.receipt_artifact is not None
+    assert first.receipt_artifact.id == second.receipt_artifact.id
+    assert isinstance(first.content, dict) and isinstance(second.content, dict)
+    assert first.content["receipt_id"] == second.content["receipt_id"]
+
+
+def test_crash_before_the_receipt_artifact_persists_recovers_to_one_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eda_platform.agents.tool_context import tool_execution_scope
+
+    context = _stored_context(tmp_path)
+    tool = _tool(context, "screen_anomalies")
+    args = ScreenAnomaliesArguments(dataset_id="ds_a", column="amount")
+
+    real_save = ArtifactStore.save_artifact
+    crashed: dict[str, bool] = {}
+
+    def crash_once(self: ArtifactStore, artifact: Artifact) -> Any:
+        if artifact.type is ArtifactType.EVIDENCE_RECEIPT and not crashed:
+            crashed["yes"] = True
+            raise OSError("simulated crash before the receipt artifact write")
+        return real_save(self, artifact)
+
+    monkeypatch.setattr(ArtifactStore, "save_artifact", crash_once)
+    with pytest.raises(OSError):
+        with tool_execution_scope(_replay_execution()):
+            tool.execute(args)
+
+    with tool_execution_scope(_replay_execution()):
+        result = tool.execute(args)
+    receipts = _receipts(context)
+    assert len(receipts) == 1
+    assert result.receipt_artifact is not None
+    from eda_platform.core.receipt_outbox import ReceiptOutbox
+
+    outbox = ReceiptOutbox(
+        context.store.session_dir("project_t", "run_t") / "receipt_outbox.jsonl"  # type: ignore[union-attr]
+    )
+    committed = [e for e in outbox.events() if e["event"] == "receipt_committed"]
+    assert len(committed) == 1
+    assert committed[0]["artifact_id"] == result.receipt_artifact.id
+
+
+def test_crash_between_artifact_and_commit_rolls_the_same_receipt_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eda_platform.agents.tool_context import tool_execution_scope
+    from eda_platform.core.receipt_outbox import ReceiptOutbox
+
+    context = _stored_context(tmp_path)
+    tool = _tool(context, "screen_anomalies")
+    args = ScreenAnomaliesArguments(dataset_id="ds_a", column="amount")
+
+    real_commit = ReceiptOutbox.commit
+    crashed: dict[str, bool] = {}
+
+    def crash_once(
+        self: ReceiptOutbox,
+        logical_step_id: str,
+        *,
+        expected_receipt_id: str | None = None,
+    ) -> None:
+        if not crashed:
+            crashed["yes"] = True
+            raise OSError("simulated crash before receipt_committed")
+        real_commit(self, logical_step_id, expected_receipt_id=expected_receipt_id)
+
+    monkeypatch.setattr(ReceiptOutbox, "commit", crash_once)
+    with pytest.raises(OSError):
+        with tool_execution_scope(_replay_execution()):
+            tool.execute(args)
+    assert _receipts(context) == [], "an uncommitted receipt must not be observable"
+    outbox = ReceiptOutbox(
+        context.store.session_dir("project_t", "run_t") / "receipt_outbox.jsonl"  # type: ignore[union-attr]
+    )
+    pending = outbox.state("step_replay_1")
+    assert pending is not None and pending.phase == "artifact_written"
+    durable_id = pending.artifact_id
+
+    with tool_execution_scope(_replay_execution()):
+        result = tool.execute(args)
+    receipts = _receipts(context)
+    assert len(receipts) == 1
+    assert result.receipt_artifact is not None
+    assert result.receipt_artifact.id == durable_id, (
+        "the durable artifact must be rolled forward, not re-minted"
+    )
+
+
+def test_read_artifact_fails_closed_on_a_tampered_receipt() -> None:
+    """Item 7: the load path must force digest verification, not trust storage."""
+    from eda_platform.agents.data_tools import ReadArtifactArguments
+
+    values = [10.0] * 40 + [11.0] * 40 + [500.0]
+    context = _context([_dataset("a.csv", pd.DataFrame({"amount": values}), "ds_a")])
+    _tool(context, "screen_anomalies").execute(
+        ScreenAnomaliesArguments(dataset_id="ds_a", column="amount")
+    )
+    receipt_artifact, _ = _last_receipt(context)
+    read_tool = _tool(context, "read_artifact")
+    read_tool.execute(ReadArtifactArguments(artifact_id=receipt_artifact.id))  # intact passes
+
+    receipt_artifact.payload["result_count"] = 999
+    with pytest.raises(ValueError, match="digest|integrity|tamper"):
+        read_tool.execute(ReadArtifactArguments(artifact_id=receipt_artifact.id))
+
+
+def test_witness_is_a_versioned_triplet_digest() -> None:
+    values = [10.0] * 40 + [11.0] * 40 + [500.0]
+    frame = pd.DataFrame({"amount": values})
+    args = ScreenAnomaliesArguments(dataset_id="ds_a", column="amount")
+
+    bare = _context([_dataset("a.csv", frame, "ds_a")])
+    _tool(bare, "screen_anomalies").execute(args)
+    _, bare_receipt = _last_receipt(bare)
+    assert bare_receipt.data_state_witness.startswith("dsw1_")
+
+    dataset = _dataset("a.csv", frame, "ds_a")
+    profile_artifact = profile_dataset(dataset, project_id="project_t", session_id="run_t")
+    with_profile = _context([dataset], artifacts=[profile_artifact])
+    _tool(with_profile, "screen_anomalies").execute(args)
+    _, profiled_receipt = _last_receipt(with_profile)
+    assert profiled_receipt.data_state_witness != bare_receipt.data_state_witness
+
+    changed = LoadedDataset(
+        record=DatasetRecord(
+            dataset_id="ds_a",
+            name="a.csv",
+            path=Path("/data/a.csv"),
+            content_hash="hash_changed",
+        ),
+        frame=frame,
+    )
+    drifted = _context([changed])
+    _tool(drifted, "screen_anomalies").execute(args)
+    _, drifted_receipt = _last_receipt(drifted)
+    assert drifted_receipt.data_state_witness != bare_receipt.data_state_witness
+
+
+def test_witness_fails_closed_when_the_profile_changes() -> None:
+    from eda_platform.schemas.receipts import (
+        ReceiptIntegrityError,
+        assert_data_state_witness,
+        data_state_witness_digest,
+    )
+
+    entries = [("ds_a", "profile_1", "hash_1")]
+    witness = data_state_witness_digest(entries)
+    assert_data_state_witness(witness, entries)  # matching state passes
+    for drifted in (
+        [("ds_a", "profile_2", "hash_1")],
+        [("ds_a", "profile_1", "hash_2")],
+        [("ds_a", None, "hash_1")],
+    ):
+        with pytest.raises(ReceiptIntegrityError):
+            assert_data_state_witness(witness, drifted)
 
 
 def test_list_saved_skills_exposes_provenance_and_usage_guidance(tmp_path: Path) -> None:

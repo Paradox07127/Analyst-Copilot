@@ -206,14 +206,27 @@ def test_unterminated_invalid_tail_is_ignored_but_middle_corruption_fails_closed
         journal.rebuild()
 
 
-def test_valid_unterminated_tail_is_a_complete_event(tmp_path: Path) -> None:
+def test_valid_unterminated_tail_is_discarded_as_uncommitted(tmp_path: Path) -> None:
+    """A tail without its "\\n" is uncommitted even when it parses, because the
+    next append deletes it. Treating it as committed handed out a seq that was
+    then reused, and the resulting gap made the journal permanently unreadable.
+    """
     journal = _journal(tmp_path)
+    journal.claim_attempt()
     body = journal.path.read_bytes()
     journal.path.write_bytes(body.removesuffix(b"\n"))
 
-    state = journal.rebuild()
-    assert state is not None
-    assert state.last_seq == 0
+    resumed = JsonlLoopJournal(journal.path)
+    torn = resumed.rebuild()
+    assert torn is not None
+    assert torn.last_seq == 0
+    assert torn.attempt_epoch == 0
+
+    reclaimed = resumed.claim_attempt()
+    assert reclaimed.last_seq == 1
+    assert reclaimed.attempt_epoch == 1
+    assert resumed.rebuild() == reclaimed
+    assert [event.seq for event in resumed.events()] == [0, 1]
 
 
 def test_snapshot_is_optional_and_never_hides_journal_corruption(tmp_path: Path) -> None:

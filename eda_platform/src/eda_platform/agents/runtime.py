@@ -10,12 +10,18 @@ the local registry validates and executes every request.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from eda_platform.agents.tool_context import (
+    ToolExecutionContext,
+    make_logical_step_id,
+    tool_execution_scope,
+)
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.cancellation import CancellationError
 from eda_platform.core.llm import LLMToolCall, ToolCallingLLM
@@ -54,6 +60,9 @@ class AgentToolResult:
 
     content: dict[str, Any] | str
     artifacts: list[Any] = field(default_factory=list)
+    # The EvidenceReceipt artifact for this call, so trace/journal/result can
+    # reconcile the same call identity without re-scanning the session store.
+    receipt_artifact: Any | None = None
 
 
 @dataclass(slots=True)
@@ -106,6 +115,7 @@ class AgentRuntime:
         self._trace = trace
 
     def run(self, *, system_prompt: str, user_message: str) -> AgentRunResult:
+        run_id = "agentrun_" + uuid.uuid4().hex
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -217,7 +227,12 @@ class AgentRuntime:
             for call in response.tool_calls:
                 tool_calls += 1
                 tool_names.append(call.name)
-                observation, artifacts = self._invoke(call, step=step)
+                observation, artifacts = self._invoke(
+                    call,
+                    step=step,
+                    run_id=run_id,
+                    sequence_index=tool_calls,
+                )
                 all_artifacts.extend(artifacts)
                 messages.append(
                     {
@@ -268,6 +283,8 @@ class AgentRuntime:
         call: LLMToolCall,
         *,
         step: int,
+        run_id: str,
+        sequence_index: int,
     ) -> tuple[dict[str, Any], list[Any]]:
         tool = self._tools.get(call.name)
         self._emit(
@@ -304,8 +321,16 @@ class AgentRuntime:
                 {"call_id": call.call_id, "step": step, "error": observation["error"]},
             )
             return observation, []
+        execution = ToolExecutionContext(
+            run_id=run_id,
+            provider_call_id=call.call_id,
+            logical_step_id=make_logical_step_id(run_id, call.call_id, sequence_index),
+            attempt_epoch=0,
+            sequence_index=sequence_index,
+        )
         try:
-            result = tool.execute(args)
+            with tool_execution_scope(execution):
+                result = tool.execute(args)
         except _TERMINAL_TOOL_ERRORS:
             self._emit(
                 "tool_failed",
@@ -326,17 +351,21 @@ class AgentRuntime:
             return observation, []
         content = result.content if isinstance(result.content, dict) else {"result": result.content}
         observation = {"ok": True, **content}
+        artifacts = list(result.artifacts)
+        if result.receipt_artifact is not None:
+            artifacts.append(result.receipt_artifact)
         self._emit(
             "tool_completed",
             tool.name,
             {
                 "call_id": call.call_id,
                 "step": step,
-                "artifact_ids": [getattr(artifact, "id", "") for artifact in result.artifacts],
+                "artifact_ids": [getattr(artifact, "id", "") for artifact in artifacts],
+                "receipt_artifact_id": getattr(result.receipt_artifact, "id", None),
                 "summary": _safe_value(content),
             },
         )
-        return observation, result.artifacts
+        return observation, artifacts
 
     def _emit(self, event_type: str, name: str, summary: dict[str, Any]) -> None:
         if self._trace is not None:

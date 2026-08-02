@@ -791,6 +791,7 @@ dependencies = [
 dev = [
     { name = "httpx" },
     { name = "httpx2" },
+    { name = "opentelemetry-sdk" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "ruff" },
@@ -819,6 +820,7 @@ requires-dist = [
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "matplotlib", specifier = "==3.10.8" },
     { name = "openinference-instrumentation", marker = "extra == 'observability'", specifier = ">=0.1.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'dev'", specifier = ">=1.25.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.25.0" },
     { name = "pandas", specifier = ">=2.2.0" },
     { name = "pydantic", specifier = ">=2.10.0" },

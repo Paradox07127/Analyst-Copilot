@@ -521,12 +521,28 @@ class SessionBudgetState:
             "total_tokens",
             "cost_usd",
         ):
-            used, _, maximum, _ = self._dimension_values(dimension)
-            if maximum is not None and used > maximum:
+            used, _, maximum, protected_amount = self._dimension_values(dimension)
+            if maximum is None:
+                continue
+            if used > maximum:
                 raise SessionBudgetExceeded(
                     dimension,
                     limit=maximum,
                     attempted=used,
+                    call_id=call_id,
+                    stage="settlement",
+                )
+            # Symmetric with _enforce: without this branch an ordinary call that
+            # settled above its reservation ate the protected reserve silently,
+            # and finalization was then locked out by its own quota.
+            nonprotected_used, nonprotected_active = self._nonprotected_values(dimension)
+            nonprotected_attempted = nonprotected_used + nonprotected_active
+            nonprotected_limit = maximum - protected_amount
+            if nonprotected_attempted > nonprotected_limit:
+                raise SessionBudgetExceeded(
+                    dimension,
+                    limit=nonprotected_limit,
+                    attempted=nonprotected_attempted,
                     call_id=call_id,
                     stage="settlement",
                 )

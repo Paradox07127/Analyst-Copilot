@@ -289,8 +289,6 @@ function DebugTable({ rows }: { rows: Record<string, unknown>[] }) {
   );
 }
 
-/* Default-expanded set mirrors trace_ui.py's _debug_expander:
- * `expanded=title in {"Timeline", "Errors"}`. */
 function DebugExpander({
   title,
   rows,
@@ -562,8 +560,7 @@ function DeveloperInspectorBody({ sessionId }: { sessionId: string }) {
   );
 }
 
-/* Mirrors trace_ui.py's render_dev_tab gate: dev_mode is the React equivalent
- * of the shared developer-mode settings field. */
+/* Gated by the shared developer-mode settings field. */
 function DeveloperInspector({ sessionId }: { sessionId: string }) {
   const settings = useSettings();
   const [view, setView] = useRouteSearchParam("view");

@@ -9,6 +9,7 @@ from eda_platform.schemas.model_card import ModelCard
 from eda_platform.schemas.questions import QuestionFinding
 from eda_platform.schemas.stats import StatAssumptionCheck, StatTestResult, StatWarning
 from eda_platform.tools.method_findings import (
+    _stat_deviation,
     anomaly_findings,
     model_findings,
     stat_findings,
@@ -104,6 +105,79 @@ def test_stat_effect_magnitude_uses_test_specific_conventional_cutoffs(
     assert f"{magnitude} effect" in finding.text
     _assert_every_number_resolves(finding)
     assert not _FORBIDDEN_CAUSAL.search(finding.text)
+
+
+def test_fisher_exact_finding_names_the_odds_ratio() -> None:
+    result = StatTestResult(
+        dataset_id="orders",
+        test_type="fisher_exact",
+        statistic=0.0,
+        p_value=0.01,
+        effect_size=3.2,
+        sample_size=18,
+    )
+
+    finding = stat_findings(result, "artifact")[0]
+
+    assert "odds ratio 3.2" in finding.text
+    _assert_every_number_resolves(finding)
+    assert not _FORBIDDEN_CAUSAL.search(finding.text)
+
+
+def _fisher_result(effect_size: float) -> StatTestResult:
+    return StatTestResult(
+        dataset_id="orders",
+        test_type="fisher_exact",
+        statistic=0.0,
+        p_value=0.01,
+        effect_size=effect_size,
+        sample_size=18,
+    )
+
+
+def test_fisher_or_near_one_is_not_a_large_effect() -> None:
+    finding = stat_findings(_fisher_result(1.05), "artifact")[0]
+
+    assert "large effect" not in finding.text
+    assert "small effect" in finding.text
+    _assert_every_number_resolves(finding)
+
+
+def test_fisher_protective_or_bins_like_its_reciprocal() -> None:
+    protective = stat_findings(_fisher_result(0.2), "artifact")[0]
+    harmful = stat_findings(_fisher_result(5.0), "artifact")[0]
+
+    assert "large effect" in protective.text
+    assert "large effect" in harmful.text
+
+
+def test_fisher_or_two_stays_below_the_medium_cutoff() -> None:
+    # Bins are small < 3.0 <= medium < 5.0 <= large, so OR 2.0 lands in small.
+    finding = stat_findings(_fisher_result(2.0), "artifact")[0]
+
+    assert "small effect" in finding.text
+
+
+def test_fisher_or_zero_does_not_crash() -> None:
+    finding = stat_findings(_fisher_result(0.0), "artifact")[0]
+
+    assert "effect" in finding.text
+
+
+def test_fisher_deviation_is_reciprocal_symmetric() -> None:
+    protective = _stat_deviation(_fisher_result(0.2))
+    harmful = _stat_deviation(_fisher_result(5.0))
+
+    assert protective == pytest.approx(harmful)
+
+
+def test_fisher_deviation_near_one_sits_near_the_floor() -> None:
+    # Symmetric normalization floors fisher deviation at 1/large = 0.2.
+    assert _stat_deviation(_fisher_result(1.05)) == pytest.approx(1.05 / 5.0)
+
+
+def test_fisher_deviation_or_zero_does_not_crash() -> None:
+    assert _stat_deviation(_fisher_result(0.0)) == 0.0
 
 
 def test_model_finding_is_predictive_limited_and_all_metrics_are_evidenced() -> None:
