@@ -195,11 +195,11 @@ describe("Findings page", () => {
     /* Explains why the page is empty (validated findings come from
      * investigations, not Auto EDA alone) and gives a next-step entry point. */
     expect(
-      screen.getByText(/Validated findings come from investigations/),
+      screen.getByText(/Validated findings come from completed investigation workflows/),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", {
-        name: "Go to Questions to start an investigation",
+        name: "Review suggested questions",
       }),
     ).toHaveAttribute("href", "/projects/p1/sessions/r1/questions");
   });
@@ -377,7 +377,7 @@ describe("Findings outcome status filter", () => {
     renderAppAt(PAGE_PATH);
 
     /* "No data" and "failed to load" must not look the same
-     * (findings_ui.py:395-400 keeps the section and states it). */
+     * (the Findings API keeps the section and states it). */
     expect(
       await screen.findByRole("heading", { name: "Investigation log" }),
     ).toBeInTheDocument();

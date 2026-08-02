@@ -119,7 +119,7 @@ describe("Deep analysis page", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", {
-        name: "Go to Questions to start an investigation",
+        name: "Review suggested questions",
       }),
     ).toHaveAttribute("href", "/projects/p1/sessions/r1/questions");
   });

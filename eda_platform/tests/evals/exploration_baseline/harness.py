@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 
 from .checkers import CHECKER_VERSION
 
-
 # Scored metrics where a larger number is a worse result. Everything else is
 # treated as higher-is-better, so a metric added later defaults to that.
 LOWER_IS_BETTER_METRICS = frozenset(

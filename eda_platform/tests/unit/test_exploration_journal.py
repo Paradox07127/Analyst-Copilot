@@ -22,6 +22,7 @@ from eda_platform.core.exploration_journal import (
     ExplorationPolicyIntegrityError,
     ExplorationResumeIncompatibleError,
     JsonlExplorationJournal,
+    amended_policy_fingerprint,
     compute_policy_fingerprint,
     rebuild_exploration_state,
     sealed_policy,
@@ -277,6 +278,23 @@ def test_budget_counters_decrement_and_reject_at_zero(tmp_path: Path) -> None:
     journal.append_new("round_settled", round_index=0, progress=True)
     with pytest.raises(EventTransitionError, match="max_rounds"):
         journal.append_new("round_started", round_index=1)
+
+
+def test_provider_rejections_consume_the_request_cap(tmp_path: Path) -> None:
+    policy = _policy(
+        budget=_budget(llm=SessionBudgetPolicyModel(max_requests=1))
+    )
+    journal = _journal(tmp_path, policy=policy)
+    journal.append_new("round_started", round_index=0)
+    journal.append_new("llm_call_started", call_id="call-rejected")
+    state = journal.append_new(
+        "llm_call_rejected", call_id="call-rejected", error="provider HTTP 429"
+    )
+
+    assert state.llm_calls_settled == 1
+    assert state.remaining_llm_call_budget == 0
+    with pytest.raises(EventTransitionError, match="llm request cap"):
+        journal.append_new("llm_call_started", call_id="call-bypass")
 
 
 def test_failed_tool_calls_do_not_consume_the_success_budget(tmp_path: Path) -> None:
@@ -592,16 +610,17 @@ def test_budget_amendment_extends_caps_from_the_journal(tmp_path: Path) -> None:
     with pytest.raises(EventTransitionError, match="max_rounds"):
         journal.append_new("round_started", round_index=1)
 
-    state = journal.append_new(
-        "budget_amended",
+    increase = BudgetCapIncrease(max_rounds=2, max_successful_tool_calls=1)
+    state = journal.amend_budget(
         amendment_id="amend-1",
-        effective_policy_fingerprint="xplcy_amended-1",
-        increase=BudgetCapIncrease(max_rounds=2, max_successful_tool_calls=1),
+        increase=increase,
     )
     assert state.max_rounds == 3
     assert state.remaining_round_budget == 2
     assert state.max_successful_tool_calls == 4
-    assert state.effective_policy_fingerprint == "xplcy_amended-1"
+    assert state.effective_policy_fingerprint == amended_policy_fingerprint(
+        policy.policy_fingerprint, "amend-1", increase
+    )
     assert state.policy_fingerprint == policy.policy_fingerprint  # base is frozen
     state = journal.append_new("round_started", round_index=1)
     assert state.require_current_round_index() == 1
@@ -619,10 +638,8 @@ def test_budget_amendment_is_allowed_while_paused(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     journal.append_new("pause_requested")
     journal.append_new("paused")
-    state = journal.append_new(
-        "budget_amended",
+    state = journal.amend_budget(
         amendment_id="amend-1",
-        effective_policy_fingerprint="xplcy_amended-1",
         increase=BudgetCapIncrease(max_requests=2),
     )
     assert state.status == "paused"
@@ -635,6 +652,17 @@ def test_amendments_cannot_lower_caps_by_construction() -> None:
         BudgetCapIncrease(max_rounds=-1)
     with pytest.raises(ValueError, match="at least one cap"):
         BudgetCapIncrease()
+
+
+def test_budget_amendment_rejects_a_caller_forged_fingerprint(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    with pytest.raises(EventTransitionError, match="effective_policy_fingerprint"):
+        journal.append_new(
+            "budget_amended",
+            amendment_id="amend-forged",
+            effective_policy_fingerprint="xplcy_caller_chosen",
+            increase=BudgetCapIncrease(max_rounds=1),
+        )
 
 
 # -------------------------------------------------------------------- resume

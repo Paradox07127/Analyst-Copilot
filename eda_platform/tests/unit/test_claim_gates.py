@@ -139,6 +139,7 @@ R_STAT_OK = _receipt(
     tool_name="run_stat_test",
     method_family="independent_t_test",
     statistics=ReceiptStatistics(
+        hypothesis_id="fam_orders_amount",
         test_name="independent_t_test",
         p_value=0.003,
         effect_size=0.42,
@@ -220,6 +221,9 @@ def _run(bundle: ClaimBundle | Mapping[str, object], **kwargs: object) -> GateRe
         bundle,
         committed_receipts=kwargs.pop("committed_receipts", COMMITTED),  # type: ignore[arg-type]
         run_witness=kwargs.pop("run_witness", RUN_WITNESS),  # type: ignore[arg-type]
+        stat_attempt_counts=kwargs.pop(
+            "stat_attempt_counts", {"fam_orders_amount": 1}
+        ),  # type: ignore[arg-type]
     )
 
 
@@ -464,6 +468,17 @@ def test_model_language_without_model_evidence_is_rejected_even_untyped() -> Non
     assert "model_claim_without_model_evidence" in _codes(report, "entity")
 
 
+def test_model_metrics_must_come_from_the_cited_model_receipt() -> None:
+    claim = _claim(
+        claim_type="model",
+        claim_text="The model produced 42 scored rows.",
+        evidence_fact_ids=(_ref(R_MAIN, "f_n"), _ref(R_MODEL, "f_auc")),
+    )
+    report = _run(_bundle(claim))
+    assert not report.passed
+    assert "model_metric_not_model_derived" in _codes(report, "entity")
+
+
 def test_causal_claims_are_rejected_by_default() -> None:
     typed = _claim(claim_type="causal", claim_text="Discounts move volume, 42 rows.")
     report = _run(_bundle(typed))
@@ -564,10 +579,29 @@ def test_same_snapshot_evidence_cannot_claim_independent_replication() -> None:
     assert _run(licensed).passed
 
 
-# --- statistical gate (registering, non-blocking) -----------------------------
+def test_holdout_evidence_cannot_license_a_sibling_claim() -> None:
+    holdout = _claim(
+        claim_id="c_holdout",
+        claim_text="The holdout contains 41 rows.",
+        evidence_fact_ids=(_ref(R_HOLDOUT, "f_rep"),),
+    )
+    same_snapshot = _claim(
+        claim_id="c_same_snapshot",
+        claim_text="The 42-order pattern was independently replicated.",
+    )
+    report = _run(_bundle(holdout, same_snapshot))
+    assert not report.passed
+    assert any(
+        violation.claim_id == "c_same_snapshot"
+        for violation in _violations(report, "entity")
+        if violation.code == "unlicensed_independence_claim"
+    )
 
 
-def test_statistical_gate_registers_violations_without_blocking() -> None:
+# --- statistical gate ---------------------------------------------------------
+
+
+def test_statistical_gate_blocks_incomplete_confirmatory_evidence() -> None:
     claim = _claim(
         claim_text="A significant difference was observed.",
         evidence_fact_ids=(_ref(R_STAT_BAD, "f_p2"),),
@@ -575,18 +609,18 @@ def test_statistical_gate_registers_violations_without_blocking() -> None:
     )
     report = _run(_bundle(claim, evidence_lane="confirmatory"))
     statistical = next(v for v in report.verdicts if v.gate == "statistical")
-    assert statistical.passed  # registering, never blocking
+    assert not statistical.passed
     codes = {violation.code for violation in statistical.violations}
     assert "p_value_without_effect_ci_n" in codes
     assert "sequence_index_missing" in codes
     assert "test_not_confirmatory_ready" in codes
-    assert report.passed
+    assert not report.passed
     assert report.health_score < 1.0  # registered violations still dent health
 
 
-def test_confirmatory_claims_without_statistics_are_registered() -> None:
+def test_confirmatory_claims_without_statistics_are_blocked() -> None:
     report = _run(_bundle(evidence_lane="confirmatory"))
-    assert report.passed
+    assert not report.passed
     assert "confirmatory_without_statistics" in _codes(report, "statistical")
 
 
@@ -603,6 +637,56 @@ def test_a_publishable_confirmatory_claim_registers_cleanly() -> None:
     report = _run(_bundle(claim, evidence_lane="confirmatory"))
     assert report.passed
     assert _violations(report, "statistical") == []
+
+
+def test_confirmatory_gate_rechecks_the_final_stat_family_size() -> None:
+    first = _receipt(
+        tool_call_id="call_stat_first",
+        facts=(
+            _fact("f_p_first", 0.01, "number"),
+            _fact("f_effect_first", 0.5, "number"),
+            _fact("f_n_first", 100, "count"),
+        ),
+        tool_name="run_stat_test",
+        method_family="independent_t_test",
+        statistics=ReceiptStatistics(
+            hypothesis_id="fam_repeated",
+            test_name="independent_t_test",
+            p_value=0.01,
+            effect_size=0.5,
+            ci_low=0.1,
+            ci_high=0.9,
+            sample_size=100,
+            sequence_index=1,
+        ),
+    )
+    committed = {**COMMITTED, first.receipt_id: first}
+    claim = _claim(
+        claim_text="The repeated comparison has p = 0.01.",
+        evidence_fact_ids=(_ref(first, "f_p_first"),),
+        statistics_receipt_ids=(first.receipt_id,),
+    )
+    report = _run(
+        _bundle(claim, evidence_lane="confirmatory"),
+        committed_receipts=committed,
+        stat_attempt_counts={"fam_repeated": 5},
+    )
+    assert not report.passed
+    assert "stale_multiplicity_adjustment" in _codes(report, "statistical")
+
+
+def test_statistical_publication_requires_the_registry_family_count() -> None:
+    claim = _claim(
+        claim_text="The comparison has p = 0.003.",
+        evidence_fact_ids=(_ref(R_STAT_OK, "f_p"),),
+        statistics_receipt_ids=(R_STAT_OK.receipt_id,),
+    )
+    report = _run(
+        _bundle(claim, evidence_lane="confirmatory"),
+        stat_attempt_counts=None,
+    )
+    assert not report.passed
+    assert "stat_family_count_unavailable" in _codes(report, "statistical")
 
 
 # --- state gate ---------------------------------------------------------------

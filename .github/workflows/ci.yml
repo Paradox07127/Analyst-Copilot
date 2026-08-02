@@ -15,9 +15,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
       - run: uv sync --extra dev
+      - run: npm ci --prefix apps/web
       - run: uv run ruff check
       - run: uv run pyright
+      - run: npm run typecheck --prefix apps/web
+      - run: npm test --prefix apps/web
+      - run: npm run build --prefix apps/web
       - run: docker build -t eda-agent-sandbox:py312 docker/eda-agent-sandbox
       - run: uv run pytest
       - run: .venv/bin/python scripts/demo_j1.py

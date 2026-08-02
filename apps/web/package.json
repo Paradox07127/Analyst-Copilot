@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "test": "vitest run",
     "e2e": "playwright test",
+    "e2e:visual": "E2E_VISUAL=1 playwright test --project=chromium 06-visual-regression.spec.ts",
+    "e2e:cross-browser": "E2E_CROSS_BROWSER=1 playwright test 08-session-split-drag.spec.ts",
     "e2e:install": "playwright install chromium",
+    "e2e:install:all": "playwright install chromium firefox webkit",
     "typecheck": "tsc --noEmit && tsc --noEmit -p e2e/tsconfig.json",
     "gen:api": "openapi-typescript ../../api/openapi.json -o src/api/generated/schema.d.ts"
   },

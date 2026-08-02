@@ -149,10 +149,16 @@ def main() -> int:
             print(f"    finding: {finding.text}")
 
     _heading("Report")
-    report_dir = workspace / "projects" / "demo_j1" / "runs" / result.session_id / "report"
+    report_dir = (
+        workspace / "projects" / "demo_j1" / "sessions" / result.session_id / "report"
+    )
+    markdown_path = report_dir / "report.md"
+    html_path = report_dir / "report.html"
+    if not markdown_path.is_file() or not html_path.is_file():
+        raise RuntimeError(f"Expected report exports were not written under {report_dir}.")
     print(f"session_id  : {result.session_id}")
-    print(f"markdown: {report_dir / 'report.md'}")
-    print(f"html    : {report_dir / 'report.html'}")
+    print(f"markdown: {markdown_path}")
+    print(f"html    : {html_path}")
     print()
     excerpt = result.report_markdown.splitlines()[:30]
     for line in excerpt:

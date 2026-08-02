@@ -18,7 +18,7 @@ import {
   useUpdateSettings,
 } from "../../api/hooks";
 import { ErrorState, LoadingSkeleton } from "../../components/async-states";
-import { Badge, Button, Card, Hint, SectionHeader } from "../../components/ui";
+import { Badge, Button, Hint, SectionHeader } from "../../components/ui";
 import { LiveStatusCard } from "./live-status";
 import {
   clearTheme,
@@ -55,33 +55,6 @@ const PAYLOAD_POLICIES = [
     value: "schema+aggregates+sample",
     label: "Schema + aggregates + sample rows",
     hint: "Shares real data values with the provider and costs the most tokens.",
-  },
-] as const;
-
-/* Thinking level = the analysis-loop depth. The copy has to say what raising
- * it authorizes, not how clever it makes the agent: Deep and Ultra both spend
- * more budget, and Ultra spends it without asking again per round. */
-const THINKING_LEVELS = [
-  {
-    value: 0,
-    label: "Standard",
-    hint: "One pass per question. Nothing runs that you did not approve individually.",
-  },
-  {
-    value: 1,
-    label: "Deep",
-    hint:
-      "Adds deep investigation: after the approved method runs, the model may " +
-      "plan up to 3 read-only follow-up probes inside the same approved scope. " +
-      "The probes are listed on the plan before you approve it.",
-  },
-  {
-    value: 2,
-    label: "Ultra",
-    hint:
-      "Deep, plus authorization for the macro loop: once you start it, the agent " +
-      "writes its own follow-up questions and executes them for up to the round " +
-      "cap without asking again, spending model budget each round.",
   },
 ] as const;
 
@@ -674,39 +647,9 @@ function ModelApiSection({
 
 function AnalysisSection({ settings }: { settings: SettingsView }) {
   const update = useUpdateSettings();
-  /* Depth 3 exists server-side (a longer round cap) but is not offered here;
-   * it reads as Ultra so the selection still round-trips. */
-  const selectedDepth = settings.analysis_depth >= 2 ? 2 : settings.analysis_depth;
   const offline = settings.provider === "offline";
   return (
     <div className="flex flex-col gap-5">
-      <Section
-        title="Thinking level"
-        description="How much work the agent is allowed to do per question, and how much of it runs without a further prompt. Applies to analyses started from now on."
-      >
-        <div role="radiogroup" aria-label="Thinking level" className="flex flex-col gap-2">
-          {THINKING_LEVELS.map((level) => (
-            <OptionRow
-              key={level.value}
-              id={`depth-${level.value}`}
-              name="analysis-depth"
-              value={level.value}
-              label={level.label}
-              hint={level.hint}
-              checked={selectedDepth === level.value}
-              onSelect={() => update.mutate({ analysis_depth: level.value })}
-            />
-          ))}
-        </div>
-        {settings.analysis_depth >= 2 && (
-          <Card tone="warn" className="p-3 text-xs text-status-warn">
-            Ultra is an authorization, not a quality setting. Starting the macro
-            loop on the Questions page lets the agent run multiple further
-            rounds of analysis on its own and consume budget for each one.
-          </Card>
-        )}
-      </Section>
-
       <Section
         title="Payload policy"
         description={

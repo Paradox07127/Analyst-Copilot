@@ -75,15 +75,28 @@ R_MAIN = _receipt(
     facts=(_fact("f_n", 42, "count"), _fact("f_pct", 12.5, "percent")),
 )
 R_SECOND = _receipt(tool_call_id="call_second", facts=(_fact("f_gaps", 7, "count"),))
-R_STAT_BAD = _receipt(
-    tool_call_id="call_stat_bad",
-    facts=(_fact("f_p2", 0.003, "number"),),
+R_STAT_OK = _receipt(
+    tool_call_id="call_stat_ok",
+    facts=(
+        _fact("f_p2", 0.003, "number"),
+        _fact("f_effect", 0.42, "number"),
+        _fact("f_n", 200, "count"),
+    ),
     tool_name="run_stat_test",
-    method_family="shapiro_wilk",
-    statistics=ReceiptStatistics(test_name="shapiro_wilk", p_value=0.003),
+    method_family="independent_t_test",
+    statistics=ReceiptStatistics(
+        hypothesis_id="fam_orders_amount",
+        test_name="independent_t_test",
+        p_value=0.003,
+        effect_size=0.42,
+        ci_low=0.1,
+        ci_high=0.7,
+        sample_size=200,
+        sequence_index=1,
+    ),
 )
 COMMITTED: Mapping[str, EvidenceReceipt] = {
-    r.receipt_id: r for r in (R_MAIN, R_SECOND, R_STAT_BAD)
+    r.receipt_id: r for r in (R_MAIN, R_SECOND, R_STAT_OK)
 }
 
 METADATA = {
@@ -118,7 +131,10 @@ def _bundle(*claims: Claim, **overrides: object) -> ClaimBundle:
 
 def _gated(bundle: ClaimBundle) -> tuple[ClaimBundle, GateReport]:
     report = run_claim_gates(
-        bundle, committed_receipts=COMMITTED, run_witness=RUN_WITNESS
+        bundle,
+        committed_receipts=COMMITTED,
+        run_witness=RUN_WITNESS,
+        stat_attempt_counts={"fam_orders_amount": 1},
     )
     return bundle, report
 
@@ -137,8 +153,8 @@ CONFIRM = _gated(
     _bundle(
         _claim(
             claim_text="A significant difference was observed.",
-            evidence_fact_ids=(f"{R_STAT_BAD.receipt_id}:f_p2",),
-            statistics_receipt_ids=(R_STAT_BAD.receipt_id,),
+            evidence_fact_ids=(f"{R_STAT_OK.receipt_id}:f_p2",),
+            statistics_receipt_ids=(R_STAT_OK.receipt_id,),
         ),
         claim_bundle_id="clb_confirm",
         evidence_lane="confirmatory",
@@ -209,15 +225,10 @@ def test_rejected_bundles_are_counted_but_never_rendered() -> None:
     assert rendered.withheld_bundle_ids == ("clb_zz_rejected",)
 
 
-def test_statistical_violations_become_fixed_qualifiers() -> None:
+def test_clean_confirmatory_evidence_needs_no_statistical_qualifier() -> None:
     markdown = render_claim_report([CONFIRM], run_metadata=METADATA).markdown
     caveats = markdown[markdown.index("## Statistical caveats") :]
-    assert (
-        "- clb_confirm/c1: exploratory only: a p-value is reported without "
-        "effect size, confidence interval and sample size." in caveats
-    )
-    assert "sequence index" in caveats
-    assert "not confirmatory-ready" in caveats
+    assert "(none)" in caveats
 
 
 def test_evidence_trail_lists_sorted_receipt_ids_per_bundle() -> None:
@@ -259,9 +270,9 @@ def test_empty_input_renders_placeholders_without_tripping_the_rescan() -> None:
     assert "- rendered bundles: 0" in markdown
 
 
-def test_missing_metadata_keys_render_a_fixed_placeholder() -> None:
-    markdown = render_claim_report([EXPLORE], run_metadata={}).markdown
-    assert "- exploration_id: (not provided)" in markdown
+def test_nonempty_report_requires_a_run_witness() -> None:
+    with pytest.raises(ValueError, match="must include the witness"):
+        render_claim_report([EXPLORE], run_metadata={})
 
 
 def test_metadata_numbers_are_whitelisted_by_construction() -> None:
@@ -275,6 +286,23 @@ def test_a_mismatched_bundle_report_pair_is_refused() -> None:
     _other, wrong_report = CONFIRM
     with pytest.raises(ValueError, match="paired"):
         render_claim_report([(bundle, wrong_report)], run_metadata=METADATA)
+
+
+def test_same_id_mutated_bundle_cannot_reuse_an_old_gate_report() -> None:
+    bundle, report = EXPLORE
+    forged = bundle.model_copy(
+        update={"claims": (_claim(claim_text="There are 999 fabricated orders."),)}
+    )
+    with pytest.raises(ValueError, match="exact content"):
+        render_claim_report([(forged, report)], run_metadata=METADATA)
+
+
+def test_gate_report_witness_must_match_report_metadata() -> None:
+    with pytest.raises(ValueError, match="run witness"):
+        render_claim_report(
+            [EXPLORE],
+            run_metadata={**METADATA, "witness": "dsw1_" + "b" * 64},
+        )
 
 
 # --- §4.6 numeric rescan -------------------------------------------------------
@@ -304,10 +332,6 @@ def test_a_mutated_fixed_phrase_trips_the_final_rescan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mutation probe: inject a pool-foreign number into a renderer literal."""
-    monkeypatch.setitem(
-        claim_renderer._CAVEAT_PHRASES,
-        "p_value_without_effect_ci_n",
-        "exploratory only: the 95% confidence interval is missing.",
-    )
+    monkeypatch.setattr(claim_renderer, "_EMPTY_SECTION", "95% missing")
     with pytest.raises(RenderedNumberLeakError, match="95"):
         render_claim_report([CONFIRM], run_metadata=METADATA)

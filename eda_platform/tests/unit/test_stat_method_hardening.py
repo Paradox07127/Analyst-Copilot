@@ -195,6 +195,7 @@ def test_fisher_fallback_effect_is_odds_ratio_with_ci() -> None:
     )
     assert result.test_type == "fisher_exact"
     assert result.effect_size == pytest.approx(49.0)
+    assert result.effect_size is not None
     assert result.effect_ci_low is not None and result.effect_ci_high is not None
     assert result.effect_ci_low <= result.effect_size <= result.effect_ci_high
     assert result.effect_ci_low > 1.0
@@ -219,6 +220,7 @@ def test_fisher_zero_cell_uses_haldane_anscombe_for_or_and_ci() -> None:
     assert result.test_type == "fisher_exact"
     # (8.5 * 6.5) / (0.5 * 2.5) = 44.2 with the 0.5 continuity correction.
     assert result.effect_size == pytest.approx(44.2)
+    assert result.effect_size is not None
     assert result.effect_ci_low is not None and result.effect_ci_high is not None
     assert math.isfinite(result.effect_ci_low) and math.isfinite(result.effect_ci_high)
     assert result.effect_ci_low <= result.effect_size <= result.effect_ci_high

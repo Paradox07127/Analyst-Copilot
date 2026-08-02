@@ -13,6 +13,8 @@ import { PROJECT_ID } from "./e2e/support/seed";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const EXTERNAL_BASE_URL = process.env.E2E_EXTERNAL_BASE_URL;
 const EXTERNAL_HOST_HEADER = process.env.E2E_EXTERNAL_HOST_HEADER;
+const RUN_VISUAL = process.env.E2E_VISUAL === "1";
+const RUN_CROSS_BROWSER = process.env.E2E_CROSS_BROWSER === "1";
 
 /* Runner and workers each load this file, so the picked port and workspace are
  * published through the environment the workers inherit — recomputing them per
@@ -69,21 +71,26 @@ export default defineConfig({
     { name: "seed", testMatch: /seed\.setup\.ts/ },
     {
       name: "chromium",
+      testIgnore: RUN_VISUAL ? undefined : /06-visual-regression\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
       dependencies: ["seed"],
     },
-    {
-      name: "firefox",
-      testMatch: /08-session-split-drag\.spec\.ts/,
-      use: { ...devices["Desktop Firefox"] },
-      dependencies: ["seed"],
-    },
-    {
-      name: "webkit",
-      testMatch: /08-session-split-drag\.spec\.ts/,
-      use: { ...devices["Desktop Safari"] },
-      dependencies: ["seed"],
-    },
+    ...(RUN_CROSS_BROWSER
+      ? [
+          {
+            name: "firefox",
+            testMatch: /08-session-split-drag\.spec\.ts/,
+            use: { ...devices["Desktop Firefox"] },
+            dependencies: ["seed"],
+          },
+          {
+            name: "webkit",
+            testMatch: /08-session-split-drag\.spec\.ts/,
+            use: { ...devices["Desktop Safari"] },
+            dependencies: ["seed"],
+          },
+        ]
+      : []),
   ],
   webServer: EXTERNAL_BASE_URL
     ? undefined

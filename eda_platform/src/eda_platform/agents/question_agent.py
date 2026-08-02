@@ -257,17 +257,6 @@ class LLMQuestionProposalSet(BaseModel):
     questions: list[LLMQuestionProposal] = Field(default_factory=list)
 
 
-def _wire(schema: dict[str, Any]) -> Any:
-    """Advertise a concrete JSON Schema for a field that validates as `Any`.
-
-    Pydantic emits a property with no `type` for bare `Any`; OpenAI's
-    json_schema strict mode rejects that with HTTP 400 (observed 2026-08-01 on
-    gpt-5.6-luna). Only the advertised shape narrows -- the Raw layer keeps
-    accepting whatever the model actually returns.
-    """
-    return Annotated[Any, WithJsonSchema(schema)]
-
-
 def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
 
@@ -283,13 +272,23 @@ _DISPLAY_NAME_SCHEMA = {
     },
 }
 
-WireString = _wire({"type": "string"})
-WireNumber = _wire({"type": "number"})
-WireStringList = _wire(_STRING_LIST_SCHEMA)
-WireNullableString = _wire(_nullable({"type": "string"}))
-WireAnalysisMode = _wire(_nullable({"type": "string", "enum": list(get_args(AnalysisMode))}))
-WireValueCategory = _wire(_nullable({"type": "string", "enum": list(get_args(ValueCategory))}))
-WireDisplayNames = _wire(_DISPLAY_NAME_SCHEMA)
+# Pydantic emits no JSON `type` for bare Any. These static aliases keep the
+# inbound layer deliberately lenient while advertising a strict provider wire
+# schema; unlike aliases returned from a function, type checkers can validate
+# them in annotations too.
+type WireString = Annotated[Any, WithJsonSchema({"type": "string"})]
+type WireNumber = Annotated[Any, WithJsonSchema({"type": "number"})]
+type WireStringList = Annotated[Any, WithJsonSchema(_STRING_LIST_SCHEMA)]
+type WireNullableString = Annotated[Any, WithJsonSchema(_nullable({"type": "string"}))]
+type WireAnalysisMode = Annotated[
+    Any,
+    WithJsonSchema(_nullable({"type": "string", "enum": list(get_args(AnalysisMode))})),
+]
+type WireValueCategory = Annotated[
+    Any,
+    WithJsonSchema(_nullable({"type": "string", "enum": list(get_args(ValueCategory))})),
+]
+type WireDisplayNames = Annotated[Any, WithJsonSchema(_DISPLAY_NAME_SCHEMA)]
 
 
 class RawLLMQuestionProposal(BaseModel):

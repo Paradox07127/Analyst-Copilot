@@ -12,6 +12,7 @@ from eda_platform.agents.interpretation import validate_agent_answer
 from eda_platform.agents.runtime import AgentRunResult, AgentRuntime
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.llm import ToolCallingLLM, ToolCallingUnsupportedError
+from eda_platform.core.method_skills import method_skill_guidance
 from eda_platform.core.sandbox import ExecutionBackend
 from eda_platform.core.store import ArtifactStore
 from eda_platform.schemas.artifacts import Artifact
@@ -123,7 +124,7 @@ def run_question_agent(
     )
     try:
         return runtime.run(
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=_SYSTEM_PROMPT + method_skill_guidance(question),
             user_message=user_message,
         )
     except BudgetExceeded:

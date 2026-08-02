@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,6 +61,16 @@ from eda_platform.tools.domain_metrics import (
 )
 from eda_platform.tools.evidence import PayloadPolicy
 from eda_platform.tools.loader import LoadedDataset
+from eda_platform.tools.missingness import (
+    create_missingness_artifact,
+    diagnose_missingness,
+)
+from eda_platform.tools.ml_baseline import (
+    create_model_card_artifact,
+)
+from eda_platform.tools.ml_baseline import (
+    run_baseline_model as run_baseline_model_frame,
+)
 from eda_platform.tools.relationship_discovery import (
     _relation_name as metric_relation_name,
 )
@@ -195,6 +206,43 @@ class AnalyzeTimeSeriesArguments(BaseModel):
     freq: str | None = Field(default=None, min_length=1, max_length=16)
     period: int | None = Field(default=None, ge=2, le=1_000)
     agg: Literal["sum", "mean", "count"] = "sum"
+
+
+class DiagnoseMissingnessArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(min_length=1)
+    target_column: str | None = Field(default=None, min_length=1)
+    group_columns: list[str] | None = Field(default=None, max_length=10)
+    top_k: int = Field(default=20, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def _group_columns_are_unique(self) -> DiagnoseMissingnessArguments:
+        if self.group_columns is not None and len(self.group_columns) != len(
+            set(self.group_columns)
+        ):
+            raise ValueError("group_columns must not contain duplicates.")
+        return self
+
+
+class RunBaselineModelArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(min_length=1)
+    target_column: str = Field(min_length=1)
+    time_column: str | None = Field(default=None, min_length=1)
+    group_column: str | None = Field(default=None, min_length=1)
+    split_policy: Literal["auto", "random", "group", "time"] = "auto"
+    cv_folds: int = Field(default=5, ge=2, le=10)
+    random_state: int = Field(default=42, ge=0, le=4_294_967_295)
+
+    @model_validator(mode="after")
+    def _split_inputs_align(self) -> RunBaselineModelArguments:
+        if self.split_policy == "group" and self.group_column is None:
+            raise ValueError("split_policy `group` requires group_column.")
+        if self.group_column is not None and self.split_policy != "group":
+            raise ValueError("group_column may be used only with split_policy `group`.")
+        return self
 
 
 OpenAnalysisExecutor = Callable[[OpenAnalysisArguments], AgentToolResult]
@@ -413,6 +461,32 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 context, cast(AnalyzeTimeSeriesArguments, args)
             ),
         ),
+        AgentTool(
+            name="diagnose_missingness",
+            description=(
+                "Diagnose observable missingness structure across the dataset: rates, "
+                "missing-indicator correlations, safe group-rate ranges and optional "
+                "target association tests with Holm correction. It always reports that "
+                "observed data cannot rule out MNAR; never use it to label a mechanism."
+            ),
+            args_schema=DiagnoseMissingnessArguments,
+            execute=lambda args: _diagnose_missingness(
+                context, cast(DiagnoseMissingnessArguments, args)
+            ),
+        ),
+        AgentTool(
+            name="run_baseline_model",
+            description=(
+                "Fit a deterministic leakage-screened classification or regression "
+                "baseline with group/time-aware splitting, cross-validation, calibration "
+                "metrics and signed test-set permutation importance. Use it to establish "
+                "a predictive baseline, never to claim causation or production readiness."
+            ),
+            args_schema=RunBaselineModelArguments,
+            execute=lambda args: _run_baseline_model(
+                context, cast(RunBaselineModelArguments, args)
+            ),
+        ),
     ]
     open_analysis = context.open_analysis
     if open_analysis is not None:
@@ -432,7 +506,353 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 ),
             )
         )
-    return tools
+    return [_bind_payload_policy(context, tool) for tool in tools]
+
+
+def _bind_payload_policy(context: DataToolContext, tool: AgentTool) -> AgentTool:
+    """Apply disclosure policy at the final provider-facing tool boundary.
+
+    Individual executors still receive and persist their complete local results so
+    receipts remain reproducible.  Only the observation returned to the model is
+    filtered here, which also keeps the runtime trace from recording disallowed
+    values.  Centralising this wrapper prevents a newly-added tool from silently
+    bypassing the session policy.
+    """
+
+    execute = tool.execute
+
+    def policy_bound_execute(args: BaseModel) -> AgentToolResult:
+        result = execute(args)
+        result.content = _policy_safe_content(
+            context,
+            tool_name=tool.name,
+            arguments=args,
+            result=result,
+        )
+        return result
+
+    return AgentTool(
+        name=tool.name,
+        description=tool.description,
+        args_schema=tool.args_schema,
+        execute=policy_bound_execute,
+    )
+
+
+def _policy_safe_content(
+    context: DataToolContext,
+    *,
+    tool_name: str,
+    arguments: BaseModel,
+    result: AgentToolResult,
+) -> dict[str, Any] | str:
+    policy = context.payload_policy
+    if policy == "schema+aggregates+sample":
+        return result.content
+
+    if policy == "schema_only":
+        if tool_name == "inspect_data_catalog":
+            return {
+                "datasets": [
+                    {
+                        "dataset_id": dataset.record.dataset_id,
+                        "name": dataset.record.name,
+                        "relation": context.catalog.relations[dataset.record.name],
+                        "columns": [str(column) for column in dataset.frame.columns],
+                        "dtypes": {
+                            str(column): str(dtype)
+                            for column, dtype in dataset.frame.dtypes.items()
+                        },
+                    }
+                    for dataset in context.datasets
+                ],
+                "profile_artifact_ids": [
+                    artifact.id
+                    for artifact in context.artifacts
+                    if artifact.type is ArtifactType.DATASET_PROFILE
+                ],
+            }
+        if tool_name == "list_artifacts":
+            return {
+                "artifacts": [
+                    {
+                        "artifact_id": artifact.id,
+                        "type": artifact.type.value,
+                        "evidence_count": len(artifact.evidence),
+                    }
+                    for artifact in context.artifacts
+                ]
+            }
+        if tool_name == "list_saved_skills":
+            return result.content
+        if tool_name == "read_artifact" and isinstance(arguments, ReadArtifactArguments):
+            artifact = context.artifact(arguments.artifact_id)
+            return _schema_only_artifact_content(artifact)
+        return {
+            "notice": "Tool values are withheld by the schema_only payload policy.",
+            "artifacts": _artifact_refs(result.artifacts),
+            "receipt_artifact_id": (
+                getattr(result.receipt_artifact, "id", None)
+                if result.receipt_artifact is not None
+                else None
+            ),
+        }
+
+    # The default tier may expose deterministic aggregates, but never raw-row
+    # previews or arbitrary code-executor output.
+    if tool_name == "read_artifact" and isinstance(arguments, ReadArtifactArguments):
+        artifact = context.artifact(arguments.artifact_id)
+        return _aggregate_safe_artifact_content(artifact)
+    if tool_name == "run_sql" and isinstance(arguments, RunSqlArguments):
+        if not _is_aggregate_sql(arguments.sql):
+            artifact = next(
+                (item for item in result.artifacts if item.type is ArtifactType.SQL_RESULT),
+                None,
+            )
+            return {
+                "purpose": arguments.purpose,
+                "artifact_id": getattr(artifact, "id", None),
+                "result": _sql_result_without_rows(artifact.payload if artifact else {}),
+                "notice": (
+                    "Row values are withheld by the schema+aggregates payload policy. "
+                    "Use an aggregate query or explicitly enable sample payloads."
+                ),
+            }
+    if tool_name == "run_open_analysis":
+        return {
+            "notice": (
+                "Custom-analysis values are withheld because their aggregate-only "
+                "classification cannot be verified."
+            ),
+            "artifacts": _artifact_refs(result.artifacts),
+            "receipt_artifact_id": (
+                getattr(result.receipt_artifact, "id", None)
+                if result.receipt_artifact is not None
+                else None
+            ),
+        }
+    return result.content
+
+
+def _artifact_refs(artifacts: Sequence[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "artifact_id": getattr(artifact, "id", None),
+            "type": getattr(getattr(artifact, "type", None), "value", None),
+        }
+        for artifact in artifacts
+    ]
+
+
+def _schema_only_artifact_content(artifact: Artifact) -> dict[str, Any]:
+    payload = artifact.payload
+    schema: dict[str, Any] = {}
+    if artifact.type is ArtifactType.DATASET_PROFILE:
+        schema = {
+            "dataset_id": payload.get("dataset_id"),
+            "name": payload.get("name"),
+            "column_names": payload.get("column_names", []),
+            "dtypes": payload.get("dtypes", {}),
+        }
+    elif artifact.type is ArtifactType.SQL_RESULT:
+        schema = {
+            "columns": payload.get("columns", []),
+            "dtypes": payload.get("dtypes", {}),
+            "units": payload.get("units", {}),
+        }
+    return {
+        "artifact_id": artifact.id,
+        "type": artifact.type.value,
+        "schema": schema,
+        "notice": "Artifact values are withheld by the schema_only payload policy.",
+    }
+
+
+def _aggregate_safe_artifact_content(artifact: Artifact) -> dict[str, Any]:
+    include_evidence = True
+    if artifact.type in {
+        ArtifactType.RAW_DATA_PREVIEW,
+        ArtifactType.CODE_EXECUTION_RESULT,
+    }:
+        include_evidence = False
+        payload: Any = {
+            "notice": "Raw or arbitrary execution output is withheld by payload policy."
+        }
+    elif artifact.type is ArtifactType.DATASET_PROFILE:
+        payload = _dataset_profile_without_samples(artifact.payload)
+    elif artifact.type is ArtifactType.SQL_RESULT and not _is_aggregate_sql(
+        str(artifact.payload.get("sql", ""))
+    ):
+        payload = _sql_result_without_rows(artifact.payload)
+    else:
+        payload = _clip_json(artifact.payload)
+    return {
+        "artifact_id": artifact.id,
+        "type": artifact.type.value,
+        "payload": payload,
+        "warnings": artifact.warnings[:10],
+        "evidence": (
+            [item.model_dump(mode="json") for item in artifact.evidence[:30]]
+            if include_evidence
+            else []
+        ),
+    }
+
+
+def _dataset_profile_without_samples(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(payload)
+    safe.pop("sample_rows", None)
+    details: list[dict[str, Any]] = []
+    for item in payload.get("columns_detail", []):
+        detail = dict(item)
+        detail.pop("sample_values", None)
+        detail.pop("category_levels", None)
+        details.append(detail)
+    if details:
+        safe["columns_detail"] = details
+    return cast(dict[str, Any], _clip_json(safe))
+
+
+def _sql_result_without_rows(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sql": payload.get("sql"),
+        "columns": payload.get("columns", []),
+        "dtypes": payload.get("dtypes", {}),
+        "units": payload.get("units", {}),
+        "row_count": payload.get("row_count"),
+        "truncated": payload.get("truncated", False),
+    }
+
+
+_SAFE_SCALAR_AGGREGATE_NAMES = frozenset(
+    {
+        "avg",
+        "count",
+        "corr",
+        "covar_pop",
+        "covar_samp",
+        "median",
+        "quantile_cont",
+        "quantile_disc",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "sum",
+        "var_pop",
+        "var_samp",
+        "variance",
+    }
+)
+_SAFE_SCALAR_ALIAS = re.compile(
+    r'^(?:as\s+)?(?:[A-Za-z_][A-Za-z0-9_]*|"(?:""|[^"])+")$',
+    flags=re.IGNORECASE,
+)
+# Window / set / grouping forms never count as a single scalar aggregate row,
+# even when the projected expression starts with an approved aggregate name.
+# ``over`` is banned as a bare keyword: a trailing ``\b`` after ``over\s*(``
+# previously failed to match ``OVER ()`` (non-word after ``(``), which let
+# window results be classified as aggregates and returned under the default
+# payload tier.
+_DISALLOWED_SQL_SHAPE = re.compile(
+    r"\b(?:group\s+by|over|qualify|union|intersect|except)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_aggregate_sql(sql: str) -> bool:
+    """Recognise only scalar aggregate projections safe for the default tier.
+
+    Merely seeing ``count(...)`` is insufficient: a query can also project a
+    raw column, group by a unique identifier, or call ``first(secret)``.  The
+    classifier therefore accepts a deliberately small subset: one plain SELECT,
+    no grouping/window/subquery, and every projected expression is one approved
+    aggregate call. Everything else is withheld rather than guessed safe.
+    """
+    # String literals and comments can contain fake SQL syntax, so erase them
+    # before classification. The query safety parser remains authoritative for
+    # whether the SQL itself is executable.
+    code = re.sub(r"'(?:''|[^'])*'", "''", sql)
+    code = re.sub(r"--[^\n]*|/\*.*?\*/", " ", code, flags=re.DOTALL)
+    if not re.match(r"^\s*select\b", code, flags=re.IGNORECASE):
+        return False
+    if len(re.findall(r"\bselect\b", code, flags=re.IGNORECASE)) != 1:
+        return False
+    # Multi-statement batches are never treated as a single safe aggregate.
+    if ";" in code:
+        return False
+    if _DISALLOWED_SQL_SHAPE.search(code) is not None:
+        return False
+    projection_end = _top_level_keyword_offset(code, "from", start=code.lower().find("select") + 6)
+    if projection_end is None:
+        return False
+    projection = code[code.lower().find("select") + 6 : projection_end]
+    expressions = _split_top_level_projection(projection)
+    return bool(expressions) and all(
+        _is_safe_scalar_aggregate_expression(expression) for expression in expressions
+    )
+
+
+def _is_safe_scalar_aggregate_expression(expression: str) -> bool:
+    """Accept ``agg(args) [AS] alias`` with balanced parentheses only."""
+    text = expression.strip()
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)
+    if match is None or match.group(1).casefold() not in _SAFE_SCALAR_AGGREGATE_NAMES:
+        return False
+    depth = 0
+    for index in range(match.end() - 1, len(text)):
+        char = text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                rest = text[index + 1 :].strip()
+                return not rest or _SAFE_SCALAR_ALIAS.fullmatch(rest) is not None
+            if depth < 0:
+                return False
+    return False
+
+
+def _top_level_keyword_offset(code: str, keyword: str, *, start: int) -> int | None:
+    depth = 0
+    index = start
+    lowered = code.casefold()
+    while index < len(code):
+        char = code[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and lowered.startswith(keyword, index):
+            before = lowered[index - 1] if index else " "
+            after_index = index + len(keyword)
+            after = lowered[after_index] if after_index < len(lowered) else " "
+            if not (before.isalnum() or before == "_") and not (
+                after.isalnum() or after == "_"
+            ):
+                return index
+        index += 1
+    return None
+
+
+def _split_top_level_projection(projection: str) -> list[str]:
+    expressions: list[str] = []
+    start = 0
+    depth = 0
+    for index, char in enumerate(projection):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return []
+            depth -= 1
+        elif char == "," and depth == 0:
+            expressions.append(projection[start:index].strip())
+            start = index + 1
+    if depth != 0:
+        return []
+    expressions.append(projection[start:].strip())
+    return expressions if all(expressions) else []
 
 
 def _run_open_analysis(
@@ -1736,6 +2156,267 @@ def _analyze_time_series(
             "stationarity_verdict": result.stationarity_verdict,
             "warnings": list(result.warnings),
         },
+        artifacts=[primary],
+        receipt_artifact=receipt_artifact,
+    )
+
+
+def _diagnose_missingness(
+    context: DataToolContext,
+    args: DiagnoseMissingnessArguments,
+) -> AgentToolResult:
+    dataset = _single_dataset(context, args.dataset_id)
+    result = diagnose_missingness(
+        dataset.frame,
+        dataset_id=args.dataset_id,
+        dataset_name=dataset.record.name,
+        target_column=args.target_column,
+        group_columns=args.group_columns,
+        top_k=args.top_k,
+    )
+    primary = create_missingness_artifact(
+        result,
+        project_id=context.project_id,
+        session_id=context.session_id,
+    )
+    context.add_artifact(primary)
+    rows = result.table.rows
+    facts: list[ReceiptFact] = [
+        _fact("rows_total", result.rows_total, "count"),
+        _fact("columns_analyzed", result.columns_analyzed, "count"),
+        _fact("columns_with_missing", result.columns_with_missing, "count"),
+        _fact("mnar_ruled_out", result.mnar_ruled_out, "bool"),
+        _fact("group_columns_analyzed", len(result.group_columns), "count"),
+        _fact("target_associations_tested", len(result.target_associations), "count"),
+    ]
+    for index, row in enumerate(rows[:_MAX_FACT_COLUMNS]):
+        facts.extend(
+            [
+                _fact(f"column{index}.name", str(row["column"]), "string"),
+                _fact(f"column{index}.missing_count", row["missing_count"], "count"),
+                _fact(
+                    f"column{index}.missing_percent",
+                    row["missing_percent"],
+                    "percent",
+                    unit="percent",
+                ),
+            ]
+        )
+    for index, association in enumerate(result.indicator_correlations[:_MAX_FACT_PAIRS]):
+        facts.extend(
+            [
+                _fact(
+                    f"indicator_pair{index}.columns",
+                    f"{association.column_a}~{association.column_b}",
+                    "string",
+                ),
+                _fact(f"indicator_pair{index}.phi", association.phi, "number"),
+            ]
+        )
+    for index, item in enumerate(result.group_rate_ranges[:_MAX_FACT_PAIRS]):
+        facts.extend(
+            [
+                _fact(
+                    f"group_range{index}.columns",
+                    f"{item.missing_column}~{item.group_column}",
+                    "string",
+                ),
+                _fact(
+                    f"group_range{index}.percentage_points",
+                    item.range_percentage_points,
+                    "percent",
+                    unit="percentage_points",
+                ),
+            ]
+        )
+    for index, item in enumerate(result.target_associations[:_MAX_FACT_PAIRS]):
+        facts.extend(
+            [
+                _fact(
+                    f"target_association{index}.missing_column",
+                    item.missing_column,
+                    "string",
+                ),
+                _fact(
+                    f"target_association{index}.adjusted_p",
+                    item.adjusted_p_value,
+                    "number",
+                ),
+                _fact(
+                    f"target_association{index}.effect_size",
+                    item.effect_size,
+                    "number",
+                ),
+            ]
+        )
+    receipt, receipt_artifact = _emit_receipt(
+        context,
+        tool_name="diagnose_missingness",
+        arguments=args.model_dump(mode="json"),
+        raw_output=result.model_dump(mode="json", exclude={"table"}),
+        artifact_ids=(primary.id,),
+        result_count=len(rows),
+        scope=ReceiptScope(
+            dataset_ids=(args.dataset_id,),
+            columns=tuple(str(column) for column in dataset.frame.columns),
+            scope_resolution="resolved",
+        ),
+        facts=tuple(facts),
+        fact_manifest=_build_fact_manifest(
+            rows,
+            [f"column{index}" for index in range(len(rows))],
+            evaluated_count=min(_MAX_FACT_COLUMNS, len(rows)),
+            total_rows=len(rows),
+        ),
+        method=ReceiptMethod(
+            family="missingness_diagnostic",
+            parameters={
+                "target_column": args.target_column,
+                "group_column_count": len(result.group_columns),
+                "target_correction": "holm",
+                "top_k": args.top_k,
+                "mnar_ruled_out": False,
+            },
+            assumptions=("MNAR is not identifiable from observed data alone.",),
+            warnings=tuple(result.limitations),
+        ),
+    )
+    return AgentToolResult(
+        content=cast(
+            dict[str, Any],
+            _clip_json(
+                {
+                    "artifact_id": primary.id,
+                    "receipt_id": receipt.receipt_id,
+                    "rows_total": result.rows_total,
+                    "columns_analyzed": result.columns_analyzed,
+                    "columns_with_missing": result.columns_with_missing,
+                    "missing_percent": result.missing_percent,
+                    "group_columns": result.group_columns,
+                    "indicator_correlations": [
+                        item.model_dump(mode="json")
+                        for item in result.indicator_correlations
+                    ],
+                    "group_rate_ranges": [
+                        item.model_dump(mode="json")
+                        for item in result.group_rate_ranges
+                    ],
+                    "target_associations": [
+                        item.model_dump(mode="json")
+                        for item in result.target_associations
+                    ],
+                    "mnar_ruled_out": result.mnar_ruled_out,
+                    "limitations": result.limitations,
+                }
+            ),
+        ),
+        artifacts=[primary],
+        receipt_artifact=receipt_artifact,
+    )
+
+
+def _run_baseline_model(
+    context: DataToolContext,
+    args: RunBaselineModelArguments,
+) -> AgentToolResult:
+    dataset = _single_dataset(context, args.dataset_id)
+    card = run_baseline_model_frame(
+        dataset.frame,
+        dataset_id=args.dataset_id,
+        target_column=args.target_column,
+        time_column=args.time_column,
+        random_state=args.random_state,
+        split_policy=args.split_policy,
+        group_column=args.group_column,
+        cv_folds=args.cv_folds,
+    )
+    primary = create_model_card_artifact(
+        card,
+        project_id=context.project_id,
+        session_id=context.session_id,
+    )
+    context.add_artifact(primary)
+    facts: list[ReceiptFact] = [
+        _fact("task_type", card.task_type, "string"),
+        _fact("target_column", card.target_column, "string"),
+        _fact("split_strategy", card.split_strategy, "string"),
+        _fact("model_type", card.model_type, "string"),
+        _fact("train_rows", card.train_rows, "count"),
+        _fact("test_rows", card.test_rows, "count"),
+        _fact("feature_count", len(card.feature_columns), "count"),
+        _fact("excluded_feature_count", len(card.excluded_features), "count"),
+    ]
+    if card.baseline_accuracy is not None:
+        facts.append(_fact("baseline_accuracy", card.baseline_accuracy, "number"))
+    for metric, value in sorted(card.metrics.items()):
+        facts.append(_fact(f"metric.{metric}", value, "number"))
+    for index, item in enumerate(card.feature_importance[:10]):
+        facts.extend(
+            [
+                _fact(f"feature{index}.name", item.feature, "string"),
+                _fact(f"feature{index}.importance", item.importance, "number"),
+            ]
+        )
+        if item.signed_importance is not None:
+            facts.append(
+                _fact(
+                    f"feature{index}.signed_importance",
+                    item.signed_importance,
+                    "number",
+                )
+            )
+        if item.importance_std is not None:
+            facts.append(
+                _fact(f"feature{index}.importance_std", item.importance_std, "number")
+            )
+    leakage_warnings = tuple(
+        check.message
+        for check in card.leakage_checks
+        if check.severity in {"warn", "critical"}
+    )
+    receipt, receipt_artifact = _emit_receipt(
+        context,
+        tool_name="run_baseline_model",
+        arguments=args.model_dump(mode="json"),
+        raw_output=card.model_dump(mode="json"),
+        artifact_ids=(primary.id,),
+        result_count=1,
+        scope=ReceiptScope(
+            dataset_ids=(args.dataset_id,),
+            columns=tuple(str(column) for column in dataset.frame.columns),
+            scope_resolution="resolved",
+        ),
+        facts=tuple(facts),
+        method=ReceiptMethod(
+            family="ml_baseline",
+            parameters={
+                "target_column": args.target_column,
+                "time_column": args.time_column,
+                "group_column": args.group_column,
+                "split_policy": args.split_policy,
+                "actual_split_strategy": card.split_strategy,
+                "cv_folds": args.cv_folds,
+                "random_state": args.random_state,
+            },
+            assumptions=(
+                f"split_strategy={card.split_strategy}",
+                f"cross_validation_folds={args.cv_folds}",
+                "performance is predictive association, not causal evidence",
+            ),
+            warnings=tuple([*card.limitations, *leakage_warnings]),
+        ),
+    )
+    return AgentToolResult(
+        content=cast(
+            dict[str, Any],
+            _clip_json(
+                {
+                    "artifact_id": primary.id,
+                    "receipt_id": receipt.receipt_id,
+                    **card.model_dump(mode="json"),
+                }
+            ),
+        ),
         artifacts=[primary],
         receipt_artifact=receipt_artifact,
     )

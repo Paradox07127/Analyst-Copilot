@@ -13,7 +13,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from eda_platform.agents.data_tools import (
     AnalyzeTimeSeriesArguments,
@@ -21,8 +21,10 @@ from eda_platform.agents.data_tools import (
     CorrelateColumnsArguments,
     DataToolContext,
     ProfileSliceArguments,
+    ReadArtifactArguments,
     RecommendCleaningArguments,
     RunDomainMetricsArguments,
+    RunSqlArguments,
     RunStatTestArguments,
     ScreenAnomaliesArguments,
     build_data_tools,
@@ -39,6 +41,7 @@ from eda_platform.schemas.artifacts import (
 from eda_platform.schemas.datasets import DatasetRecord
 from eda_platform.schemas.receipts import EvidenceReceipt, verify_receipt_digest
 from eda_platform.schemas.stats import StatTestResult
+from eda_platform.tools.evidence import PayloadPolicy
 from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.ml_baseline import run_baseline_model
 from eda_platform.tools.profiler import profile_dataset
@@ -63,6 +66,7 @@ def _context(
     *,
     artifacts: list[Artifact] | None = None,
     store: ArtifactStore | None = None,
+    payload_policy: PayloadPolicy = "schema+aggregates",
 ) -> DataToolContext:
     return DataToolContext(
         datasets=datasets,
@@ -70,7 +74,7 @@ def _context(
         project_id="project_t",
         session_id="run_t",
         store=store,
-        payload_policy="schema+aggregates",
+        payload_policy=payload_policy,
         artifacts=list(artifacts or []),
     )
 
@@ -190,9 +194,7 @@ def test_assess_join_keys_validates_even_a_pair_discovery_prefilters() -> None:
     still run the SQL validation and disclose that overlap signals are absent."""
     left = pd.DataFrame({"amount": [1.5, 2.5, 3.5, 4.5], "k": list("abcd")})
     right = pd.DataFrame({"amount": [1.5, 2.5, 9.9, 8.8], "k": list("wxyz")})
-    context = _context(
-        [_dataset("l.csv", left, "ds_l"), _dataset("r.csv", right, "ds_r")]
-    )
+    context = _context([_dataset("l.csv", left, "ds_l"), _dataset("r.csv", right, "ds_r")])
     tool = _tool(context, "assess_join_keys")
     tool.execute(
         AssessJoinKeysArguments(
@@ -224,9 +226,7 @@ def test_screen_anomalies_produces_receipt_and_persists_it(tmp_path: Path) -> No
     tool = _tool(context, "screen_anomalies")
     tool.execute(ScreenAnomaliesArguments(dataset_id="ds_a", column="amount"))
 
-    primary = next(
-        a for a in context.artifacts if a.type is ArtifactType.ANOMALY_SCREEN_RESULT
-    )
+    primary = next(a for a in context.artifacts if a.type is ArtifactType.ANOMALY_SCREEN_RESULT)
     receipt_artifact, receipt = _last_receipt(context)
     assert verify_receipt_digest(receipt)
     assert receipt.artifact_ids == (primary.id,)
@@ -235,9 +235,7 @@ def test_screen_anomalies_produces_receipt_and_persists_it(tmp_path: Path) -> No
     assert receipt.result_count == 1
     assert receipt.method.family == "robust_zscore"
     # persist=True must round-trip through the store like _run_sql artifacts do.
-    stored = store.get_artifact(
-        receipt_artifact.id, project_id="project_t", session_id="run_t"
-    )
+    stored = store.get_artifact(receipt_artifact.id, project_id="project_t", session_id="run_t")
     assert stored.type is ArtifactType.EVIDENCE_RECEIPT
 
 
@@ -459,11 +457,8 @@ def test_run_stat_test_receipt_records_family_id_and_effect_ci() -> None:
     assert receipt.statistics.p_value is not None
     assert receipt.statistics.ci_low is not None
     assert receipt.statistics.ci_high is not None
-    assert (
-        receipt.statistics.ci_low
-        <= receipt.statistics.effect_size
-        <= receipt.statistics.ci_high
-    )
+    assert receipt.statistics.effect_size is not None
+    assert receipt.statistics.ci_low <= receipt.statistics.effect_size <= receipt.statistics.ci_high
     assert receipt.method.assumptions, "assumption checks must be recorded"
 
 
@@ -664,6 +659,7 @@ def test_renaming_a_family_cannot_escape_the_multiplicity_ledger() -> None:
         )
         _, receipt = _last_receipt(context)
         assert receipt.statistics is not None
+        assert receipt.statistics.sequence_index is not None
         sequences.append(receipt.statistics.sequence_index)
         adjusted.append(receipt.statistics.adjusted_p_value)
         families.add(str(receipt.method.parameters["test_family_id"]))
@@ -812,9 +808,7 @@ def test_correlate_columns_needs_two_numeric_columns() -> None:
 def test_correlate_columns_still_supports_fdr_bh_correction() -> None:
     context = _context([_dataset("c.csv", _corr_frame(), "ds_c")])
     tool = _tool(context, "correlate_columns")
-    tool.execute(
-        CorrelateColumnsArguments(dataset_id="ds_c", correction_method="fdr_bh")
-    )
+    tool.execute(CorrelateColumnsArguments(dataset_id="ds_c", correction_method="fdr_bh"))
     _, receipt = _last_receipt(context)
     assert verify_receipt_digest(receipt)
     assert _fact(receipt, "correction_method").value == "fdr_bh"
@@ -909,8 +903,7 @@ def test_correlate_columns_marks_insufficient_pairs_in_the_manifest() -> None:
     inline_fact_ids = {fact.fact_id for fact in receipt.facts}
     assert "pair0.coefficient" in inline_fact_ids
     assert not any(
-        fact_id.startswith("pair1") or fact_id.startswith("pair2")
-        for fact_id in inline_fact_ids
+        fact_id.startswith("pair1") or fact_id.startswith("pair2") for fact_id in inline_fact_ids
     )
 
 
@@ -1023,9 +1016,7 @@ def test_correlation_manifest_gives_every_published_row_a_fact_id() -> None:
 
 
 def test_slice_manifest_marks_columns_beyond_the_fact_cap_unevaluated() -> None:
-    frame = pd.DataFrame(
-        {f"col{i:02d}": [float(i + j) for j in range(15)] for i in range(12)}
-    )
+    frame = pd.DataFrame({f"col{i:02d}": [float(i + j) for j in range(15)] for i in range(12)})
     context = _context([_dataset("wide.csv", frame, "ds_w")])
     _tool(context, "profile_slice").execute(
         ProfileSliceArguments(dataset_id="ds_w", where_sql="col00 >= 0")
@@ -1053,9 +1044,7 @@ def _baseline_frame() -> pd.DataFrame:
     rng = np.random.RandomState(0)
     n = 240
     segment = ["a" if i % 2 == 0 else "b" for i in range(n)]
-    labels = [
-        seg if rng.rand() > 0.05 else ("b" if seg == "a" else "a") for seg in segment
-    ]
+    labels = [seg if rng.rand() > 0.05 else ("b" if seg == "a" else "a") for seg in segment]
     return pd.DataFrame(
         {
             "seg": segment,
@@ -1117,6 +1106,8 @@ def test_baseline_importance_falls_back_to_mdi_with_disclosed_bias(
     monkeypatch.setattr(inspection, "permutation_importance", broken)
     card = run_baseline_model(_baseline_frame(), dataset_id="ds_b", target_column="label")
     assert card.feature_importance, "MDI fallback must still deliver importances"
+    assert all(item.signed_importance is None for item in card.feature_importance)
+    assert all(item.importance_std is None for item in card.feature_importance)
     assert any(
         "impurity" in limitation.lower() or "mdi" in limitation.lower()
         for limitation in card.limitations
@@ -1251,9 +1242,7 @@ def _stored_context(tmp_path: Path) -> DataToolContext:
     store.ensure_project("project_t", name="T")
     store.start_session("project_t", "run_t")
     values = [10.0] * 40 + [11.0] * 40 + [500.0]
-    return _context(
-        [_dataset("a.csv", pd.DataFrame({"amount": values}), "ds_a")], store=store
-    )
+    return _context([_dataset("a.csv", pd.DataFrame({"amount": values}), "ds_a")], store=store)
 
 
 def _replay_execution() -> Any:
@@ -1374,8 +1363,6 @@ def test_crash_between_artifact_and_commit_rolls_the_same_receipt_forward(
 
 def test_read_artifact_fails_closed_on_a_tampered_receipt() -> None:
     """Item 7: the load path must force digest verification, not trust storage."""
-    from eda_platform.agents.data_tools import ReadArtifactArguments
-
     values = [10.0] * 40 + [11.0] * 40 + [500.0]
     context = _context([_dataset("a.csv", pd.DataFrame({"amount": values}), "ds_a")])
     _tool(context, "screen_anomalies").execute(
@@ -1388,6 +1375,133 @@ def test_read_artifact_fails_closed_on_a_tampered_receipt() -> None:
     receipt_artifact.payload["result_count"] = 999
     with pytest.raises(ValueError, match="digest|integrity|tamper"):
         read_tool.execute(ReadArtifactArguments(artifact_id=receipt_artifact.id))
+
+
+@pytest.mark.parametrize("payload_policy", ["schema_only", "schema+aggregates"])
+def test_payload_policy_withholds_raw_sql_rows(payload_policy: PayloadPolicy) -> None:
+    secret = "123-45-6789"
+    dataset = _dataset(
+        "people.csv",
+        pd.DataFrame({"ssn": [secret], "amount": [42.0]}),
+        "ds_people",
+    )
+    context = _context([dataset], payload_policy=payload_policy)
+
+    result = _tool(context, "run_sql").execute(
+        RunSqlArguments(sql="select ssn, amount from people", purpose="inspect rows")
+    )
+
+    encoded = str(result.content)
+    assert secret not in encoded
+    assert "rows_preview" not in encoded
+    # Complete local evidence still exists for reproducibility; only the
+    # provider-facing observation is filtered.
+    assert result.artifacts[0].payload["rows_preview"][0]["ssn"] == secret
+
+
+def test_sample_payload_policy_explicitly_allows_bounded_sql_rows() -> None:
+    secret = "123-45-6789"
+    dataset = _dataset("people.csv", pd.DataFrame({"ssn": [secret]}), "ds_people")
+    context = _context([dataset], payload_policy="schema+aggregates+sample")
+
+    result = _tool(context, "run_sql").execute(
+        RunSqlArguments(sql="select ssn from people", purpose="inspect sample")
+    )
+
+    assert secret in str(result.content)
+
+
+def test_default_policy_allows_only_strict_scalar_aggregate_sql() -> None:
+    secret = "123-45-6789"
+    dataset = _dataset(
+        "people.csv",
+        pd.DataFrame({"ssn": [secret, "987-65-4321"], "amount": [42.0, 8.0]}),
+        "ds_people",
+    )
+    context = _context([dataset], payload_policy="schema+aggregates")
+    run_sql_tool = _tool(context, "run_sql")
+
+    safe = run_sql_tool.execute(
+        RunSqlArguments(
+            sql="select count(*) AS records, sum(amount) AS total from people",
+            purpose="aggregate",
+        )
+    )
+    grouped_secret = run_sql_tool.execute(
+        RunSqlArguments(
+            sql="select ssn, count(*) AS records from people group by ssn",
+            purpose="unsafe grouping",
+        )
+    )
+    mixed_secret = run_sql_tool.execute(
+        RunSqlArguments(
+            sql="select count(*) AS records, first(ssn) AS first_ssn from people",
+            purpose="mixed aggregates",
+        )
+    )
+    # Empty OVER () previously defeated both the disallowed-shape regex (trailing
+    # word-boundary after '(') and the loose [^;]* aggregate matcher, so a
+    # per-row window result was treated as a safe scalar aggregate.
+    windowed = run_sql_tool.execute(
+        RunSqlArguments(
+            sql="select sum(amount) OVER () AS total from people",
+            purpose="windowed aggregate",
+        )
+    )
+    windowed_order = run_sql_tool.execute(
+        RunSqlArguments(
+            sql="select sum(amount) OVER (ORDER BY amount) AS running from people",
+            purpose="ordered window",
+        )
+    )
+
+    assert "rows_preview" in str(safe.content)
+    assert "total" in str(safe.content)
+    assert secret not in str(grouped_secret.content)
+    assert secret not in str(mixed_secret.content)
+    assert "rows_preview" not in str(grouped_secret.content)
+    assert "rows_preview" not in str(mixed_secret.content)
+    assert "rows_preview" not in str(windowed.content)
+    assert "rows_preview" not in str(windowed_order.content)
+
+
+def test_schema_only_catalog_and_artifact_read_expose_structure_not_values() -> None:
+    secret = "123-45-6789"
+    dataset = _dataset(
+        "people.csv",
+        pd.DataFrame({"ssn": [secret], "amount": [42.0]}),
+        "ds_people",
+    )
+    profile = profile_dataset(dataset, project_id="project_t", session_id="run_t")
+    context = _context([dataset], artifacts=[profile], payload_policy="schema_only")
+
+    catalog = _tool(context, "inspect_data_catalog").execute(_NoArgumentsForTest())
+    artifact = _tool(context, "read_artifact").execute(
+        ReadArtifactArguments(artifact_id=profile.id)
+    )
+
+    encoded = f"{catalog.content} {artifact.content}"
+    assert secret not in encoded
+    assert isinstance(catalog.content, dict)
+    assert "rows" not in catalog.content["datasets"][0]
+    assert "ssn" in encoded
+
+
+def test_default_policy_strips_profile_samples_when_reading_artifact() -> None:
+    secret = "123-45-6789"
+    dataset = _dataset("people.csv", pd.DataFrame({"ssn": [secret]}), "ds_people")
+    profile = profile_dataset(dataset, project_id="project_t", session_id="run_t")
+    context = _context([dataset], artifacts=[profile])
+
+    result = _tool(context, "read_artifact").execute(ReadArtifactArguments(artifact_id=profile.id))
+
+    assert secret not in str(result.content)
+    assert "sample_rows" not in str(result.content)
+    assert "sample_values" not in str(result.content)
+
+
+class _NoArgumentsForTest(BaseModel):
+    """The registry validates this as the tool's empty closed argument model."""
 
 
 def test_witness_is_a_versioned_triplet_digest() -> None:
@@ -1473,11 +1587,7 @@ def test_list_saved_skills_exposes_provenance_and_usage_guidance(tmp_path: Path)
     )
     tool = _tool(_context([dataset], store=store), "list_saved_skills")
     listing = tool.execute(tool.args_schema())
-    row = next(
-        item
-        for item in listing.content["skills"]
-        if item["name"] == "regional totals"
-    )
+    row = next(item for item in listing.content["skills"] if item["name"] == "regional totals")
 
     assert row["origin"] == "user_template"
     assert row["when_to_use"].startswith("When comparing")

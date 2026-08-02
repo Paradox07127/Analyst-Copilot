@@ -331,18 +331,26 @@ def test_fact_manifest_invariants_are_enforced() -> None:
         "status": "unevaluated",
         "row_digest": "a" * 64,
     }
-    manifest = ReceiptFactManifest(total_rows=2, unlisted_rows=1, entries=(entry,))
+    manifest = ReceiptFactManifest.model_validate(
+        {"total_rows": 2, "unlisted_rows": 1, "entries": [entry]}
+    )
     assert manifest.schema_version == 1
 
     with pytest.raises(ValidationError, match="total_rows"):
-        ReceiptFactManifest(total_rows=5, unlisted_rows=0, entries=(entry,))
+        ReceiptFactManifest.model_validate(
+            {"total_rows": 5, "unlisted_rows": 0, "entries": [entry]}
+        )
     with pytest.raises(ValidationError, match="unique"):
-        ReceiptFactManifest(total_rows=2, unlisted_rows=0, entries=(entry, entry))
+        ReceiptFactManifest.model_validate(
+            {"total_rows": 2, "unlisted_rows": 0, "entries": [entry, entry]}
+        )
     with pytest.raises(ValidationError):
-        ReceiptFactManifest(
-            total_rows=1,
-            unlisted_rows=0,
-            entries=({**entry, "row_digest": "not-hex"},),
+        ReceiptFactManifest.model_validate(
+            {
+                "total_rows": 1,
+                "unlisted_rows": 0,
+                "entries": [{**entry, "row_digest": "not-hex"}],
+            }
         )
 
 
@@ -363,17 +371,19 @@ def test_an_evaluated_manifest_entry_requires_a_backing_fact() -> None:
             method=ReceiptMethod(family="pearson_correlation_screen"),
             data_state_witness="witness_1",
             created_at="2026-08-01T00:00:00Z",
-            fact_manifest=ReceiptFactManifest(
-                total_rows=1,
-                unlisted_rows=0,
-                entries=(
-                    {
-                        "fact_id": fact_id,
-                        "row_index": 0,
-                        "status": status,
-                        "row_digest": "b" * 64,
-                    },
-                ),
+            fact_manifest=ReceiptFactManifest.model_validate(
+                {
+                    "total_rows": 1,
+                    "unlisted_rows": 0,
+                    "entries": [
+                        {
+                            "fact_id": fact_id,
+                            "row_index": 0,
+                            "status": status,
+                            "row_digest": "b" * 64,
+                        }
+                    ],
+                }
             ),
         )
 

@@ -11,7 +11,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
-from eda_platform.core.claim_gates import GateReport
+from eda_platform.core.claim_gates import GateReport, claim_bundle_digest
 from eda_platform.schemas.claims import ClaimBundle, EvidenceLane
 from eda_platform.tools.report_validator import (
     numeric_tokens_from_text,
@@ -93,11 +93,24 @@ def render_claim_report(
     run_metadata: Mapping[str, str],
 ) -> RenderedReport:
     """Render passed bundles into fixed-structure markdown, byte-deterministic."""
+    if bundles and not run_metadata.get("witness"):
+        raise ValueError("run metadata must include the witness used by claim gates.")
     for bundle, report in bundles:
         if bundle.claim_bundle_id != report.claim_bundle_id:
             raise ValueError(
                 f"bundle {bundle.claim_bundle_id!r} is paired with the gate "
                 f"report of {report.claim_bundle_id!r}."
+            )
+        if claim_bundle_digest(bundle) != report.claim_bundle_digest:
+            raise ValueError(
+                f"bundle {bundle.claim_bundle_id!r} does not match the exact "
+                "content evaluated by its gate report."
+            )
+        metadata_witness = run_metadata.get("witness")
+        if metadata_witness != report.run_witness:
+            raise ValueError(
+                f"bundle {bundle.claim_bundle_id!r} was gated against a different "
+                "run witness than the report metadata."
             )
     ordered = sorted(bundles, key=lambda pair: pair[0].claim_bundle_id)
     rendered_pairs = [(b, r) for b, r in ordered if r.passed]

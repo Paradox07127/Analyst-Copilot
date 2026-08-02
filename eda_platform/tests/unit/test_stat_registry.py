@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from eda_platform.core.stat_registry import (
+    StatAttempt,
     StatRegistryError,
     StatTestRegistry,
     derive_family_id,
@@ -30,7 +31,7 @@ def _begin(
     step: str,
     *,
     digest: str = "digest_a",
-) -> object:
+) -> StatAttempt:
     return registry.begin_attempt(
         family_id=family_id,
         requested_test_type="independent_t_test",

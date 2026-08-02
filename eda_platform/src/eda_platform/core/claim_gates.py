@@ -18,6 +18,7 @@ from eda_platform.core.claim_language import (
     asserts_model_capability,
     implies_causation,
 )
+from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.claims import (
     Claim,
     ClaimBundle,
@@ -36,7 +37,11 @@ from eda_platform.schemas.receipts import (
 # §5.2); promoted to public names in E3-B, aliased so call sites stay unchanged.
 from eda_platform.tools.report_validator import (
     numeric_tokens_from_text as _numeric_tokens_from_text,
+)
+from eda_platform.tools.report_validator import (
     satisfies_threshold as _satisfies_threshold,
+)
+from eda_platform.tools.report_validator import (
     value_supports_token as _value_supports_token,
 )
 from eda_platform.tools.stat_tests import TEST_PUBLISHABILITY
@@ -56,8 +61,8 @@ GATE_ORDER: tuple[GateName, ...] = (
     "state",
 )
 
-# Receipts that license model/prediction claims. run_baseline_model is not an
-# agent tool yet; this constant is the contract its future adapter must meet.
+# Receipts that license model/prediction claims. The agent adapter must retain
+# these exact names so model claims cannot be licensed by generic table output.
 MODEL_EVIDENCE_TOOL_NAMES = frozenset({"run_baseline_model"})
 MODEL_EVIDENCE_METHOD_FAMILIES = frozenset({"ml_baseline", "model_card"})
 
@@ -98,6 +103,8 @@ class GateReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     claim_bundle_id: str
+    claim_bundle_digest: str
+    run_witness: str
     passed: bool
     verdicts: tuple[GateVerdict, ...]
     # GroundEval Eq.1 multiplier (1 - v)^2 — a run-health metric, not a gate.
@@ -190,6 +197,7 @@ def run_claim_gates(
     *,
     committed_receipts: Mapping[str, EvidenceReceipt],
     run_witness: str,
+    stat_attempt_counts: Mapping[str, int] | None = None,
 ) -> GateReport:
     """Run the six exit gates and return one structured verdict per gate."""
     # Revalidate even an already-typed bundle: model_construct/model_copy skip
@@ -200,13 +208,18 @@ def run_claim_gates(
     try:
         bundle = ClaimBundle.model_validate(payload)
     except ValidationError as exc:
-        return _structure_failure_report(payload, exc)
+        return _structure_failure_report(payload, exc, run_witness=run_witness)
     structure = GateVerdict(gate="structure", passed=True)
 
     reach_violations, evidence = _resolve_references(bundle, committed_receipts)
     numeric_violations = _numeric_gate(bundle, evidence)
     entity_violations = _entity_gate(bundle, evidence)
-    statistical_violations = _statistical_gate(bundle, evidence)
+    statistical_violations = _statistical_gate(
+        bundle,
+        evidence,
+        committed_receipts,
+        stat_attempt_counts=stat_attempt_counts,
+    )
     state_violations = _state_gate(evidence, run_witness)
 
     verdicts = (
@@ -226,9 +239,10 @@ def run_claim_gates(
             passed=not entity_violations,
             violations=tuple(entity_violations),
         ),
-        # Registering-only in v1: violations are recorded, never blocking.
         GateVerdict(
-            gate="statistical", passed=True, violations=tuple(statistical_violations)
+            gate="statistical",
+            passed=not statistical_violations,
+            violations=tuple(statistical_violations),
         ),
         GateVerdict(
             gate="state", passed=not state_violations, violations=tuple(state_violations)
@@ -237,6 +251,8 @@ def run_claim_gates(
     all_violations = [v for verdict in verdicts for v in verdict.violations]
     return GateReport(
         claim_bundle_id=bundle.claim_bundle_id,
+        claim_bundle_digest=claim_bundle_digest(bundle),
+        run_witness=run_witness,
         passed=all(verdict.passed for verdict in verdicts),
         verdicts=verdicts,
         health_score=_health_score(len(bundle.claims), all_violations),
@@ -290,7 +306,10 @@ def _bullet(violation: GateViolation) -> str:
 
 
 def _structure_failure_report(
-    payload: Mapping[str, Any] | Any, exc: ValidationError
+    payload: Mapping[str, Any] | Any,
+    exc: ValidationError,
+    *,
+    run_witness: str = "",
 ) -> GateReport:
     # include_input=False: schema errors must not echo model-authored text.
     violations = tuple(
@@ -309,6 +328,8 @@ def _structure_failure_report(
             bundle_id = raw
     return GateReport(
         claim_bundle_id=bundle_id or "<invalid>",
+        claim_bundle_digest=stable_hash(payload, length=64),
+        run_witness=run_witness,
         passed=False,
         verdicts=(
             GateVerdict(gate="structure", passed=False, violations=violations),
@@ -548,21 +569,27 @@ def _entity_gate(
     bundle: ClaimBundle, evidence: dict[str, _ClaimEvidence]
 ) -> list[GateViolation]:
     violations: list[GateViolation] = []
-    independence_licensed = any(
+    bundle_independence_licensed = any(
         receipt.replication_kind in _INDEPENDENCE_LICENSING_KINDS
         for resolved in evidence.values()
         for receipt in resolved.receipts.values()
     )
     for claim in bundle.claims:
         resolved = evidence[claim.claim_id]
+        independence_licensed = any(
+            receipt.replication_kind in _INDEPENDENCE_LICENSING_KINDS
+            for receipt in resolved.receipts.values()
+        )
         needs_model = claim.claim_type in {"model", "prediction"} or (
             asserts_model_capability(claim.claim_text)
         )
-        if needs_model and not any(
-            receipt.tool_name in MODEL_EVIDENCE_TOOL_NAMES
-            or receipt.method.family in MODEL_EVIDENCE_METHOD_FAMILIES
+        model_receipts = {
+            receipt.receipt_id: receipt
             for receipt in resolved.receipts.values()
-        ):
+            if receipt.tool_name in MODEL_EVIDENCE_TOOL_NAMES
+            or receipt.method.family in MODEL_EVIDENCE_METHOD_FAMILIES
+        }
+        if needs_model and not model_receipts:
             violations.append(
                 GateViolation(
                     code="model_claim_without_model_evidence",
@@ -573,6 +600,30 @@ def _entity_gate(
                     claim_id=claim.claim_id,
                 )
             )
+        elif needs_model and _numeric_tokens_from_text(claim.claim_text):
+            model_values = [
+                (float(fact.value), "exact" if fact.value_type == "count" else "rounded")
+                for receipt, fact in resolved.fact_pairs
+                if receipt.receipt_id in model_receipts
+                and fact.value_type in _NUMERIC_FACT_TYPES
+                and not isinstance(fact.value, bool)
+                and isinstance(fact.value, (int, float))
+            ]
+            if not any(
+                _value_supports_token(token, value, policy)
+                for token in _numeric_tokens_from_text(claim.claim_text)
+                for value, policy in model_values
+            ):
+                violations.append(
+                    GateViolation(
+                        code="model_metric_not_model_derived",
+                        message=(
+                            "the claim's numeric model metric is not supported by "
+                            "a cited fact from the model-card receipt."
+                        ),
+                        claim_id=claim.claim_id,
+                    )
+                )
         if claim.claim_type == "causal":
             violations.append(
                 GateViolation(
@@ -626,7 +677,7 @@ def _entity_gate(
                     claim_id=claim.claim_id,
                 )
             )
-    if bundle.declares_independent_replication and not independence_licensed:
+    if bundle.declares_independent_replication and not bundle_independence_licensed:
         violations.append(
             GateViolation(
                 code="unlicensed_independence_claim",
@@ -754,10 +805,17 @@ def _narrowing_covers(claim_scope: ClaimScope, receipt_scope: ReceiptScope) -> b
 
 
 def _statistical_gate(
-    bundle: ClaimBundle, evidence: dict[str, _ClaimEvidence]
+    bundle: ClaimBundle,
+    evidence: dict[str, _ClaimEvidence],
+    committed_receipts: Mapping[str, EvidenceReceipt],
+    *,
+    stat_attempt_counts: Mapping[str, int] | None,
 ) -> list[GateViolation]:
-    """v1 registers statistical-completeness violations without blocking."""
+    """Block incomplete statistics and recheck multiplicity at publication time."""
     violations: list[GateViolation] = []
+    final_family_counts = _final_stat_family_counts(
+        committed_receipts, stat_attempt_counts=stat_attempt_counts
+    )
     confirmatory = bundle.evidence_lane == "confirmatory"
     for claim in bundle.claims:
         stats_receipts = evidence[claim.claim_id].stats_receipts
@@ -806,6 +864,53 @@ def _statistical_gate(
                         tool_call_id=receipt.tool_call_id,
                     )
                 )
+            family_id = statistics.hypothesis_id
+            if statistics.p_value is not None and not family_id:
+                violations.append(
+                    GateViolation(
+                        code="stat_family_missing",
+                        message=(
+                            f"receipt {receipt.receipt_id} has no system-owned "
+                            "statistical family id."
+                        ),
+                        claim_id=claim.claim_id,
+                        tool_call_id=receipt.tool_call_id,
+                    )
+                )
+            elif statistics.p_value is not None and family_id:
+                if stat_attempt_counts is None or family_id not in stat_attempt_counts:
+                    violations.append(
+                        GateViolation(
+                            code="stat_family_count_unavailable",
+                            message=(
+                                f"receipt {receipt.receipt_id} cannot be published "
+                                "without the authoritative statistical-registry "
+                                "family count."
+                            ),
+                            claim_id=claim.claim_id,
+                            tool_call_id=receipt.tool_call_id,
+                        )
+                    )
+                    continue
+                family_count = final_family_counts.get(
+                    family_id, statistics.sequence_index or 1
+                )
+                expected = min(1.0, float(statistics.p_value) * family_count)
+                adjusted = statistics.adjusted_p_value
+                if (family_count > 1 and adjusted is None) or (
+                    adjusted is not None and float(adjusted) + 1e-12 < expected
+                ):
+                    violations.append(
+                        GateViolation(
+                            code="stale_multiplicity_adjustment",
+                            message=(
+                                f"receipt {receipt.receipt_id} was adjusted for fewer "
+                                f"attempts than the family's final count of {family_count}."
+                            ),
+                            claim_id=claim.claim_id,
+                            tool_call_id=receipt.tool_call_id,
+                        )
+                    )
             if (
                 confirmatory
                 and TEST_PUBLISHABILITY.get(statistics.test_name)
@@ -823,6 +928,35 @@ def _statistical_gate(
                     )
                 )
     return violations
+
+
+def _final_stat_family_counts(
+    committed_receipts: Mapping[str, EvidenceReceipt],
+    *,
+    stat_attempt_counts: Mapping[str, int] | None,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for receipt_id, receipt in committed_receipts.items():
+        if (
+            receipt.receipt_id != receipt_id
+            or not verify_receipt_digest(receipt)
+            or receipt.statistics is None
+            or not receipt.statistics.hypothesis_id
+            or receipt.statistics.sequence_index is None
+        ):
+            continue
+        family_id = receipt.statistics.hypothesis_id
+        counts[family_id] = max(counts.get(family_id, 0), receipt.statistics.sequence_index)
+    for family_id, count in (stat_attempt_counts or {}).items():
+        if count < 1:
+            raise ValueError("stat_attempt_counts values must be positive integers.")
+        counts[family_id] = max(counts.get(family_id, 0), int(count))
+    return counts
+
+
+def claim_bundle_digest(bundle: ClaimBundle) -> str:
+    """Canonical binding used to pair a gate report with the exact bundle."""
+    return stable_hash(bundle.model_dump(mode="json"), length=64)
 
 
 def _state_gate(

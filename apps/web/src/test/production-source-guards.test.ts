@@ -9,11 +9,13 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   findAttributionSelectorBypasses,
+  findUnexpectedPublicAssets,
   findScrimBypasses,
   findUnreachableProductionFiles,
 } from "./production-source-guards";
 
 const srcDir = path.resolve(import.meta.dirname, "..");
+const publicDir = path.resolve(import.meta.dirname, "../..", "public");
 const fixtureRoots: string[] = [];
 
 function fixture(files: Record<string, string>): string {
@@ -59,6 +61,22 @@ describe("production source reachability", () => {
     expect(findUnreachableProductionFiles(root, "main.tsx")).toEqual([
       "orphan.ts",
       "styles/orphan.css",
+    ]);
+  });
+});
+
+describe("public asset boundary", () => {
+  it("ships only explicitly reviewed static assets", () => {
+    expect(findUnexpectedPublicAssets(publicDir, ["favicon.svg"])).toEqual([]);
+  });
+
+  it("finds an accidentally deployed manual QA page", () => {
+    const root = fixture({
+      "favicon.svg": "<svg />",
+      "manual-checklist.html": "<h1>Internal QA</h1>",
+    });
+    expect(findUnexpectedPublicAssets(root, ["favicon.svg"])).toEqual([
+      "manual-checklist.html",
     ]);
   });
 });

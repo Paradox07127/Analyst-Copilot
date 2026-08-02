@@ -30,7 +30,7 @@ working tree and remains available only through Git history.
 | Multi-table analysis | Discover candidate relationships from names, types, overlap, and uniqueness; validate joins with DuckDB; inspect join multipliers, orphan rates, cardinality, and an ER diagram. |
 | Guided investigation | Generate, score, and batch-execute verifiable questions; review findings, statistical tests, and optional lightweight ML baselines with model cards. |
 | Reporting | Produce evidence-backed reports with a claim ledger and hard-validator results. Download a self-contained HTML report, or PDF when the optional dependency is available. |
-| Conversational analysis | In live LLM mode, use Chat for intent routing, planning, and read-only DuckDB SQL. Open-ended Python analysis is isolated behind a sandbox. |
+| Conversational analysis | In live LLM mode, use Chat for intent routing, planning, read-only DuckDB SQL, guarded missingness diagnostics, and leakage-aware baseline modeling. Open-ended Python analysis is isolated behind a sandbox; causal guidance is advisory and causal claims remain fail-closed. |
 | Reuse and comparison | Edit semantic knowledge, save validated analysis skills, and compare two runs or fork a one-change variant. |
 | Observability | Watch a run's stages and events in the floating Activity panel, then inspect the typed artifacts, validation state, and errors it produced. |
 
@@ -250,17 +250,19 @@ Anthropic, Gemini, Azure OpenAI, DeepSeek, Qwen, Moonshot, Zhipu, xAI, Mistral,
 OpenRouter, Together, Groq, Fireworks, Ollama, LM Studio, a generic
 `openai_compatible` entry, and `offline`.
 
-**The React workbench has no settings dialog: the provider, model, and key come
-from the process environment or `.env`.** What the UI does expose per run is the
-choice between the configured provider and `offline`:
+The React workbench exposes provider, model, endpoint, key, structured-output,
+and payload-policy controls in **Settings**. Environment or `.env` values seed a
+new browser/API session; UI changes are held in the server's bounded in-memory
+session store and apply to runs started afterward. They are not written back to
+`.env`, and a server restart restores environment defaults.
 
 | Mode | Use | Required values |
 |---|---|---|
 | `offline` | Deterministic local fallback with no external model request. Chat answers are canned. | None |
 | Configured provider | Whatever `EDA_LLM_PROVIDER` names in the environment. | API key and model (plus base URL for local/compatible endpoints) |
 
-Restart the server after changing `.env` — the settings are read at process
-start, and running workers inherit them.
+Restart the server after changing `.env`. Existing runs keep the settings they
+froze at start, while new runs use the effective session settings.
 
 Common environment variables are listed below; see [`.env.example`](.env.example) for the complete example.
 
@@ -281,11 +283,10 @@ How much data may be sent to the LLM is governed by the payload policy:
 - `schema+aggregates`: the default; adds aggregates to improve analytical quality.
 - `schema+aggregates+sample`: also sends sample rows; highest information exposure and cost.
 
-Runs started from the React app use the default (`schema+aggregates`); the
-policy is not yet exposed as a per-run option there. Choose it according to your
-data classification, vendor agreement, and organization policy. API keys stay in
-the server process — they are never sent to the browser or written into project
-files.
+The Settings page defaults to `schema+aggregates`; changing it affects sessions
+started afterward. Choose it according to your data classification, vendor
+agreement, and organization policy. API keys are write-only in the UI after
+submission and are never written into project files.
 
 ## Optional: open-ended Python analysis
 
@@ -384,9 +385,19 @@ npm run build --prefix apps/web
 npm run e2e --prefix apps/web
 ```
 
-The suite covers upload → offline run → live progress → Data Map, table deep
-links with an offset, report rendering, the one-shot cleaning approval, and
-keyboard-only board reordering.
+The default suite runs the deterministic Chromium flows and skips pixel snapshots
+and cross-browser drag checks. Opt into those separately after installing the
+required browsers:
+
+```bash
+npm run e2e:visual --prefix apps/web
+npm run e2e:install:all --prefix apps/web
+npm run e2e:cross-browser --prefix apps/web
+```
+
+Together the suites cover upload → offline run → live progress → Data Map, table
+deep links with an offset, report rendering, the one-shot cleaning approval,
+keyboard-only board reordering, visual snapshots, and cross-browser drag behavior.
 
 ### API contract
 

@@ -80,7 +80,7 @@ describe("Trace & cost page", () => {
     ).toBeInTheDocument();
 
     /* "Findings recorded" disambiguates from the Findings page's validated-only
-     * count (run_metrics.py:483 also tallies findings embedded in question
+     * count (core/session_metrics.py also tallies findings embedded in question
      * execution results), via a distinct label and a hover explanation. */
     const findingsKpi = screen
       .getByText("Findings recorded")

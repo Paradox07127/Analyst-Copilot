@@ -8,7 +8,7 @@ golden e-commerce tables and walks the J3 journey end to end:
 2. DuckDB validation of every >=medium candidate (join multiplier, orphan
    rates, cardinality) — the CU004 duplicate-key trap and the CU999 orphan
    are called out with warnings instead of being silently adopted,
-3. ER diagram as Graphviz DOT (the UI renders the same payload),
+3. ER diagram as Graphviz DOT (a backend/debug export; the UI uses nodes/edges),
 4. question discovery (template route) with score breakdown,
 5. auto-selection and execution of the top questions, with evidence-backed
    findings.
@@ -134,7 +134,7 @@ def main() -> int:
         for warning in validation.warnings:
             print(f"    warning: {warning}")
 
-    _heading("3. ER diagram (Graphviz DOT, rendered by the Relationships page)")
+    _heading("3. ER diagram (Graphviz DOT backend/debug export)")
     diagram = build_er_diagram(candidates, validations)
     print(diagram.dot_source)
     if args.dot_out is not None:

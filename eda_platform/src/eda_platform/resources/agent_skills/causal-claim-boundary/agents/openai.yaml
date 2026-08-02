@@ -1,0 +1,4 @@
+interface:
+  display_name: "Causal Claim Boundary"
+  short_description: "Guard causal claims with design assumptions"
+  default_prompt: "Use $causal-claim-boundary to assess whether this analysis can support causal language."

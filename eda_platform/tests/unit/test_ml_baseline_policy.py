@@ -3,6 +3,8 @@ and aggregated signed permutation importance."""
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -52,18 +54,15 @@ def test_auto_policy_still_time_orders_temporal_data() -> None:
     assert card.split_strategy == "time_ordered"
 
 
-def test_random_policy_on_time_data_emits_explicit_warning_field() -> None:
-    card = run_baseline_model(
-        _time_frame(),
-        dataset_id="ds",
-        target_column="target",
-        time_column="date",
-        split_policy="random",
-    )
-    assert card.split_strategy != "time_ordered"
-    warned = [c for c in card.leakage_checks if c.code == "random_split_on_time_data"]
-    assert warned and warned[0].action == "warned" and warned[0].severity == "warn"
-    assert warned[0].column == "date"
+def test_random_policy_on_time_data_is_rejected() -> None:
+    with pytest.raises(ValueError, match="random.*temporal|temporal.*random"):
+        run_baseline_model(
+            _time_frame(),
+            dataset_id="ds",
+            target_column="target",
+            time_column="date",
+            split_policy="random",
+        )
 
 
 def test_time_policy_without_a_time_column_is_rejected() -> None:
@@ -101,9 +100,10 @@ def test_group_policy_splits_disjoint_groups_and_excludes_group_column() -> None
     assert "site" not in card.feature_columns
     assert any(c.code == "group_split" and c.column == "site" for c in card.leakage_checks)
 
-    groups = frame["site"]
+    groups = cast(pd.Series, frame["site"])
+    labels = cast(pd.Series, frame["label"])
     train_idx, test_idx = _split_indexes(
-        frame["label"],
+        labels,
         task_type="classification",
         split_strategy="group",
         random_state=0,
@@ -200,6 +200,17 @@ def test_model_card_importance_uses_original_feature_names() -> None:
     assert features, "importance rows must exist"
     assert all("=" not in feature for feature in features)
     assert "color" in features
+
+
+def test_model_card_preserves_signed_importance_and_repeat_std() -> None:
+    card = run_baseline_model(_group_frame(), dataset_id="ds", target_column="label")
+    assert card.feature_importance
+    assert all(item.signed_importance is not None for item in card.feature_importance)
+    assert all(item.importance_std is not None for item in card.feature_importance)
+    assert all(
+        item.importance_std is not None and item.importance_std >= 0.0
+        for item in card.feature_importance
+    )
 
 
 def test_encoder_exposes_origin_of_every_encoded_column() -> None:

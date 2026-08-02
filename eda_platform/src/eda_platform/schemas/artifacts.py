@@ -171,7 +171,12 @@ class QualityIssueSet(BaseModel):
 class AnalysisTable(BaseModel):
     dataset_id: str
     title: str
-    kind: Literal["numeric_summary", "correlation", "association"]
+    kind: Literal[
+        "numeric_summary",
+        "correlation",
+        "association",
+        "missingness_diagnostic",
+    ]
     description: str
     rows: list[dict[str, Any]] = Field(default_factory=list)
 

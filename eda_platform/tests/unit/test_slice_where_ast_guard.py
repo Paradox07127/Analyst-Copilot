@@ -8,6 +8,8 @@ check while reporting statistics that contradict its own row-count fact.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -23,7 +25,6 @@ from eda_platform.schemas.receipts import EvidenceReceipt, verify_receipt_digest
 from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.slice_profile import compute_slice_profile, validate_where_clause
 from eda_platform.tools.sql_runner import build_catalog
-from pathlib import Path
 
 # Ten rows, amount constant at 1.0: any mean other than 1.0 is injected data.
 _ROWS = 10

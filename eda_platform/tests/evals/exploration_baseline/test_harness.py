@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 import pytest
@@ -271,20 +272,23 @@ def _planted_df() -> pd.DataFrame:
 
 def test_fixture_planted_trend_really_exists() -> None:
     df = _planted_df()
-    daily = df.groupby("order_date")["revenue"].sum()
+    daily = cast(pd.Series, df.groupby("order_date")["revenue"].sum())
     day_index = pd.Series(range(len(daily)), index=daily.index)
-    assert daily.corr(day_index, method="spearman") > 0.5
+    assert cast(float, daily.corr(day_index, method="spearman")) > 0.5
 
 
 def test_fixture_planted_group_difference_really_exists() -> None:
     df = _planted_df()
-    means = df.groupby("region")["revenue"].mean()
+    means = cast(pd.Series, df.groupby("region")["revenue"].mean())
     assert means["North"] / means["South"] > 1.5
 
 
 def test_fixture_planted_missingness_pattern_really_exists() -> None:
     df = _planted_df()
-    missing_by_channel = df.groupby("channel")["satisfaction"].apply(lambda s: s.isna().mean())
+    missing_by_channel = cast(
+        pd.Series,
+        df.groupby("channel")["satisfaction"].apply(lambda s: s.isna().mean()),
+    )
     assert missing_by_channel["phone"] > 0.5
     assert missing_by_channel["online"] < 0.1
     assert missing_by_channel["store"] < 0.1
@@ -292,24 +296,25 @@ def test_fixture_planted_missingness_pattern_really_exists() -> None:
 
 def test_fixture_planted_outlier_day_really_exists() -> None:
     df = _planted_df()
-    daily = df.groupby("order_date")["revenue"].sum()
-    spike = daily.loc["2025-04-15"]
-    assert spike > 3 * daily.drop(pd.Timestamp("2025-04-15")).median()
+    daily = cast(pd.Series, df.groupby("order_date")["revenue"].sum())
+    spike = cast(float, daily.loc["2025-04-15"])
+    baseline = cast(float, daily.drop(pd.Timestamp("2025-04-15")).median())
+    assert spike > 3 * baseline
 
 
 def test_fixture_negative_patterns_really_absent() -> None:
     df = _planted_df()
     # no trend in customer_age
-    daily_age = df.groupby("order_date")["customer_age"].mean()
+    daily_age = cast(pd.Series, df.groupby("order_date")["customer_age"].mean())
     day_index = pd.Series(range(len(daily_age)), index=daily_age.index)
-    assert abs(daily_age.corr(day_index, method="spearman")) < 0.2
+    assert abs(cast(float, daily_age.corr(day_index, method="spearman"))) < 0.2
     # no region difference in units
-    unit_means = df.groupby("region")["units"].mean()
+    unit_means = cast(pd.Series, df.groupby("region")["units"].mean())
     assert 0.9 < unit_means["North"] / unit_means["South"] < 1.1
     # no missing revenue
-    assert df["revenue"].notna().all()
+    assert bool(cast(pd.Series, df["revenue"]).notna().all())
     # no outlier in units (bounded 1..20)
-    assert df["units"].between(1, 20).all()
+    assert bool(cast(pd.Series, df["units"]).between(1, 20).all())
 
 
 def test_fixture_ground_truth_and_patterns_reference_real_columns() -> None:

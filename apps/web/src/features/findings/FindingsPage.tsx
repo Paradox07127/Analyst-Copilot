@@ -338,9 +338,9 @@ function FindingsPrimer({
     <Card tone="quiet" className="flex flex-col gap-2 p-4">
       <p className="text-base font-semibold">No validated findings yet</p>
       <p className="text-sm text-status-neutral">
-        Validated findings come from investigations, not from Auto EDA
-        alone — Auto EDA profiles and screens the data but does not validate a
-        finding. Run an investigation on a question to get one here.
+        Validated findings come from completed investigation workflows, not
+        from Auto EDA alone. This page is review-only; Questions runs one
+        approved analysis at a time and does not promise an investigation loop.
       </p>
       {records.length > 0 && (
         <p className="text-sm text-status-neutral">
@@ -362,7 +362,7 @@ function FindingsPrimer({
         to={sessionSectionPath(projectId, sessionId, "questions")}
         className="self-start text-sm text-primary underline-offset-2 hover:underline"
       >
-        Go to Questions to start an investigation
+        Review suggested questions
       </Link>
     </Card>
   );
@@ -566,13 +566,13 @@ function InvestigationLog({
         />
         <EmptyState
           title="No investigation outcomes have been recorded yet."
-          description="An investigation lands here when it finishes without an answer the data supports — start one from Questions to see how it reports back."
+          description="Completed investigation workflows that finish without a supported answer will appear here."
         />
         <Link
           to={sessionSectionPath(projectId, sessionId, "questions")}
           className="self-start text-xs text-primary underline-offset-2 hover:underline"
         >
-          Go to Questions
+          Browse questions
         </Link>
       </section>
     );

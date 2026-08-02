@@ -26,6 +26,7 @@ from eda_platform.core.llm import (
     ToolCallingLLM,
     ToolCallingUnsupportedError,
 )
+from eda_platform.core.method_skills import method_skill_guidance
 from eda_platform.core.permissions import (
     PermissionDecision,
     PermissionTier,
@@ -432,7 +433,7 @@ def _run_agentic_chat_turn(
     )
     try:
         result = runtime.run(
-            system_prompt=_AGENT_SYSTEM_PROMPT,
+            system_prompt=_AGENT_SYSTEM_PROMPT + method_skill_guidance(message),
             user_message=message,
         )
     except ToolCallingUnsupportedError:

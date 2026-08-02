@@ -19,7 +19,11 @@ class LeakageCheck(BaseModel):
 
 class FeatureImportance(BaseModel):
     feature: str
+    # Backward-compatible non-negative display score. The signed estimate and
+    # repeat dispersion below carry the analytical meaning.
     importance: float
+    signed_importance: float | None = None
+    importance_std: float | None = None
 
     @field_validator("importance")
     @classmethod
@@ -27,6 +31,20 @@ class FeatureImportance(BaseModel):
         if math.isfinite(value) and value >= 0.0:
             return value
         raise ValueError("feature importance must be finite and non-negative.")
+
+    @field_validator("signed_importance")
+    @classmethod
+    def _signed_importance_is_finite(cls, value: float | None) -> float | None:
+        if value is None or math.isfinite(value):
+            return value
+        raise ValueError("signed feature importance must be finite.")
+
+    @field_validator("importance_std")
+    @classmethod
+    def _importance_std_is_non_negative(cls, value: float | None) -> float | None:
+        if value is None or (math.isfinite(value) and value >= 0.0):
+            return value
+        raise ValueError("feature importance std must be finite and non-negative.")
 
 
 class ModelCard(BaseModel):

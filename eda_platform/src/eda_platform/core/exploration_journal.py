@@ -45,6 +45,7 @@ from eda_platform.schemas.exploration import (
     ToolCallFailedEvent,
     ToolCallStartedEvent,
 )
+from eda_platform.schemas.exploration_budget import BudgetCapIncrease
 
 _POLICY_FINGERPRINT_PREFIX = "xplcy_"
 _NATURAL_STOP_REASONS = frozenset({"completed", "budget_exhausted", "no_new_information"})
@@ -76,6 +77,22 @@ def assert_policy_sealed(policy: ExplorationPolicy) -> None:
         raise ExplorationPolicyIntegrityError(
             "policy_fingerprint is missing or does not match the policy fields."
         )
+
+
+def amended_policy_fingerprint(
+    previous_fingerprint: str,
+    amendment_id: str,
+    increase: BudgetCapIncrease,
+) -> str:
+    """System-derived, order-sensitive identity for one effective policy link."""
+    return _POLICY_FINGERPRINT_PREFIX + stable_hash(
+        {
+            "previous_effective_policy_fingerprint": previous_fingerprint,
+            "amendment_id": amendment_id,
+            "increase": increase.model_dump(mode="json"),
+        },
+        length=24,
+    )
 
 
 def reduce_exploration_event(
@@ -150,6 +167,11 @@ def reduce_exploration_event(
         if event.call_id != state.pending_call_id:
             raise EventTransitionError("rejected call does not match the pending call.")
         values["pending_call_id"] = None
+        # A known provider rejection is still one attempted request. Treat it
+        # as settled so repeated 4xx/5xx responses cannot bypass max_requests.
+        values["llm_calls_settled"] = state.llm_calls_settled + 1
+        if state.remaining_llm_call_budget is not None:
+            values["remaining_llm_call_budget"] = state.remaining_llm_call_budget - 1
         values["failure_history"] = [*state.failure_history, event.error]
     elif isinstance(event, LlmCallUncertainEvent):
         # Fail closed: the provider outcome is unknown, so the reservation is
@@ -246,6 +268,16 @@ def reduce_exploration_event(
                 f"budget amendment {event.amendment_id!r} is already applied."
             )
         increase = event.increase
+        expected_fingerprint = amended_policy_fingerprint(
+            state.effective_policy_fingerprint,
+            event.amendment_id,
+            increase,
+        )
+        if event.effective_policy_fingerprint != expected_fingerprint:
+            raise EventTransitionError(
+                "budget amendment effective_policy_fingerprint does not match "
+                "the prior policy and requested increase."
+            )
         if state.max_llm_requests is not None and increase.max_requests:
             values["max_llm_requests"] = state.max_llm_requests + increase.max_requests
             remaining = state.remaining_llm_call_budget
@@ -375,6 +407,31 @@ class JsonlExplorationJournal(
                 error=uncertain_error,
             )
         return state
+
+    def amend_budget(
+        self,
+        *,
+        amendment_id: str,
+        increase: BudgetCapIncrease,
+    ) -> ExplorationLoopState:
+        """Append an amendment with its fingerprint derived under the writer lock."""
+        with self._locked():
+            state = self._rebuild_unlocked()
+            if state is None:
+                raise EventTransitionError(
+                    "initialize the journal before amending its budget."
+                )
+            fingerprint = amended_policy_fingerprint(
+                state.effective_policy_fingerprint,
+                amendment_id,
+                increase,
+            )
+            return self.append_new(
+                "budget_amended",
+                amendment_id=amendment_id,
+                effective_policy_fingerprint=fingerprint,
+                increase=increase,
+            )
 
 
 def _start_exploration(event: ExplorationLoopEvent) -> ExplorationLoopState:

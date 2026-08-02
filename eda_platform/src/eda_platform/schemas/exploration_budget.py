@@ -50,7 +50,7 @@ class SessionBudgetPolicyModel(BaseModel):
                 raise ValueError(f"protected_{dimension} cannot exceed max_{dimension}.")
         return self
 
-    def to_policy(self) -> "SessionBudgetPolicy":
+    def to_policy(self) -> SessionBudgetPolicy:
         from eda_platform.core.budget import SessionBudgetPolicy
 
         return SessionBudgetPolicy(**self.model_dump())

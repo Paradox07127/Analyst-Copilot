@@ -45,6 +45,13 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["eda_platform/src"]
 
+[tool.setuptools.package-data]
+"eda_platform.resources" = [
+    "*.json",
+    "agent_skills/*/SKILL.md",
+    "agent_skills/*/agents/*.yaml",
+]
+
 [tool.uv]
 package = true
 

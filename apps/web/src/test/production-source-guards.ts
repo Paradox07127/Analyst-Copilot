@@ -32,6 +32,23 @@ function relative(root: string, file: string): string {
   return path.relative(root, file).split(path.sep).join("/");
 }
 
+export function findUnexpectedPublicAssets(
+  root: string,
+  allowed: readonly string[],
+): string[] {
+  const absoluteRoot = path.resolve(root);
+  const allowlist = new Set(allowed);
+
+  function walk(directory: string): string[] {
+    return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      const target = path.join(directory, entry.name);
+      return entry.isDirectory() ? walk(target) : [relative(absoluteRoot, target)];
+    });
+  }
+
+  return walk(absoluteRoot).filter((file) => !allowlist.has(file)).sort();
+}
+
 /** Remove comments without changing quoted import paths or source offsets. */
 function withoutComments(source: string): string {
   const output = source.split("");

@@ -518,7 +518,7 @@ export function Component() {
             to={sessionSectionPath(projectId, sessionId, "questions")}
             className="self-start text-sm text-primary underline-offset-2 hover:underline"
           >
-            Go to Questions to start an investigation
+            Review suggested questions
           </Link>
         </div>
       ) : (

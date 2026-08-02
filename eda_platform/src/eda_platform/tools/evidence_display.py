@@ -91,7 +91,7 @@ def _summary_line(claim: ReportClaim) -> str:
 
 def _failed_token_lines(
     claim: ReportClaim,
-    values: list[tuple[float, str, str, bool]],
+    values: list[tuple[float, str, str, str | None]],
 ) -> list[str]:
     """One line per failed token showing the pool it was checked against."""
     failed = [status for status in claim.numeric_statuses if status.status == "failed"]
