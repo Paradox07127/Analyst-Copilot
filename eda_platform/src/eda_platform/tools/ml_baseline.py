@@ -139,6 +139,17 @@ def run_baseline_model(
     if task_type == "classification":
         baseline_accuracy = _majority_class_baseline(y_train, metrics, limitations)
 
+    feature_importance = _feature_importance(
+        model,
+        X_test,
+        (
+            y_test
+            if task_type == "classification"
+            else cast(pd.Series, pd.to_numeric(y_test, errors="coerce"))
+        ),
+        random_state=random_state,
+        limitations=limitations,
+    )
     return ModelCard(
         dataset_id=dataset_id,
         task_type=task_type,
@@ -152,7 +163,7 @@ def run_baseline_model(
         metrics=metrics,
         baseline_accuracy=baseline_accuracy,
         leakage_checks=leakage_checks,
-        feature_importance=_feature_importance(model, list(X_train.columns)),
+        feature_importance=feature_importance,
         limitations=limitations,
     )
 
@@ -663,16 +674,43 @@ def _fit_regression(
 
 def _feature_importance(
     model: Any,
-    feature_names: list[str],
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
     *,
+    random_state: int,
+    limitations: list[str],
     limit: int = 10,
 ) -> list[FeatureImportance]:
-    importances = getattr(model, "feature_importances_", None)
-    if importances is None:
-        return []
+    """Test-set permutation importance; sklearn documents impurity-based (MDI)
+    importances as biased toward high-cardinality features, so MDI is only the
+    disclosed fallback."""
+    try:
+        import sklearn.inspection as inspection
+
+        permuted = cast(
+            Any,
+            inspection.permutation_importance(
+                model,
+                X_test,
+                y_test,
+                n_repeats=5,
+                random_state=random_state,
+            ),
+        )
+        # Small negative means are permutation noise, not evidence of harm.
+        importances = [max(0.0, float(value)) for value in permuted.importances_mean]
+    except Exception:
+        raw = getattr(model, "feature_importances_", None)
+        if raw is None:
+            return []
+        importances = [float(value) for value in raw]
+        limitations.append(
+            "Feature importance fell back to impurity-based (MDI) values, which are "
+            "biased toward high-cardinality features; rank them with caution."
+        )
     rows = [
-        FeatureImportance(feature=feature, importance=round(float(importance), 6))
-        for feature, importance in zip(feature_names, importances, strict=True)
+        FeatureImportance(feature=str(feature), importance=round(importance, 6))
+        for feature, importance in zip(X_test.columns, importances, strict=True)
     ]
     rows.sort(key=lambda row: row.importance, reverse=True)
     return rows[:limit]

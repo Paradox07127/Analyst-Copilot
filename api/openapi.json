@@ -7216,6 +7216,453 @@
         "x-mutation-policy": "idempotency"
       }
     },
+    "/api/v1/projects/{project_id}/skill-templates": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Create Skill Template",
+        "description": "Save a user-defined SQL analysis template. The template_id is content-addressed, so re-POSTing an identical body returns the same template instead of creating a duplicate.",
+        "operationId": "create_skill_template_api_v1_projects__project_id__skill_templates_post",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 200
+            },
+            "description": "Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillTemplateCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillTemplateView"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "idempotency"
+      },
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "List Skill Templates",
+        "description": "Builtin seed templates plus this project's user templates, with a\nsource marker on each.",
+        "operationId": "list_skill_templates_api_v1_projects__project_id__skill_templates_get",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillTemplatesView"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/skill-templates/{template_id}": {
+      "delete": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Delete Skill Template",
+        "description": "Remove a user template. Builtin seed templates are not deletable (409).",
+        "operationId": "delete_skill_template_api_v1_projects__project_id__skill_templates__template_id__delete",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "template_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Template Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 200
+            },
+            "description": "Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "idempotency"
+      }
+    },
+    "/api/v1/sessions/{session_id}/skill-templates/{template_id}/import": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Import Skill Template",
+        "description": "Bind a user template to one dataset of this run and save the result as a library skill — after trial-running the instantiated SQL for real, whose first-rows preview is returned. Builtin seeds keep their own import route under /skills.",
+        "operationId": "import_skill_template_api_v1_sessions__session_id__skill_templates__template_id__import_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "template_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Template Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 200
+            },
+            "description": "Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeedImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillTemplateBound"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "idempotency"
+      }
+    },
     "/api/v1/projects/{project_id}/skills/{skill_id}": {
       "delete": {
         "tags": [
@@ -12828,7 +13275,8 @@
           "FollowUpProposalSet",
           "LoopLedger",
           "EdaHandoff",
-          "AgentHandoff"
+          "AgentHandoff",
+          "EvidenceReceipt"
         ],
         "title": "ArtifactType"
       },
@@ -23678,6 +24126,228 @@
         ],
         "title": "SkillTargetDataset",
         "description": "A replay target in the current run, with the columns bindings may use."
+      },
+      "SkillTemplateBound": {
+        "properties": {
+          "skill": {
+            "$ref": "#/components/schemas/SkillSummary"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count"
+          },
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Columns"
+          },
+          "rows_preview": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Rows Preview"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "skill",
+          "row_count"
+        ],
+        "title": "SkillTemplateBound",
+        "description": "A user template bound into a library skill, plus the trial-run preview\nthat proves the instantiated SQL really executes on the target dataset."
+      },
+      "SkillTemplateCreateRequest": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "question": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question"
+          },
+          "sql": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Sql"
+          },
+          "method": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Method"
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Rationale"
+          },
+          "params": {
+            "items": {
+              "$ref": "#/components/schemas/SkillTemplateParam"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Params"
+          },
+          "when_to_use": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "When To Use",
+            "default": ""
+          },
+          "when_not_to_use": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "When Not To Use",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "question",
+          "sql",
+          "method",
+          "rationale",
+          "params"
+        ],
+        "title": "SkillTemplateCreateRequest",
+        "description": "User-writable subset of a seed template; the id is server-generated."
+      },
+      "SkillTemplateParam": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "measure",
+              "dimension",
+              "timestamp",
+              "identifier",
+              "any"
+            ],
+            "title": "Role"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Description",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "role"
+        ],
+        "title": "SkillTemplateParam"
+      },
+      "SkillTemplateView": {
+        "properties": {
+          "template_id": {
+            "type": "string",
+            "title": "Template Id"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "builtin",
+              "user"
+            ],
+            "title": "Source"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "sql": {
+            "type": "string",
+            "title": "Sql"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method",
+            "default": ""
+          },
+          "rationale": {
+            "type": "string",
+            "title": "Rationale",
+            "default": ""
+          },
+          "params": {
+            "items": {
+              "$ref": "#/components/schemas/SkillParamSpec"
+            },
+            "type": "array",
+            "title": "Params"
+          },
+          "when_to_use": {
+            "type": "string",
+            "title": "When To Use",
+            "default": ""
+          },
+          "when_not_to_use": {
+            "type": "string",
+            "title": "When Not To Use",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "template_id",
+          "source",
+          "name",
+          "question",
+          "sql"
+        ],
+        "title": "SkillTemplateView",
+        "description": "One SQL analysis template: a builtin seed or a user-defined one."
+      },
+      "SkillTemplatesView": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "templates": {
+            "items": {
+              "$ref": "#/components/schemas/SkillTemplateView"
+            },
+            "type": "array",
+            "title": "Templates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id"
+        ],
+        "title": "SkillTemplatesView"
       },
       "SkillsView": {
         "properties": {

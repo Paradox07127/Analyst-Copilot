@@ -145,6 +145,8 @@ from eda_platform.application.services.skill_service import (
     SkillNotInLibraryError,
     SkillPlanNotFoundError,
     SkillSqlRejectedError,
+    SkillTemplateNotFoundError,
+    SkillTrialRunFailedError,
     SkillValidationError,
 )
 from eda_platform.application.services.support_doc_service import (
@@ -517,6 +519,16 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(SkillPlanNotFoundError)
     def _skill_plan_not_found(request: Request, exc: SkillPlanNotFoundError) -> JSONResponse:
         return error_response(404, "skill_plan_not_found", str(exc))
+
+    @app.exception_handler(SkillTemplateNotFoundError)
+    def _skill_template_not_found(
+        request: Request, exc: SkillTemplateNotFoundError
+    ) -> JSONResponse:
+        return error_response(404, "skill_template_not_found", str(exc))
+
+    @app.exception_handler(SkillTrialRunFailedError)
+    def _skill_trial_run_failed(request: Request, exc: SkillTrialRunFailedError) -> JSONResponse:
+        return error_response(422, "skill_trial_run_failed", str(exc))
 
     @app.exception_handler(RelationshipNotFoundError)
     def _relationship_not_found(request: Request, exc: RelationshipNotFoundError) -> JSONResponse:

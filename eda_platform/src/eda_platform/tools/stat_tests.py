@@ -5,6 +5,7 @@ import warnings
 from collections.abc import Callable
 from typing import Any, Literal, cast
 
+import numpy as np
 import pandas as pd
 
 from eda_platform.core.ids import make_artifact_id
@@ -49,6 +50,14 @@ _VALUE_TESTS: frozenset[str] = frozenset(
 _MAX_BOXPLOT_GROUPS = 20
 _MAX_BOXPLOT_VALUES_PER_GROUP = 50
 
+# Cochran's rule of thumb: chi-square is unreliable once more than 20% of
+# expected cell frequencies fall below 5.
+_CHI2_LOW_EXPECTED_SHARE = 0.20
+
+_EFFECT_CI_RESAMPLES = 2_000
+_EFFECT_CI_MAX_TOTAL_N = 8_000
+_EFFECT_CI_SEED = 0
+
 
 def run_stat_test(
     frame: pd.DataFrame,
@@ -60,6 +69,7 @@ def run_stat_test(
     category_column: str | None = None,
     pair_column: str | None = None,
     comparison_count: int = 1,
+    effect_ci: bool = False,
 ) -> StatTestResult:
     guard_stat_test_params(
         frame,
@@ -91,6 +101,16 @@ def run_stat_test(
             f"{test_type} is not computable on this data (non-finite result); "
             "likely a constant column or an empty group."
         )
+    if effect_ci and result.effect_size is not None:
+        ci_low, ci_high, ci_warnings = _effect_size_ci(
+            frame,
+            test_type=result.test_type,
+            group_column=group_column,
+            value_column=value_column,
+        )
+        result.effect_ci_low = ci_low
+        result.effect_ci_high = ci_high
+        result.warnings.extend(ci_warnings)
     if comparison_count > 1:
         result.adjusted_p_value = min(1.0, float(result.p_value) * comparison_count)
         result.correction_method = "bonferroni"
@@ -464,6 +484,25 @@ def _chi_square_independence(
         tuple[Any, Any, Any, Any],
         stats.chi2_contingency(table),
     )
+    expected_array = np.asarray(expected, dtype=float)
+    low_expected_share = float((expected_array < 5).mean())
+    if low_expected_share > _CHI2_LOW_EXPECTED_SHARE:
+        if table.shape == (2, 2):
+            return _fisher_exact_2x2(
+                stats,
+                table,
+                dataset_id=dataset_id,
+                group_column=group_column,
+                category_column=category_column,
+                chi_square_statistic=float(statistic),
+                low_expected_share=low_expected_share,
+            )
+        raise ValueError(
+            "chi_square_independence is unreliable here: "
+            f"{low_expected_share:.0%} of expected cell frequencies are below 5 and the "
+            f"table is {table.shape[0]}x{table.shape[1]}, so the Fisher exact fallback "
+            "(2x2 only) does not apply. Merge sparse categories or collect more data."
+        )
     warnings: list[StatWarning] = []
     if bool(cast(Any, expected < 5).any()):
         warnings.append(
@@ -492,6 +531,196 @@ def _chi_square_independence(
         ],
         warnings=warnings,
     )
+
+
+def _fisher_exact_2x2(
+    stats,
+    table: pd.DataFrame,
+    *,
+    dataset_id: str,
+    group_column: str,
+    category_column: str,
+    chi_square_statistic: float,
+    low_expected_share: float,
+) -> StatTestResult:
+    """Deterministic fallback when chi-square expected counts are too sparse."""
+    counts = table.to_numpy()
+    odds_ratio, p_value = cast(tuple[Any, Any], stats.fisher_exact(counts))
+    odds = float(odds_ratio)
+    correction_note = ""
+    if not math.isfinite(odds):
+        # A zero cell makes the sample odds ratio infinite; report the
+        # Haldane-Anscombe corrected value so the statistic stays finite.
+        a, b = float(counts[0][0]), float(counts[0][1])
+        c, d = float(counts[1][0]), float(counts[1][1])
+        odds = ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5))
+        correction_note = (
+            " The odds ratio is Haldane-Anscombe corrected because a zero cell "
+            "makes the sample odds ratio infinite."
+        )
+    return StatTestResult(
+        dataset_id=dataset_id,
+        test_type="fisher_exact",
+        group_column=group_column,
+        category_column=category_column,
+        statistic=_round_float(odds),
+        p_value=_finite_float(p_value),
+        # Descriptive association strength from the observed table.
+        effect_size=_round_float(_cramers_v(chi_square_statistic, table)),
+        sample_size=int(counts.sum()),
+        groups={str(index): int(table.loc[index].sum()) for index in table.index},
+        assumptions=[
+            StatAssumptionCheck(
+                name="expected_frequency",
+                status="warn",
+                message=(
+                    f"{low_expected_share:.0%} of expected cell frequencies are below 5; "
+                    "the Fisher exact test replaces chi-square on this 2x2 table."
+                ),
+            )
+        ],
+        warnings=[
+            StatWarning(
+                code="fisher_exact_fallback",
+                message=(
+                    "Chi-square expected-frequency assumption failed; the Fisher exact "
+                    "test was used instead." + correction_note
+                ),
+            )
+        ],
+    )
+
+
+# Tests whose effect size can be recomputed from (group, value) samples; the
+# paired test and contingency tests have no sample-resampling equivalent here.
+_EFFECT_CI_STATISTICS: dict[str, Callable[..., float]] = {}
+
+
+def _effect_size_ci(
+    frame: pd.DataFrame,
+    *,
+    test_type: str,
+    group_column: str | None,
+    value_column: str | None,
+) -> tuple[float | None, float | None, list[StatWarning]]:
+    """BCa bootstrap interval for the reported effect size (bounded, seeded)."""
+    notes: list[StatWarning] = []
+    statistic = _EFFECT_CI_STATISTICS.get(test_type)
+    if statistic is None or not group_column or not value_column:
+        notes.append(
+            StatWarning(
+                code="effect_ci_unavailable",
+                severity="info",
+                message=f"No bootstrap effect-size interval is defined for {test_type}.",
+            )
+        )
+        return None, None, notes
+    grouped = _numeric_groups(frame, group_column=group_column, value_column=value_column)
+    series_list = list(grouped.values())
+    total = sum(len(values) for values in series_list)
+    if total > _EFFECT_CI_MAX_TOTAL_N:
+        scale = _EFFECT_CI_MAX_TOTAL_N / total
+        series_list = [
+            values.sample(
+                n=max(2, min(len(values), int(len(values) * scale))),
+                random_state=_EFFECT_CI_SEED,
+            )
+            for values in series_list
+        ]
+        notes.append(
+            StatWarning(
+                code="effect_ci_subsampled",
+                severity="info",
+                message=(
+                    f"Effect-size bootstrap used a deterministic subsample of "
+                    f"{sum(len(values) for values in series_list)} of {total} rows."
+                ),
+            )
+        )
+    samples = tuple(values.to_numpy(dtype=float) for values in series_list)
+    stats = _scipy_stats()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = stats.bootstrap(
+                samples,
+                statistic,
+                n_resamples=_EFFECT_CI_RESAMPLES,
+                method="BCa",
+                vectorized=False,
+                random_state=np.random.default_rng(_EFFECT_CI_SEED),
+            )
+    except Exception:
+        notes.append(
+            StatWarning(
+                code="effect_ci_failed",
+                severity="info",
+                message="The BCa bootstrap did not converge on this data; no interval reported.",
+            )
+        )
+        return None, None, notes
+    low = _round_float(result.confidence_interval.low)
+    high = _round_float(result.confidence_interval.high)
+    if low is None or high is None:
+        notes.append(
+            StatWarning(
+                code="effect_ci_failed",
+                severity="info",
+                message="The BCa bootstrap produced non-finite bounds; no interval reported.",
+            )
+        )
+        return None, None, notes
+    return low, high, notes
+
+
+def _cohens_d_np(left: np.ndarray, right: np.ndarray) -> float:
+    left_n, right_n = len(left), len(right)
+    pooled = (
+        ((left_n - 1) * float(np.var(left, ddof=1)) + (right_n - 1) * float(np.var(right, ddof=1)))
+        / (left_n + right_n - 2)
+    ) ** 0.5
+    if pooled == 0:
+        return 0.0
+    return abs(float(np.mean(left)) - float(np.mean(right))) / pooled
+
+
+def _rank_biserial_np(left: np.ndarray, right: np.ndarray) -> float:
+    from scipy.stats import rankdata
+
+    ranks = rankdata(np.concatenate([left, right]))
+    left_n, right_n = len(left), len(right)
+    u_statistic = float(ranks[:left_n].sum()) - left_n * (left_n + 1) / 2
+    return abs(1.0 - (2.0 * u_statistic) / (left_n * right_n))
+
+
+def _eta_squared_np(*groups: np.ndarray) -> float:
+    all_values = np.concatenate(groups)
+    grand_mean = float(all_values.mean())
+    between = sum(len(group) * (float(group.mean()) - grand_mean) ** 2 for group in groups)
+    total = float(((all_values - grand_mean) ** 2).sum())
+    return 0.0 if total == 0 else between / total
+
+
+def _epsilon_squared_np(*groups: np.ndarray) -> float:
+    from scipy.stats import kruskal
+
+    statistic = float(kruskal(*groups).statistic)
+    sample_size = sum(len(group) for group in groups)
+    group_count = len(groups)
+    if sample_size <= group_count:
+        return 0.0
+    return max(0.0, (statistic - group_count + 1) / (sample_size - group_count))
+
+
+_EFFECT_CI_STATISTICS.update(
+    {
+        "independent_t_test": _cohens_d_np,
+        "mann_whitney_u": _rank_biserial_np,
+        "one_way_anova": _eta_squared_np,
+        "welch_anova": _eta_squared_np,
+        "kruskal_wallis": _epsilon_squared_np,
+    }
+)
 
 
 def _one_way_anova(

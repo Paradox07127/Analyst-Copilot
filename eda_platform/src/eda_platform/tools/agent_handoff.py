@@ -51,6 +51,9 @@ _PII_DATA_TYPES = {
     ArtifactType.SQL_RESULT,
     ArtifactType.CODE_EXECUTION_RESULT,
     ArtifactType.TABLE,
+    # Receipt facts carry data values (group labels, top categories), so an
+    # unscoped receipt in a PII-bearing run is restricted like a SQL result.
+    ArtifactType.EVIDENCE_RECEIPT,
 }
 _SINGLETON_DATASET_KEYS = {
     ArtifactType.DATASET_PROFILE: "profile",
@@ -770,6 +773,10 @@ def _catalog_semantics(
         return "exploration", "evidence", "high"
     if artifact_type in {ArtifactType.STAT_TEST_RESULT, ArtifactType.MODEL_CARD}:
         return "statistics", "evidence", "high"
+    if artifact_type is ArtifactType.EVIDENCE_RECEIPT:
+        # Receipts are per-call audit evidence: fetched when a claim is being
+        # verified, never part of the default context.
+        return "exploration", "evidence", "on_demand"
     if artifact_type in {ArtifactType.VALUE_MAP, ArtifactType.COLUMN_ROLE_SET}:
         return "semantic", "summary", "high"
     if artifact_type is ArtifactType.QUESTION_CANDIDATE_SET:

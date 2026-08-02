@@ -21,6 +21,8 @@ from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.value_parsing import parse_numeric_like
 
 _EXACT_CORRELATION_MAX_COLUMNS = 128
+_PAIRWISE_TEST_MAX_COLUMNS = 24
+_PAIRWISE_TEST_MAX_PUBLISHED_ROWS = 50
 _CORRELATION_SCREEN_ROWS = 4_096
 _CORRELATION_PROJECTION_DIMENSIONS = 64
 _CORRELATION_CANDIDATE_PAIRS = 256
@@ -75,6 +77,115 @@ def create_analysis_tables(
             )
         )
     return artifacts
+
+
+def correlate_column_pairs(
+    frame: pd.DataFrame,
+    *,
+    dataset_id: str,
+    dataset_name: str,
+    columns: list[str] | None = None,
+    correction_method: str = "fdr_bh",
+) -> AnalysisTable:
+    """Pairwise Pearson screen with multiplicity-adjusted p-values.
+
+    Every tested pair enters the correction (never just the published top), so
+    `pairs_tested`, `correction_method` and each pair's `adjusted_p` make the
+    selection auditable.
+    """
+    if correction_method not in {"holm", "fdr_bh"}:
+        raise ValueError("correction_method must be `holm` or `fdr_bh`.")
+    if columns is None:
+        columns = [
+            str(column)
+            for column in frame.columns
+            if is_numeric_dtype(frame[column])
+        ][:_PAIRWISE_TEST_MAX_COLUMNS]
+    else:
+        missing = [column for column in columns if column not in frame.columns]
+        if missing:
+            raise ValueError(f"Columns not found in the dataset: {missing}.")
+        if len(columns) > _PAIRWISE_TEST_MAX_COLUMNS:
+            raise ValueError(
+                f"At most {_PAIRWISE_TEST_MAX_COLUMNS} columns can be tested in one call."
+            )
+    series_by_column = {
+        column: series
+        for column in columns
+        for series in [_numeric_series(_column_series(frame, column), column_name=column)]
+        if series.dropna().nunique() > 1
+    }
+    if len(series_by_column) < 2:
+        raise ValueError(
+            "Correlation needs at least two non-constant numeric columns; "
+            f"got {len(series_by_column)} usable of {len(columns)} requested."
+        )
+    from scipy.stats import pearsonr
+
+    tested: list[dict[str, Any]] = []
+    p_values: list[float] = []
+    for column_a, column_b in combinations(series_by_column, 2):
+        paired = pd.DataFrame(
+            {
+                column_a: series_by_column[column_a],
+                column_b: series_by_column[column_b],
+            }
+        ).dropna()
+        if len(paired) < 3:
+            continue
+        paired_a = cast(pd.Series, paired[column_a])
+        paired_b = cast(pd.Series, paired[column_b])
+        if paired_a.nunique() < 2 or paired_b.nunique() < 2:
+            continue
+        with np.errstate(invalid="ignore", divide="ignore"):
+            test = cast(Any, pearsonr(paired_a.to_numpy(), paired_b.to_numpy()))
+        pearson = float(test.statistic)
+        p_value = float(test.pvalue)
+        if pd.isna(pearson) or pd.isna(p_value):
+            continue
+        tested.append(
+            {
+                "column_a": column_a,
+                "column_b": column_b,
+                "dataset": dataset_name,
+                "pearson": _round(pearson, digits=4),
+                "abs_pearson": _round(abs(pearson), digits=4),
+                "p_value": p_value,
+                "is_trivial_pair": _is_trivial_pair(
+                    column_a,
+                    column_b,
+                    paired,
+                    pearson=pearson,
+                ),
+                "pairwise_complete_n": int(len(paired)),
+                "excluded_pair_n": int(len(frame) - len(paired)),
+                "missing_policy": "pairwise_complete",
+            }
+        )
+        p_values.append(p_value)
+    if not tested:
+        raise ValueError("No column pair had enough pairwise-complete numeric rows to test.")
+
+    from statsmodels.stats.multitest import multipletests
+
+    _, adjusted, _, _ = multipletests(p_values, method=correction_method)
+    for row, adjusted_p in zip(tested, adjusted, strict=True):
+        row["adjusted_p"] = float(adjusted_p)
+        row["correction_method"] = correction_method
+        row["pairs_tested"] = len(tested)
+    tested.sort(key=lambda row: (-float(row["abs_pearson"]), str(row["column_a"])))
+    published = tested[:_PAIRWISE_TEST_MAX_PUBLISHED_ROWS]
+    return AnalysisTable(
+        dataset_id=dataset_id,
+        title=f"{dataset_name} - Correlation screen (multiplicity adjusted)",
+        kind="correlation",
+        description=(
+            f"Pearson correlations over {len(tested)} tested pairs in {dataset_name}; "
+            f"p-values adjusted with {correction_method} across every tested pair. "
+            f"Showing the {len(published)} strongest pairs."
+        ),
+        rows=published,
+    )
 
 
 def _association_table(

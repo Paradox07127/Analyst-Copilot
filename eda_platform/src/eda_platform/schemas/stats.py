@@ -8,6 +8,9 @@ StatTestType = Literal[
     "independent_t_test",
     "paired_t_test",
     "chi_square_independence",
+    # Never requested directly: the automatic small-expected-count fallback of
+    # chi_square_independence on 2x2 tables.
+    "fisher_exact",
     "one_way_anova",
     "welch_anova",
     "mann_whitney_u",
@@ -52,6 +55,10 @@ class StatTestResult(BaseModel):
     adjusted_p_value: float | None = None
     correction_method: Literal["bonferroni"] | None = None
     effect_size: float | None = None
+    # BCa bootstrap bounds for effect_size; None on legacy artifacts and when
+    # the bootstrap was not requested or not computable.
+    effect_ci_low: float | None = None
+    effect_ci_high: float | None = None
     degrees_of_freedom: int | None = None
     sample_size: int
     groups: dict[str, int] = Field(default_factory=dict)

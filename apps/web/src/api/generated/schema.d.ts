@@ -1128,6 +1128,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project_id}/skill-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Skill Templates
+         * @description Builtin seed templates plus this project's user templates, with a
+         *     source marker on each.
+         */
+        get: operations["list_skill_templates_api_v1_projects__project_id__skill_templates_get"];
+        put?: never;
+        /**
+         * Create Skill Template
+         * @description Save a user-defined SQL analysis template. The template_id is content-addressed, so re-POSTing an identical body returns the same template instead of creating a duplicate.
+         */
+        post: operations["create_skill_template_api_v1_projects__project_id__skill_templates_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project_id}/skill-templates/{template_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Skill Template
+         * @description Remove a user template. Builtin seed templates are not deletable (409).
+         */
+        delete: operations["delete_skill_template_api_v1_projects__project_id__skill_templates__template_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/skill-templates/{template_id}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Skill Template
+         * @description Bind a user template to one dataset of this run and save the result as a library skill — after trial-running the instantiated SQL for real, whose first-rows preview is returned. Builtin seeds keep their own import route under /skills.
+         */
+        post: operations["import_skill_template_api_v1_sessions__session_id__skill_templates__template_id__import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project_id}/skills/{skill_id}": {
         parameters: {
             query?: never;
@@ -2157,7 +2222,7 @@ export interface components {
          * ArtifactType
          * @enum {string}
          */
-        ArtifactType: "DatasetProfile" | "RawDatasetProfile" | "QualityIssueSet" | "QualityContextSet" | "ChartSpec" | "RawChartSpec" | "RawDataPreview" | "MarkdownReport" | "ReportBundle" | "ReportAudit" | "HtmlReport" | "SqlResult" | "CodeExecutionResult" | "PiiReport" | "ChatTurnPlan" | "Table" | "SessionSummary" | "RelationshipCandidateSet" | "RelationshipValidationSet" | "ErDiagram" | "ValueMap" | "QuestionCandidateSet" | "InvestigationPlan" | "InvestigationApproval" | "ValidatedFinding" | "InvestigationRecord" | "SynthesisBrief" | "DecisionReport" | "DeepInvestigationResult" | "DecisionCoverage" | "QuestionExecutionResult" | "CleaningRecipe" | "CleaningPreview" | "StatTestResult" | "ModelCard" | "AnomalyScreenResult" | "SessionMetrics" | "ResourcePreflight" | "ColumnRoleSet" | "EvidenceInterleaveTranscript" | "FollowUpProposalSet" | "LoopLedger" | "EdaHandoff" | "AgentHandoff";
+        ArtifactType: "DatasetProfile" | "RawDatasetProfile" | "QualityIssueSet" | "QualityContextSet" | "ChartSpec" | "RawChartSpec" | "RawDataPreview" | "MarkdownReport" | "ReportBundle" | "ReportAudit" | "HtmlReport" | "SqlResult" | "CodeExecutionResult" | "PiiReport" | "ChatTurnPlan" | "Table" | "SessionSummary" | "RelationshipCandidateSet" | "RelationshipValidationSet" | "ErDiagram" | "ValueMap" | "QuestionCandidateSet" | "InvestigationPlan" | "InvestigationApproval" | "ValidatedFinding" | "InvestigationRecord" | "SynthesisBrief" | "DecisionReport" | "DeepInvestigationResult" | "DecisionCoverage" | "QuestionExecutionResult" | "CleaningRecipe" | "CleaningPreview" | "StatTestResult" | "ModelCard" | "AnomalyScreenResult" | "SessionMetrics" | "ResourcePreflight" | "ColumnRoleSet" | "EvidenceInterleaveTranscript" | "FollowUpProposalSet" | "LoopLedger" | "EdaHandoff" | "AgentHandoff" | "EvidenceReceipt";
         /**
          * AutoEdaResourceUsage
          * @description Nested SessionMetrics v6 payload; defaults keep legacy runs readable.
@@ -7266,6 +7331,118 @@ export interface components {
             relation: string;
             /** Columns */
             columns?: components["schemas"]["SkillTargetColumn"][];
+        };
+        /**
+         * SkillTemplateBound
+         * @description A user template bound into a library skill, plus the trial-run preview
+         *     that proves the instantiated SQL really executes on the target dataset.
+         */
+        SkillTemplateBound: {
+            skill: components["schemas"]["SkillSummary"];
+            /** Row Count */
+            row_count: number;
+            /** Columns */
+            columns?: string[];
+            /** Rows Preview */
+            rows_preview?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /**
+         * SkillTemplateCreateRequest
+         * @description User-writable subset of a seed template; the id is server-generated.
+         */
+        SkillTemplateCreateRequest: {
+            /** Name */
+            name: string;
+            /** Question */
+            question: string;
+            /** Sql */
+            sql: string;
+            /** Method */
+            method: string;
+            /** Rationale */
+            rationale: string;
+            /** Params */
+            params: components["schemas"]["SkillTemplateParam"][];
+            /**
+             * When To Use
+             * @default
+             */
+            when_to_use: string;
+            /**
+             * When Not To Use
+             * @default
+             */
+            when_not_to_use: string;
+        };
+        /** SkillTemplateParam */
+        SkillTemplateParam: {
+            /** Name */
+            name: string;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "measure" | "dimension" | "timestamp" | "identifier" | "any";
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+        };
+        /**
+         * SkillTemplateView
+         * @description One SQL analysis template: a builtin seed or a user-defined one.
+         */
+        SkillTemplateView: {
+            /** Template Id */
+            template_id: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "builtin" | "user";
+            /** Name */
+            name: string;
+            /** Question */
+            question: string;
+            /** Sql */
+            sql: string;
+            /**
+             * Method
+             * @default
+             */
+            method: string;
+            /**
+             * Rationale
+             * @default
+             */
+            rationale: string;
+            /** Params */
+            params?: components["schemas"]["SkillParamSpec"][];
+            /**
+             * When To Use
+             * @default
+             */
+            when_to_use: string;
+            /**
+             * When Not To Use
+             * @default
+             */
+            when_not_to_use: string;
+        };
+        /** SkillTemplatesView */
+        SkillTemplatesView: {
+            /** Project Id */
+            project_id: string;
+            /** Templates */
+            templates?: components["schemas"]["SkillTemplateView"][];
         };
         /** SkillsView */
         SkillsView: {
@@ -12760,6 +12937,336 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SkillSummary"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_skill_templates_api_v1_projects__project_id__skill_templates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTemplatesView"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_skill_template_api_v1_projects__project_id__skill_templates_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response. */
+                "Idempotency-Key"?: string;
+            };
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillTemplateCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTemplateView"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_skill_template_api_v1_projects__project_id__skill_templates__template_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response. */
+                "Idempotency-Key"?: string;
+            };
+            path: {
+                project_id: string;
+                template_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    import_skill_template_api_v1_sessions__session_id__skill_templates__template_id__import_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response. */
+                "Idempotency-Key"?: string;
+            };
+            path: {
+                session_id: string;
+                template_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SeedImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTemplateBound"];
                 };
             };
             /** @description Remote deployment CSRF policy rejected the request. */

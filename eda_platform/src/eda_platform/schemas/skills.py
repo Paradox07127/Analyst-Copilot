@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from eda_platform.schemas.plans import AnalysisPlan
 
+SkillOrigin = Literal["builtin_seed", "frozen_plan", "user_template"]
+
+MAX_USAGE_HINT_CHARS = 500
+
 
 class AnalysisSkill(BaseModel):
     """A validated ``AnalysisPlan`` promoted to a named, reusable skill."""
@@ -27,6 +31,10 @@ class AnalysisSkill(BaseModel):
     skill_id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
     description: str = ""
+    # Default keeps pre-provenance skills.json entries loadable.
+    origin: SkillOrigin = "frozen_plan"
+    when_to_use: str = Field(default="", max_length=MAX_USAGE_HINT_CHARS)
+    when_not_to_use: str = Field(default="", max_length=MAX_USAGE_HINT_CHARS)
     plan: AnalysisPlan
     # Columns the frozen plan reads; every one must exist in a target dataset
     # before replay is allowed (checked with the shared tool_guard column gate).
@@ -80,6 +88,8 @@ class SeedSkillTemplate(BaseModel):
     rationale: str
     params: list[SeedParam] = Field(min_length=1)
     source_url: str = ""
+    when_to_use: str = Field(default="", max_length=MAX_USAGE_HINT_CHARS)
+    when_not_to_use: str = Field(default="", max_length=MAX_USAGE_HINT_CHARS)
 
     @field_validator("seed_id", "name", "question", "sql", "method", "rationale")
     @classmethod

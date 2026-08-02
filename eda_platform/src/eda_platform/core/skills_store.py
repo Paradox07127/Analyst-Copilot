@@ -11,10 +11,10 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from eda_platform.core.ids import make_artifact_id
+from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.tool_guard import GuardViolation, raise_for_violations
 from eda_platform.schemas.plans import AnalysisPlan
-from eda_platform.schemas.skills import AnalysisSkill, SeedSkillTemplate
+from eda_platform.schemas.skills import AnalysisSkill, SeedSkillTemplate, SkillOrigin
 
 
 class SkillLibrary(BaseModel):
@@ -69,6 +69,68 @@ def add_skill(project_dir: Path | str, skill: AnalysisSkill) -> list[AnalysisSki
     return skills
 
 
+# --- user-defined template library --------------------------------------------
+
+USER_TEMPLATE_ID_PREFIX = "tpl_"
+
+
+class TemplateLibrary(BaseModel):
+    """Versioned envelope for a project's user-defined seed templates."""
+
+    version: int = 1
+    templates: list[SeedSkillTemplate] = Field(default_factory=list)
+
+
+def _templates_path(project_dir: Path | str) -> Path:
+    return Path(project_dir) / "skills" / "templates.json"
+
+
+def user_template_id(template_fields: Mapping[str, object]) -> str:
+    """Content-addressed id: the same template body always maps to one id,
+    which makes POSTing it twice a no-op instead of a duplicate row."""
+    return USER_TEMPLATE_ID_PREFIX + stable_hash(dict(template_fields))
+
+
+def load_user_templates(project_dir: Path | str) -> list[SeedSkillTemplate]:
+    """Load a project's user templates; a missing/corrupt file yields []."""
+    path = _templates_path(project_dir)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    try:
+        return list(TemplateLibrary.model_validate(data).templates)
+    except (ValidationError, ValueError, TypeError):
+        return []
+
+
+def save_user_templates(project_dir: Path | str, templates: list[SeedSkillTemplate]) -> Path:
+    path = _templates_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    library = TemplateLibrary(templates=list(templates))
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(library.model_dump_json(indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+    return path
+
+
+def add_user_template(
+    project_dir: Path | str, template: SeedSkillTemplate
+) -> list[SeedSkillTemplate]:
+    """Append a template, idempotent on ``seed_id`` (re-adding replaces in place)."""
+    templates = load_user_templates(project_dir)
+    for index, existing in enumerate(templates):
+        if existing.seed_id == template.seed_id:
+            templates[index] = template
+            break
+    else:
+        templates.append(template)
+    save_user_templates(project_dir, templates)
+    return templates
+
+
 # --- builtin seed library ----------------------------------------------------
 
 _SEED_TOOL = "import_seed_skill"
@@ -113,6 +175,7 @@ def instantiate_seed(
     *,
     relation_name: str,
     bindings: Mapping[str, str],
+    origin: SkillOrigin = "builtin_seed",
 ) -> AnalysisSkill:
     """Bind a seed's placeholders to concrete columns, yielding a replayable skill.
 
@@ -150,6 +213,9 @@ def instantiate_seed(
         ),
         name=template.name,
         description=f"From seed '{template.seed_id}' on {relation_name} ({bound}).",
+        origin=origin,
+        when_to_use=template.when_to_use,
+        when_not_to_use=template.when_not_to_use,
         plan=plan,
         param_columns=columns,
         expected_datasets=[relation_name],
@@ -162,6 +228,7 @@ def import_seed(
     *,
     relation_name: str,
     bindings: Mapping[str, str],
+    origin: SkillOrigin = "builtin_seed",
 ) -> AnalysisSkill:
     """Instantiate a seed and persist it into the project skill library (idempotent).
 
@@ -175,7 +242,9 @@ def import_seed(
         raise ValueError(
             f"seed template '{template.seed_id}' is not instantiable: {exc}"
         ) from exc
-    skill = instantiate_seed(template, relation_name=relation_name, bindings=bindings)
+    skill = instantiate_seed(
+        template, relation_name=relation_name, bindings=bindings, origin=origin
+    )
     add_skill(project_dir, skill)
     return skill
 

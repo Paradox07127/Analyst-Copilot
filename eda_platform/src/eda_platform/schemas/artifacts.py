@@ -52,6 +52,7 @@ class ArtifactType(StrEnum):
     LOOP_LEDGER = "LoopLedger"
     EDA_HANDOFF = "EdaHandoff"
     AGENT_HANDOFF = "AgentHandoff"
+    EVIDENCE_RECEIPT = "EvidenceReceipt"
 
 
 class EvidenceRef(BaseModel):

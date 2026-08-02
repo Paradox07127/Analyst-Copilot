@@ -990,6 +990,37 @@ class SkillReplayStarted(BaseModel):
     job: JobCreated
 
 
+class SkillTemplateView(BaseModel):
+    """One SQL analysis template: a builtin seed or a user-defined one."""
+
+    template_id: str
+    source: Literal["builtin", "user"]
+    name: str
+    question: str
+    sql: str
+    method: str = ""
+    rationale: str = ""
+    params: list[SkillParamSpec] = Field(default_factory=list)
+    when_to_use: str = ""
+    when_not_to_use: str = ""
+
+
+class SkillTemplatesView(BaseModel):
+    project_id: str
+    templates: list[SkillTemplateView] = Field(default_factory=list)
+
+
+class SkillTemplateBound(BaseModel):
+    """A user template bound into a library skill, plus the trial-run preview
+    that proves the instantiated SQL really executes on the target dataset."""
+
+    skill: SkillSummary
+    row_count: int
+    columns: list[str] = Field(default_factory=list)
+    rows_preview: list[dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+
+
 class ChatMessageView(BaseModel):
     """One persisted transcript line. `seq` is the 0-based JSONL line index and
     doubles as the reverse-pagination cursor."""

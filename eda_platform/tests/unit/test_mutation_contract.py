@@ -50,8 +50,9 @@ def test_every_openapi_mutation_has_one_generated_policy(tmp_path: Path) -> None
     # The reviewed matrix contained 53 operations. Client-failure ingestion was
     # added afterwards (54), then project deletion (55), upload deletion (56),
     # the model-catalog refresh (57), then project and session rename (59),
-    # then project reorder (60).
-    assert len(operations) == 60
+    # then project reorder (60), then user skill templates (create/delete/
+    # import, 63).
+    assert len(operations) == 63
     operation_ids = {operation["operationId"] for operation in operations}
     assert operation_ids == (
         IDEMPOTENT_OPERATIONS | VERSIONED_OPERATIONS | INTRINSIC_OPERATIONS

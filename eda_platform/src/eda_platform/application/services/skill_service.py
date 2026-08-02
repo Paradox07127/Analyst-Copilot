@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from eda_platform.application.dto import (
     DatasetHandle,
@@ -30,6 +30,9 @@ from eda_platform.application.dto import (
     SkillsView,
     SkillTargetColumn,
     SkillTargetDataset,
+    SkillTemplateBound,
+    SkillTemplatesView,
+    SkillTemplateView,
 )
 from eda_platform.application.services.approval_service import (
     ApprovalService,
@@ -52,25 +55,31 @@ from eda_platform.core.ids import INTERNAL_SESSION_MARKER, stable_hash
 from eda_platform.core.query import UnsafeQueryError, validate_select_statement
 from eda_platform.core.skills_store import (
     add_skill,
+    add_user_template,
     import_seed,
     instantiate_seed,
     is_bindable_identifier,
     load_builtin_seeds,
     load_skills,
+    load_user_templates,
     save_skills,
+    save_user_templates,
     shown_identifier,
+    user_template_id,
 )
 from eda_platform.core.store import ArtifactStore
 from eda_platform.core.tool_guard import ToolGuardError
-from eda_platform.schemas.artifacts import Artifact, ArtifactType
+from eda_platform.schemas.artifacts import Artifact, ArtifactType, SqlResult
 from eda_platform.schemas.plans import AnalysisPlan
-from eda_platform.schemas.skills import AnalysisSkill, SeedSkillTemplate
+from eda_platform.schemas.skills import AnalysisSkill, SeedSkillTemplate, SkillOrigin
 from eda_platform.tools.sql_runner import relation_names_for, rewrite_relation_names
 
 APPROVAL_KIND_SKILL = "skill_replay"
 REPLAY_SESSION_PREFIX = "ssess_"
 SOURCE_LIBRARY = "library"
 SOURCE_SEED = "seed"
+TEMPLATE_SOURCE_BUILTIN: Literal["builtin"] = "builtin"
+TEMPLATE_SOURCE_USER: Literal["user"] = "user"
 MAX_SKILL_NAME_CHARS = 120
 MAX_SKILL_DESCRIPTION_CHARS = 1000
 # Artifact types whose payload is a frozen, already-validated AnalysisPlan.
@@ -123,6 +132,17 @@ class SkillPlanNotFoundError(SkillServiceError):
         super().__init__(f"No savable analysis plan in run {session_id}: {artifact_id}")
         self.artifact_id = artifact_id
         self.session_id = session_id
+
+
+class SkillTemplateNotFoundError(SkillServiceError):
+    def __init__(self, template_id: str, project_id: str) -> None:
+        super().__init__(f"No user template in project {project_id}: {template_id}")
+        self.template_id = template_id
+        self.project_id = project_id
+
+
+class SkillTrialRunFailedError(SkillServiceError):
+    """The instantiated SQL failed its trial execution, so binding is refused."""
 
 
 class SkillService:
@@ -300,6 +320,157 @@ class SkillService:
             skill = skill.model_copy(update={"name": name})
             add_skill(project_dir, skill)
         return _library_summary(skill)
+
+    def create_template(
+        self,
+        project_id: str,
+        *,
+        name: str,
+        question: str,
+        sql: str,
+        method: str,
+        rationale: str,
+        params: list[dict[str, str]],
+        when_to_use: str = "",
+        when_not_to_use: str = "",
+    ) -> SkillTemplateView:
+        """Save a user-defined SQL template; the id is content-addressed so
+        re-POSTing the same body returns the same template instead of a copy."""
+        self._require_project(project_id)
+        fields = {
+            "name": name,
+            "question": question,
+            "sql": sql,
+            "method": method,
+            "rationale": rationale,
+            "params": params,
+            "when_to_use": when_to_use,
+            "when_not_to_use": when_not_to_use,
+        }
+        try:
+            template = SeedSkillTemplate.model_validate(
+                {**fields, "seed_id": user_template_id(fields)}
+            )
+        except ValueError as exc:
+            raise SkillValidationError(f"Template is invalid: {exc}") from exc
+        add_user_template(self._store.project_dir(project_id), template)
+        return _template_view(template, TEMPLATE_SOURCE_USER)
+
+    def list_templates(self, project_id: str) -> SkillTemplatesView:
+        self._require_project(project_id)
+        return SkillTemplatesView(
+            project_id=project_id,
+            templates=[
+                *(_template_view(seed, TEMPLATE_SOURCE_BUILTIN) for seed in load_builtin_seeds()),
+                *(
+                    _template_view(template, TEMPLATE_SOURCE_USER)
+                    for template in load_user_templates(self._store.project_dir(project_id))
+                ),
+            ],
+        )
+
+    def delete_template(self, project_id: str, template_id: str) -> None:
+        self._require_project(project_id)
+        if any(seed.seed_id == template_id for seed in load_builtin_seeds()):
+            raise SkillNotDeletableError(template_id)
+        project_dir = self._store.project_dir(project_id)
+        templates = load_user_templates(project_dir)
+        remaining = [template for template in templates if template.seed_id != template_id]
+        if len(remaining) == len(templates):
+            raise SkillTemplateNotFoundError(template_id, project_id)
+        save_user_templates(project_dir, remaining)
+
+    def import_user_template(
+        self,
+        session_id: str,
+        template_id: str,
+        *,
+        dataset_ids: list[str],
+        bindings: dict[str, str],
+        name: str = "",
+    ) -> SkillTemplateBound:
+        """Bind a user template like ``import_seed_skill`` does for builtin
+        seeds, but additionally trial-run the instantiated SQL for real: a
+        template that cannot execute on the target never reaches the library."""
+        project_id = self._project_for_run(session_id)
+        name = name.strip()
+        if len(name) > MAX_SKILL_NAME_CHARS:
+            raise SkillValidationError(
+                f"A skill name is at most {MAX_SKILL_NAME_CHARS} characters."
+            )
+        project_dir = self._store.project_dir(project_id)
+        template = next(
+            (item for item in load_user_templates(project_dir) if item.seed_id == template_id),
+            None,
+        )
+        if template is None:
+            raise SkillTemplateNotFoundError(template_id, project_id)
+        targets = self._resolve_targets(session_id, dataset_ids)
+        relations = relation_names_for([handle.display_name for handle in targets])
+        instantiated = _instantiate_seed_for(
+            template, targets, relations, bindings, origin="user_template"
+        )
+        concrete = _validated_sql(instantiated)
+        trial = self._trial_run(concrete, targets[0], project_id, session_id)
+        try:
+            skill = import_seed(
+                project_dir,
+                template,
+                relation_name=relations[0],
+                bindings=bindings,
+                origin="user_template",
+            )
+        except (ToolGuardError, ValueError) as exc:
+            raise SkillBindingInvalidError(str(exc)) from exc
+        if name and name != skill.name:
+            skill = skill.model_copy(update={"name": name})
+            add_skill(project_dir, skill)
+        return SkillTemplateBound(
+            skill=_library_summary(skill),
+            row_count=trial.row_count,
+            columns=list(trial.columns),
+            rows_preview=list(trial.rows_preview),
+            truncated=trial.truncated,
+        )
+
+    def _trial_run(
+        self,
+        skill: AnalysisSkill,
+        target: DatasetHandle,
+        project_id: str,
+        session_id: str,
+    ) -> SqlResult:
+        """Execute the instantiated SQL once through the same read-only runner a
+        replay uses (10s timeout, 50-row preview); any failure refuses the bind."""
+        # Local imports: loader/sql_runner pull pandas, which the API process
+        # must not pay for just to start (same reason as save_skill).
+        from eda_platform.core.query import DuckDBQueryEngine
+        from eda_platform.tools.loader import load_csv
+        from eda_platform.tools.sql_runner import SqlCatalog, run_sql
+
+        if target.ingest_status != "ready" or not target.original_uri:
+            raise SkillTrialRunFailedError(
+                f"Source data for dataset {target.dataset_id} is unavailable, "
+                "so the template cannot be trial-run."
+            )
+        relation = skill.expected_datasets[0]
+        try:
+            loaded = load_csv(
+                self._store.root / target.original_uri, dataset_id=target.dataset_id
+            )
+            engine = DuckDBQueryEngine()
+            engine.register_frame(relation, loaded.frame)
+            catalog = SqlCatalog(engine=engine, relations={relation: relation})
+            artifact = run_sql(
+                catalog, skill.plan.sql, project_id=project_id, session_id=session_id
+            )
+        except Exception as exc:
+            raise SkillTrialRunFailedError(f"Trial execution failed: {exc}") from exc
+        return SqlResult.model_validate(artifact.payload)
+
+    def _require_project(self, project_id: str) -> None:
+        if not self._store.project_exists(project_id):
+            raise ProjectNotFoundError(project_id)
 
     def delete_skill(self, project_id: str, skill_id: str) -> None:
         if not self._store.project_exists(project_id):
@@ -660,6 +831,7 @@ def _instantiate_seed_for(
     targets: list[DatasetHandle],
     target_relations: list[str],
     bindings: dict[str, str],
+    origin: SkillOrigin = "builtin_seed",
 ) -> AnalysisSkill:
     if len(targets) != 1:
         raise SkillBindingInvalidError(
@@ -667,7 +839,9 @@ def _instantiate_seed_for(
         )
     _require_columns_present(list(bindings.values()), targets)
     try:
-        return instantiate_seed(seed, relation_name=target_relations[0], bindings=bindings)
+        return instantiate_seed(
+            seed, relation_name=target_relations[0], bindings=bindings, origin=origin
+        )
     except ToolGuardError as exc:
         raise SkillBindingInvalidError(str(exc)) from exc
 
@@ -753,6 +927,26 @@ def _library_summary(skill: AnalysisSkill) -> SkillSummary:
         expected_datasets=list(skill.expected_datasets),
         source_session_id=skill.source_session_id,
         created_at=skill.created_at,
+    )
+
+
+def _template_view(
+    template: SeedSkillTemplate, source: Literal["builtin", "user"]
+) -> SkillTemplateView:
+    return SkillTemplateView(
+        template_id=template.seed_id,
+        source=source,
+        name=template.name,
+        question=template.question,
+        sql=template.sql,
+        method=template.method,
+        rationale=template.rationale,
+        params=[
+            SkillParamSpec(name=param.name, role=param.role, description=param.description)
+            for param in template.params
+        ],
+        when_to_use=template.when_to_use,
+        when_not_to_use=template.when_not_to_use,
     )
 
 
