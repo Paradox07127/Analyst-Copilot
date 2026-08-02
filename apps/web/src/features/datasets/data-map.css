@@ -1,0 +1,50 @@
+.dataset-inventory {
+  container-type: inline-size;
+}
+
+.dataset-inventory-header {
+  display: none;
+}
+
+.dataset-inventory-row {
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, auto);
+}
+
+.dataset-inventory-actions {
+  grid-column: 1 / -1;
+}
+
+@container (max-width: 34rem) {
+  .dataset-inventory-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dataset-inventory-actions {
+    grid-column: auto;
+  }
+}
+
+@container (min-width: 52rem) {
+  .dataset-inventory-header,
+  .dataset-inventory-row {
+    grid-template-columns:
+      minmax(13rem, 1.5fr)
+      minmax(8rem, 0.75fr)
+      minmax(10rem, 1fr)
+      minmax(10rem, 1fr)
+      auto;
+  }
+
+  .dataset-inventory-header {
+    display: grid;
+  }
+
+  .dataset-inventory-row {
+    align-items: center;
+  }
+
+  .dataset-inventory-actions {
+    grid-column: auto;
+    justify-content: flex-end;
+  }
+}

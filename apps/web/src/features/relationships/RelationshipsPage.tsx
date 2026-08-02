@@ -1441,6 +1441,9 @@ export function Component() {
   }
 
   const nodes = graph.data.nodes ?? [];
+  const edges = graph.data.edges ?? [];
+  const pairCount = groupByPair(edges).length;
+  const confirmedCount = edges.filter((edge) => edgeState(edge) === "confirmed").length;
 
   return (
     <div className="mx-auto flex w-[95%] max-w-data h-full flex-col gap-4 p-6">
@@ -1448,8 +1451,19 @@ export function Component() {
         <SectionHeader
           level={1}
           title="Relationships"
-          description="Datasets stay separate until a join is confirmed. The canvas draws the table pairs that match the filter on the right; open a pair to pick a column candidate, see its evidence and promote it."
+          description="Discover and validate how tables connect. A candidate never becomes usable as a join until it is confirmed."
         />
+        <div className="flex flex-wrap items-center gap-2 rounded-base border border-border bg-surface px-3 py-2 text-sm">
+          <span className="font-medium">Relationship scope</span>
+          <span className="text-status-neutral">{nodes.length} tables</span>
+          <span aria-hidden className="text-status-neutral">·</span>
+          <span className="text-status-neutral">{pairCount} candidate {pairCount === 1 ? "pair" : "pairs"}</span>
+          <span aria-hidden className="text-status-neutral">·</span>
+          <span className="text-status-neutral">{confirmedCount} confirmed</span>
+          <Badge tone={graph.data.discovered ? "ok" : "neutral"}>
+            {graph.data.discovered ? "Discovery complete" : "Discovery not run"}
+          </Badge>
+        </div>
         <SearchCoverage graph={graph.data} />
       </header>
 

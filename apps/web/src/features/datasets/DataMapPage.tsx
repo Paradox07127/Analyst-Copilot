@@ -33,6 +33,7 @@ import {
   countColumnKinds,
   kindCompositionText,
 } from "./mini-charts";
+import "./data-map.css";
 
 const TERMINAL_SESSION_STATUSES = new Set([
   "complete",
@@ -237,7 +238,7 @@ function DatasetHealth({
   return <Badge tone="ok"><Dot tone="ok" />no issues</Badge>;
 }
 
-function DatasetCard({
+function DatasetOverviewRow({
   dataset,
   issues,
   qualityState,
@@ -259,52 +260,111 @@ function DatasetCard({
   const rows = dataset.row_count;
   const edited = isEditedDataset(dataset);
   return (
-    <Card className="flex flex-col gap-3 p-4">
-      <header className="flex items-start justify-between gap-2">
-        <h2 className="min-w-0 text-base font-semibold"><Marquee title={dataset.display_name}>{dataset.display_name}</Marquee></h2>
-        <DatasetHealth dataset={dataset} issues={issues} qualityState={qualityState} />
-      </header>
-      <div className="flex flex-wrap items-center gap-1.5">
-        {gate && <ReadinessBadge gate={gate} />}
-        <Badge
-          tone="brand"
-          title={rows == null ? "Row count is not available yet" : `${rows.toLocaleString()} rows`}
-        >
-          {rows == null ? "Rows unknown" : `${formatCompact(rows)} rows`}
-        </Badge>
-        <Badge tone="info">{columns.length} columns</Badge>
-        <Badge tone="neutral">{formatBytes(dataset.byte_size ?? 0)}</Badge>
-        <Badge tone="ok">{dataset.format.toUpperCase()}</Badge>
-        {gate && gate.piiColumns.length > 0 && (
-          <Badge
-            tone="warn"
-            title={`Values in these columns are masked in shared artifacts: ${gate.piiColumns.join(", ")}`}
-          >
-            {gate.piiColumns.length} PII column{gate.piiColumns.length > 1 ? "s" : ""}
-          </Badge>
-        )}
+    <article className="dataset-inventory-row grid min-w-0 gap-3 border-t border-hairline px-3 py-3 first:border-t-0">
+      <div className="min-w-0">
+        <h2 className="min-w-0 text-sm font-semibold">
+          <Marquee title={dataset.display_name}>{dataset.display_name}</Marquee>
+        </h2>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-status-neutral">
+          <span>{dataset.format.toUpperCase()}</span>
+          {edited && <Badge tone="brand">edited</Badge>}
+          {gate && gate.piiColumns.length > 0 && (
+            <Badge
+              tone="warn"
+              title={`Values in these columns are masked in shared artifacts: ${gate.piiColumns.join(", ")}`}
+            >
+              {gate.piiColumns.length} PII column{gate.piiColumns.length === 1 ? "" : "s"}
+            </Badge>
+          )}
+        </div>
       </div>
-      <div className="flex flex-col gap-1.5">
-        {edited && <Badge tone="brand">edited</Badge>}
+      <div className="flex flex-col gap-0.5 text-sm">
+        <span className="tabular font-medium">
+          <span>{rows == null ? "Rows unknown" : `${formatCompact(rows)} rows`}</span>
+          <span aria-hidden> · </span>
+          <span>{columns.length} columns</span>
+        </span>
+        <span className="text-xs text-status-neutral">
+          {formatBytes(dataset.byte_size ?? 0)}
+        </span>
+      </div>
+      <div className="flex min-w-0 flex-col gap-1.5">
         <KindCompositionBar counts={kinds} />
-        <p className="text-xs text-status-neutral">{composition}</p>
+        <p className="truncate text-xs text-status-neutral" title={composition}>
+          {composition}
+        </p>
       </div>
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <DatasetHealth dataset={dataset} issues={issues} qualityState={qualityState} />
+        {gate && <ReadinessBadge gate={gate} />}
+      </div>
+      <div className="dataset-inventory-actions flex flex-wrap items-center gap-2">
         <Link
           to={tablePath(projectId, sessionId, dataset.dataset_id)}
           aria-label={`Preview ${dataset.display_name}`}
-          className="inline-flex items-center rounded-base border border-border bg-bg px-2.5 py-1.5 text-sm font-medium hover:border-primary hover:text-primary"
+          className="inline-flex items-center rounded-base border border-border bg-bg px-2.5 py-1.5 text-xs font-medium hover:border-primary hover:text-primary"
         >
           Preview
         </Link>
         <Link
           to={sessionSectionPath(projectId, sessionId, "quality")}
-          className="inline-flex items-center rounded-base border border-border bg-bg px-2.5 py-1.5 text-sm font-medium hover:border-primary hover:text-primary"
+          className="inline-flex items-center rounded-base border border-border bg-bg px-2.5 py-1.5 text-xs font-medium hover:border-primary hover:text-primary"
         >
           Review quality
         </Link>
       </div>
-    </Card>
+    </article>
+  );
+}
+
+function DatasetOverview({
+  datasets,
+  issuesByDataset,
+  qualityState,
+  gates,
+  projectId,
+  sessionId,
+}: {
+  datasets: DatasetHandle[];
+  issuesByDataset: Map<string, QualityDatasetCard>;
+  qualityState: "loading" | "pending" | "available" | "unavailable";
+  gates: Map<string, DatasetGate>;
+  projectId: string;
+  sessionId: string;
+}) {
+  return (
+    <section aria-labelledby="table-inventory-heading" className="flex min-w-0 flex-col gap-2">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <SectionHeader
+          level={2}
+          title={<span id="table-inventory-heading">Table inventory</span>}
+          description="Scan shape, field mix and readiness here; open a focused workspace for row or issue details."
+        />
+        <span className="tabular text-xs text-status-neutral">
+          {datasets.length} {datasets.length === 1 ? "table" : "tables"}
+        </span>
+      </div>
+      <Card className="dataset-inventory min-w-0 overflow-hidden">
+        <div className="dataset-inventory-header gap-3 border-b border-table-border bg-table-header-bg px-3 py-2 text-xs font-medium text-status-neutral">
+          <span>Table</span>
+          <span>Shape</span>
+          <span>Field mix</span>
+          <span>Health & readiness</span>
+          <span className="text-right">Open</span>
+        </div>
+        {datasets.map((dataset) => (
+          <DatasetOverviewRow
+            key={dataset.dataset_id}
+            dataset={dataset}
+            issues={issuesByDataset.get(dataset.dataset_id) ?? issuesByDataset.get(dataset.display_name)}
+            qualityState={qualityState}
+            gate={gates.get(dataset.dataset_id)}
+            projectId={projectId}
+            sessionId={sessionId}
+          />
+        ))}
+      </Card>
+    </section>
   );
 }
 
@@ -381,9 +441,14 @@ export function Component() {
       {datasets.data && (datasets.data.length === 0 ? (
         sessionStillBuilding ? null : <EmptyState title="No datasets in this session" description="Upload data and start a session to see its datasets here." />
       ) : (
-        <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-          {datasets.data.map((dataset) => <DatasetCard key={dataset.dataset_id} dataset={dataset} issues={issuesByDataset.get(dataset.dataset_id) ?? issuesByDataset.get(dataset.display_name)} qualityState={qualityState} gate={gates.get(dataset.dataset_id)} projectId={projectId} sessionId={sessionId} />)}
-        </div>
+        <DatasetOverview
+          datasets={datasets.data}
+          issuesByDataset={issuesByDataset}
+          qualityState={qualityState}
+          gates={gates}
+          projectId={projectId}
+          sessionId={sessionId}
+        />
       ))}
     </div>
   );

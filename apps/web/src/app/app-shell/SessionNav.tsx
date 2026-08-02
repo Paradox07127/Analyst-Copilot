@@ -71,9 +71,9 @@ function useNavGroups(
             ]
           : []),
         { label: "Quality", icon: "rule", to: at("quality") },
-        { label: "Profiles & charts", icon: "chart", to: at("profiles") },
+        { label: "Profiles & charts", icon: "profile", to: at("profiles") },
         {
-          label: "Cleaning info and raw data",
+          label: "Cleanup",
           icon: "cleaning",
           to: at("cleaning"),
         },

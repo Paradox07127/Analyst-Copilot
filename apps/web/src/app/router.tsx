@@ -135,6 +135,13 @@ export const routes: RouteObject[] = [
             lazy: () => import("../features/insights/ProfilesPage"),
           },
           {
+            path: "charts",
+            lazy: () =>
+              import("../features/insights/ProfilesPage").then((module) => ({
+                Component: module.ChartsComponent,
+              })),
+          },
+          {
             path: "relationships",
             lazy: () => import("../features/relationships/RelationshipsPage"),
           },

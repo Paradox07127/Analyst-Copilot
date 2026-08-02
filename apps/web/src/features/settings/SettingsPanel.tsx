@@ -314,7 +314,6 @@ function ModelApiSection({
               {providers.map((item) => (
                 <option key={item.provider} value={item.provider}>
                   {item.display_name}
-                  {item.agent_model_count === 0 ? " (no pre-verified model)" : ""}
                 </option>
               ))}
             </select>

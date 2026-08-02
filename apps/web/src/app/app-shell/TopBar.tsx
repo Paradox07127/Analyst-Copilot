@@ -58,7 +58,7 @@ function jobKindLabel(kind: string | undefined): string {
   if (kind === "auto_eda") return "EDA";
   if (kind === "report_generate") return "Report";
   if (kind === "question_exec") return "Question";
-  if (kind === "cleaning_apply" || kind === "cleaning_preview") return "Cleaning";
+  if (kind === "cleaning_apply" || kind === "cleaning_preview") return "Cleanup";
   return kind ? "Task" : "Job";
 }
 

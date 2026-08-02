@@ -128,7 +128,7 @@ function PreviewCard({ result }: { result: CleaningPreviewResult }) {
   return (
     <Card
       as="section"
-      aria-label="Cleaning preview"
+      aria-label="Cleanup preview"
       tone="brand"
       className="flex flex-col gap-3 p-4"
     >
@@ -187,7 +187,7 @@ function PageHeading() {
   return (
     <SectionHeader
       level={1}
-      title="Cleaning"
+      title="Cleanup"
       description="Review a suggested recipe, preview its impact, then explicitly authorize a cleaned copy and a new analysis run. The current data is never overwritten."
     />
   );
@@ -309,7 +309,7 @@ export function Component() {
         <PageHeading />
         <EmptyState
           title="No datasets in this session"
-          description="This run has no ingested table to preview. Start another analysis with at least one CSV, then return to Cleaning."
+          description="This run has no ingested table to preview. Start another analysis with at least one CSV, then return to Cleanup."
         />
       </div>
     );
@@ -320,7 +320,7 @@ export function Component() {
       <PageHeading />
 
       <StepChain
-        label="Cleaning steps"
+        label="Cleanup steps"
         steps={CLEANING_STAGES}
         current={stage}
       />

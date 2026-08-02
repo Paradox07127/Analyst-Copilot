@@ -14,7 +14,7 @@ const GROUPS: Record<string, string[]> = {
     "Table preview",
     "Quality",
     "Profiles & charts",
-    "Cleaning info and raw data",
+    "Cleanup",
     "Relationships",
     "Knowledge",
   ],

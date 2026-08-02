@@ -81,7 +81,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleaning" });
+    await screen.findByRole("heading", { name: "Cleanup" });
     expect(screen.getByText(/2 selected · 1 can delete rows/)).toBeInTheDocument();
     await user.click(
       screen.getByLabelText(/Drop rows with missing values/),
@@ -115,8 +115,8 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleaning" });
-    const stages = screen.getByRole("list", { name: "Cleaning steps" });
+    await screen.findByRole("heading", { name: "Cleanup" });
+    const stages = screen.getByRole("list", { name: "Cleanup steps" });
     expect(within(stages).getAllByRole("listitem")).toHaveLength(4);
     expect(within(stages).getByText("Confirm apply")).toBeInTheDocument();
     expect(
@@ -178,7 +178,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleaning" });
+    await screen.findByRole("heading", { name: "Cleanup" });
     await user.click(screen.getByRole("button", { name: "Preview cleaning" }));
     await user.click(
       await screen.findByRole("button", { name: "Review and confirm" }),
@@ -218,7 +218,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleaning" });
+    await screen.findByRole("heading", { name: "Cleanup" });
     await user.click(screen.getByRole("button", { name: "Preview cleaning" }));
     await user.click(
       await screen.findByRole("button", { name: "Review and confirm" }),
@@ -266,7 +266,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleaning" });
+    await screen.findByRole("heading", { name: "Cleanup" });
     await user.click(screen.getByRole("button", { name: "Preview cleaning" }));
     await user.click(
       await screen.findByRole("button", { name: "Review and confirm" }),
