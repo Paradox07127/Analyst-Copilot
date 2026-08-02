@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "./msw/server";
@@ -7,7 +7,7 @@ import {
   queueDataOperation,
   queueFailedDataOperation,
 } from "./msw/handlers";
-import { renderAppAt } from "./render";
+import { renderAppAt, renderAppWithRouterAt } from "./render";
 
 /* vega-embed does real DOM measurement/canvas work jsdom cannot do; the mock
  * just records the spec so the raw-chart test can assert VegaChart was used
@@ -27,6 +27,29 @@ beforeEach(() => {
 const PAGE_PATH = "/projects/p1/sessions/r1/cleaning";
 
 describe("Cleaning page", () => {
+  it("keeps dataset scope in the URL and blocks an empty recipe", async () => {
+    const user = userEvent.setup();
+    const { router } = renderAppWithRouterAt(PAGE_PATH);
+
+    const dataset = await screen.findByLabelText("Dataset");
+    expect(dataset).toHaveValue("sample");
+    await waitFor(() =>
+      expect(new URLSearchParams(router.state.location.search).get("dataset")).toBe(
+        "sample",
+      ),
+    );
+
+    await user.click(screen.getByLabelText(/Trim whitespace/));
+    await user.click(screen.getByLabelText(/Drop duplicate rows/));
+    expect(screen.getByText(/0 selected/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Preview cleaning" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Select at least one operation to preview."),
+    ).toBeInTheDocument();
+  });
+
   it("previews a recipe and renders the diff, operations, and lossy badges", async () => {
     let previewBody: Record<string, unknown> | null = null;
     server.use(
@@ -81,7 +104,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleanup" });
+    await screen.findByRole("button", { name: "Preview cleaning" });
     expect(screen.getByText(/2 selected · 1 can delete rows/)).toBeInTheDocument();
     await user.click(
       screen.getByLabelText(/Drop rows with missing values/),
@@ -115,7 +138,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleanup" });
+    await screen.findByRole("button", { name: "Preview cleaning" });
     const stages = screen.getByRole("list", { name: "Cleanup steps" });
     expect(within(stages).getAllByRole("listitem")).toHaveLength(4);
     expect(within(stages).getByText("Confirm apply")).toBeInTheDocument();
@@ -178,7 +201,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleanup" });
+    await screen.findByRole("button", { name: "Preview cleaning" });
     await user.click(screen.getByRole("button", { name: "Preview cleaning" }));
     await user.click(
       await screen.findByRole("button", { name: "Review and confirm" }),
@@ -218,7 +241,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleanup" });
+    await screen.findByRole("button", { name: "Preview cleaning" });
     await user.click(screen.getByRole("button", { name: "Preview cleaning" }));
     await user.click(
       await screen.findByRole("button", { name: "Review and confirm" }),
@@ -266,7 +289,7 @@ describe("Cleaning page", () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
 
-    await screen.findByRole("heading", { name: "Cleanup" });
+    await screen.findByRole("button", { name: "Preview cleaning" });
     await user.click(screen.getByRole("button", { name: "Preview cleaning" }));
     await user.click(
       await screen.findByRole("button", { name: "Review and confirm" }),

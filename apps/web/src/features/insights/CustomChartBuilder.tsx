@@ -7,7 +7,7 @@ import {
   type CustomChartRequest,
   type DatasetColumn,
 } from "../../api/client";
-import { useBuildCustomChart, useDatasets, useDatasetSchema } from "../../api/hooks";
+import { useBuildCustomChart, useDatasetSchema } from "../../api/hooks";
 import {
   EmptyState,
   ErrorState,
@@ -295,81 +295,34 @@ function DatasetGate({
   );
 }
 
-/* Dataset labels: only same-named datasets
- * get an id suffix, so the common case never shows raw ids. */
-function datasetOptionLabel(
-  dataset: { dataset_id: string; display_name: string },
-  all: readonly { display_name: string }[],
-): string {
-  const duplicated =
-    all.filter((other) => other.display_name === dataset.display_name).length > 1;
-  return duplicated
-    ? `${dataset.display_name} (${dataset.dataset_id.slice(-6)})`
-    : dataset.display_name;
-}
-
 function CustomChartForm({
   sessionId,
   projectId,
-  datasetId: controlledDatasetId,
+  datasetId,
+  datasetName,
+  rowCount,
 }: {
   sessionId: string;
   projectId: string;
-  datasetId?: string;
+  datasetId: string;
+  datasetName: string;
+  rowCount: number;
 }) {
-  const datasets = useDatasets(sessionId);
-  const [localDatasetId, setLocalDatasetId] = useState("");
-  const options = datasets.data ?? [];
-  const datasetId = controlledDatasetId ?? localDatasetId;
-
-  useEffect(() => {
-    if (!controlledDatasetId && !localDatasetId && options.length > 0) {
-      setLocalDatasetId(options[0]!.dataset_id);
-    }
-  }, [controlledDatasetId, localDatasetId, options]);
-
-  if (datasets.isPending) {
-    return <LoadingSkeleton lines={3} label="Loading datasets" />;
-  }
-  if (datasets.isError) {
-    return <ErrorState error={datasets.error} onRetry={() => datasets.refetch()} />;
-  }
-  if (options.length === 0) return null;
-
-  const selected = options.find((d) => d.dataset_id === datasetId) ?? options[0]!;
-
   return (
     <div className="flex flex-col gap-3 border-t border-hairline px-4 py-3">
-      {controlledDatasetId ? (
-        <p className="text-xs text-status-neutral">
-          Building from <span className="font-medium text-text">{selected.display_name}</span>, the dataset selected above.
-        </p>
-      ) : (
-        <label className="flex min-w-0 flex-col gap-1 text-sm sm:max-w-sm">
-          <span className="text-status-neutral">Dataset</span>
-          <select
-            value={selected.dataset_id}
-            onChange={(event) => setLocalDatasetId(event.target.value)}
-            className={selectClass}
-          >
-            {options.map((dataset) => (
-              <option key={dataset.dataset_id} value={dataset.dataset_id}>
-                {datasetOptionLabel(dataset, options)}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {selected.row_count === 0 ? (
+      <p className="text-xs text-status-neutral">
+        Building from <span className="font-medium text-text">{datasetName}</span>, the dataset selected above.
+      </p>
+      {rowCount === 0 ? (
         <p className="text-sm text-status-neutral">
           The selected dataset has no rows or columns to chart.
         </p>
       ) : (
         <DatasetGate
-          key={selected.dataset_id}
+          key={datasetId}
           sessionId={sessionId}
           projectId={projectId}
-          datasetId={selected.dataset_id}
+          datasetId={datasetId}
         />
       )}
     </div>
@@ -380,41 +333,36 @@ export function CustomChartBuilder({
   sessionId,
   projectId,
   datasetId,
+  datasetName,
+  rowCount,
 }: {
   sessionId: string;
   projectId: string;
-  datasetId?: string;
+  datasetId: string;
+  datasetName: string;
+  rowCount: number;
 }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="overflow-hidden rounded-base border border-border bg-bg">
-      <div className="flex flex-wrap items-center justify-between gap-3 p-4">
-        <div className="min-w-0">
-          <h3 id="custom-chart-heading" className="text-sm font-semibold">
-            Build a custom chart
-          </h3>
-          <p className="mt-0.5 text-xs text-status-neutral">
-            Choose fields and aggregation only when the generated charts do not
-            answer the question.
-          </p>
-        </div>
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-controls="custom-chart-form"
-          onClick={() => setExpanded((current) => !current)}
-          className="shrink-0 rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface"
-        >
-          {expanded ? "Close builder" : "Open builder"}
-        </button>
-      </div>
+    <div className="flex flex-col gap-3">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls="custom-chart-form"
+        onClick={() => setExpanded((current) => !current)}
+        className="w-full rounded-base border border-border px-3 py-2 text-sm font-medium hover:bg-surface"
+      >
+        {expanded ? "Close builder" : "Build a custom chart"}
+      </button>
       {expanded && (
-        <div id="custom-chart-form">
+        <div id="custom-chart-form" className="overflow-hidden rounded-base border border-border bg-bg">
           <CustomChartForm
             sessionId={sessionId}
             projectId={projectId}
             datasetId={datasetId}
+            datasetName={datasetName}
+            rowCount={rowCount}
           />
         </div>
       )}

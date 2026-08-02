@@ -10,6 +10,13 @@
   grid-template-columns: minmax(0, 1fr) minmax(8rem, auto);
 }
 
+/* The card is a compact table, not a stack of unrelated cards. A restrained
+ * alternate surface makes a long inventory scannable without competing with
+ * readiness colours or the field-mix bars. */
+.dataset-inventory-row:nth-of-type(even) {
+  background-color: color-mix(in srgb, var(--color-code-bg) 45%, transparent);
+}
+
 .dataset-inventory-actions {
   grid-column: 1 / -1;
 }

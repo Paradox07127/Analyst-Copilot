@@ -36,8 +36,14 @@ import {
   Disclosure,
   Hint,
   Marquee,
+  MetricStrip,
+  MetricTile,
   SectionHeader,
 } from "../../components/ui";
+import {
+  DataWorkspacePage,
+  SegmentedControl,
+} from "../../components/data-workspace";
 
 const JOIN_STATUS_STYLE: Record<string, string> = {
   confirmed: "bg-status-ok/15 text-status-ok",
@@ -1093,13 +1099,33 @@ export function Component() {
   const [editingKey, setEditingKey] = useState<string | null>(null);
 
   if (semantic.isPending) {
-    return <LoadingSkeleton lines={4} label="Loading knowledge" />;
+    return (
+      <DataWorkspacePage
+        title={
+          <>
+            <span aria-hidden>Knowledge</span>
+            <span className="sr-only">Loading knowledge</span>
+          </>
+        }
+        description="Review and maintain the project-wide facts the agent is allowed to reuse across analyses."
+      >
+        <LoadingSkeleton lines={4} label="Loading knowledge" />
+      </DataWorkspacePage>
+    );
   }
   if (semantic.isError) {
     return (
-      <div className="p-6">
+      <DataWorkspacePage
+        title={
+          <>
+            <span aria-hidden>Knowledge</span>
+            <span className="sr-only">Knowledge unavailable</span>
+          </>
+        }
+        description="Review and maintain the project-wide facts the agent is allowed to reuse across analyses."
+      >
         <ErrorState error={semantic.error} onRetry={() => semantic.refetch()} />
-      </div>
+      </DataWorkspacePage>
     );
   }
   const pages = semantic.data.pages;
@@ -1129,66 +1155,57 @@ export function Component() {
     (datasets.data ?? []).map((dataset) => dataset.display_name),
   );
   const { inRun, elsewhere } = partitionProposals(proposals, runDatasetNames);
+  const definitionCount =
+    (mergedView.metric_definitions?.length ?? 0) +
+    (mergedView.entity_notes?.length ?? 0) +
+    (mergedView.verified_answers?.length ?? 0);
 
   return (
-    <div className="mx-auto flex w-[95%] max-w-data min-w-0 flex-col gap-5 p-6">
-      <SectionHeader
-        level={1}
-        title="Knowledge"
-        description="Review and maintain the project-wide facts the agent is allowed to reuse across analyses."
-        actions={<Badge tone="bg-primary/15 text-primary">project-wide</Badge>}
+    <DataWorkspacePage
+      title="Knowledge"
+      description="Review and maintain the project-wide facts the agent is allowed to reuse across analyses."
+      actions={<Badge tone="bg-primary/15 text-primary">project-wide</Badge>}
+    >
+      <MetricStrip>
+        <MetricTile
+          label="Session datasets"
+          value={datasets.isPending ? "…" : runDatasetNames.size.toLocaleString()}
+          hint="Suggestions from other project datasets remain separated below."
+        />
+        <MetricTile
+          label="Field meanings"
+          value={(mergedView.field_meanings?.length ?? 0).toLocaleString()}
+        />
+        <MetricTile
+          label="Business definitions"
+          value={definitionCount.toLocaleString()}
+          hint="Metric definitions, entity notes and verified answers."
+        />
+        <MetricTile
+          label="Verified relations"
+          value={relations.length.toLocaleString()}
+        />
+        <MetricTile
+          label="Pending suggestions"
+          value={inRun.length.toLocaleString()}
+          tone={inRun.length > 0 ? "warn" : "neutral"}
+          hint="Meaning suggestions for datasets loaded by this session."
+        />
+      </MetricStrip>
+
+      <SegmentedControl
+        label="Knowledge tasks"
+        value={activeView}
+        options={KNOWLEDGE_VIEWS.map((item) => ({
+          value: item.id,
+          label: item.label,
+        }))}
+        onChange={(value) => setViewParam(value)}
       />
-
-      <div className="grid gap-2 rounded-base border border-border bg-surface p-3 sm:grid-cols-2">
-        <div className="min-w-0">
-          <p className="text-xs font-medium">Project knowledge</p>
-          <p className="mt-0.5 text-xs text-status-neutral">
-            Accepted meanings, definitions and join rules apply to every
-            analysis in this project.
-          </p>
-        </div>
-        <div className="min-w-0 border-t border-hairline pt-2 sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0">
-          <p className="text-xs font-medium">Current session lens</p>
-          <p className="mt-0.5 text-xs text-status-neutral">
-            {datasets.isPending
-              ? "Resolving the datasets loaded by this session…"
-              : `${runDatasetNames.size} loaded dataset${
-                  runDatasetNames.size === 1 ? "" : "s"
-                }; project-only suggestions stay separated.`}
-          </p>
-        </div>
-      </div>
-
-      <div
-        role="tablist"
-        aria-label="Knowledge tasks"
-        className="grid grid-cols-3 gap-1 rounded-base border border-border bg-surface p-1 sm:flex sm:w-fit"
-      >
-        {KNOWLEDGE_VIEWS.map((item) => (
-          <button
-            key={item.id}
-            id={`knowledge-${item.id}-tab`}
-            type="button"
-            role="tab"
-            aria-selected={activeView === item.id}
-            aria-controls={`knowledge-${item.id}-panel`}
-            onClick={() => setViewParam(item.id)}
-            className={`min-w-0 rounded-base px-2 py-1.5 text-xs font-medium sm:px-3 sm:text-sm ${
-              activeView === item.id
-                ? "bg-bg text-text shadow-sm"
-                : "text-status-neutral hover:text-text"
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
 
       {activeView === "meanings" && (
         <section
-          id="knowledge-meanings-panel"
-          role="tabpanel"
-          aria-labelledby="knowledge-meanings-tab"
+          aria-label="Meanings review"
           className="flex min-w-0 flex-col gap-6"
         >
           <SectionHeader
@@ -1302,9 +1319,7 @@ export function Component() {
 
       {activeView === "definitions" && (
         <section
-          id="knowledge-definitions-panel"
-          role="tabpanel"
-          aria-labelledby="knowledge-definitions-tab"
+          aria-label="Business definitions"
           className="flex min-w-0 flex-col gap-6"
         >
           <SectionHeader
@@ -1325,9 +1340,7 @@ export function Component() {
 
       {activeView === "joins" && (
         <section
-          id="knowledge-joins-panel"
-          role="tabpanel"
-          aria-labelledby="knowledge-joins-tab"
+          aria-label="Join policy"
           className="flex min-w-0 flex-col gap-6"
         >
           <SectionHeader
@@ -1376,7 +1389,7 @@ export function Component() {
           </section>
         </section>
       )}
-    </div>
+    </DataWorkspacePage>
   );
 }
 

@@ -335,15 +335,18 @@ function DatasetOverview({
 }) {
   return (
     <section aria-labelledby="table-inventory-heading" className="flex min-w-0 flex-col gap-2">
-      <div className="flex flex-wrap items-end justify-between gap-2">
+      <div className="flex min-w-0">
         <SectionHeader
           level={2}
-          title={<span id="table-inventory-heading">Table inventory</span>}
-          description="Scan shape, field mix and readiness here; open a focused workspace for row or issue details."
+          title={
+            <span id="table-inventory-heading" className="flex flex-wrap items-baseline gap-x-2">
+              <span>Table inventory</span>
+              <span className="tabular text-sm font-normal text-status-neutral">
+                {datasets.length} {datasets.length === 1 ? "table" : "tables"}
+              </span>
+            </span>
+          }
         />
-        <span className="tabular text-xs text-status-neutral">
-          {datasets.length} {datasets.length === 1 ? "table" : "tables"}
-        </span>
       </div>
       <Card className="dataset-inventory min-w-0 overflow-hidden">
         <div className="dataset-inventory-header gap-3 border-b border-table-border bg-table-header-bg px-3 py-2 text-xs font-medium text-status-neutral">

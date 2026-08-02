@@ -41,6 +41,11 @@
   opacity: 0.4;
 }
 
+.relationships-flow .react-flow__node.rel-node-focus {
+  opacity: 1;
+  box-shadow: 0 0 0 2px var(--color-primary);
+}
+
 .relationships-flow .react-flow__node {
   padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
   font-size: var(--text-xs);
@@ -51,18 +56,23 @@
 }
 
 /* The session shell can make this page substantially narrower than the
- * viewport. Let the workbench respond to its own available width: the review
- * queue leads on a narrow panel, while the evidence canvas leads once both
- * columns have enough room. */
+ * viewport. Let the workbench respond to its own available width. The graph is
+ * the primary evidence and therefore remains first on a narrow split; the
+ * review queue moves beside it only when both panes have useful room. */
 .relationship-workbench {
   container-type: inline-size;
 }
 
 .relationship-workbench-layout {
   grid-template-areas:
-    "review"
-    "graph";
+    "main"
+    "review";
   grid-template-columns: minmax(0, 1fr);
+}
+
+.relationship-main {
+  grid-area: main;
+  min-height: 28rem;
 }
 
 .relationship-review {
@@ -70,13 +80,55 @@
 }
 
 .relationship-graph-pane {
-  grid-area: graph;
   min-height: 28rem;
+  height: 100%;
 }
 
-@container (min-width: 58rem) {
+.relationship-overview-pane {
+  min-height: 34rem;
+}
+
+.relationship-matrix-pane {
+  max-height: clamp(30rem, calc(100dvh - 16rem), 44rem);
+}
+
+.relationship-matrix tbody tr:nth-child(even) > th {
+  background: color-mix(in srgb, var(--color-code-bg) 35%, var(--color-bg));
+}
+
+.relationship-matrix td button {
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.relationship-toolbar select:focus-visible,
+.relationship-matrix button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+@container (min-width: 52rem) {
   .relationship-workbench-layout {
-    grid-template-areas: "graph review";
-    grid-template-columns: minmax(0, 1fr) minmax(20rem, 23rem);
+    grid-template-areas: "main review";
+    grid-template-columns: minmax(0, 1fr) minmax(21rem, 25rem);
+    block-size: clamp(34rem, calc(100dvh - 14rem), 42rem);
+  }
+
+  .relationship-main,
+  .relationship-review {
+    max-height: 100%;
+  }
+}
+
+@container (max-width: 38rem) {
+  .relationship-toolbar {
+    align-items: stretch;
+  }
+
+  .relationship-toolbar > label,
+  .relationship-toolbar select {
+    width: 100%;
+    max-width: none;
   }
 }

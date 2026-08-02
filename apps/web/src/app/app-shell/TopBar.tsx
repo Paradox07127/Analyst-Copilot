@@ -116,8 +116,8 @@ function detailFromSummary(snapshot: JobActivitySnapshot | undefined): string | 
  * layout contexts, even with a high local z-index. This portal has a single,
  * documented layer in the viewport instead:
  *
- *   base content / session navigation (0) < top bar (20) < Activity (40)
- *   < header tooltip (45) < modal dialogs (50).
+ *   base content (0) < top bar (20) < session navigation (30)
+ *   < Activity (40) < header tooltip (45) < modal dialogs (50).
  *
  * It is intentionally pointer-events-none: a hover card explains the status;
  * it must not steal focus or block the navigation below it. */

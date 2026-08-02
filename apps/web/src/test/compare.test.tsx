@@ -462,7 +462,16 @@ describe("Compare page", () => {
       await within(rightPane).findByRole("heading", { name: "Report" }),
     ).toBeInTheDocument();
 
-    await user.click(within(leftPane).getByRole("button", { name: "Trust & trace" }));
+    await user.click(
+      within(leftPane).getByRole("button", {
+        name: "Investigate with the agent",
+      }),
+    );
+    await user.click(
+      within(leftPane).getByRole("button", {
+        name: "Show Trust & trace pages",
+      }),
+    );
     await user.click(within(leftPane).getByRole("link", { name: "Artifacts" }));
     await waitFor(() => {
       const params = new URLSearchParams(router.state.location.search);

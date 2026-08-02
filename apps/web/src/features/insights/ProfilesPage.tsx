@@ -85,6 +85,7 @@ function emptyColumnCount(profile: DatasetProfileSummary): number {
 }
 
 const FIELD_ROW_HEIGHT = 40;
+const CHART_RENDER_BATCH_SIZE = 6;
 
 function FieldTable({
   fields,
@@ -599,11 +600,13 @@ function ChartCard({
 }
 
 function ChartGroupSection({
-  group,
+  charts,
+  chartCount,
   sessionId,
   onZoom,
 }: {
-  group: ChartDatasetGroup;
+  charts: ChartSummary[];
+  chartCount: number;
   sessionId: string;
   onZoom: (chart: ChartSummary) => void;
 }) {
@@ -612,12 +615,12 @@ function ChartGroupSection({
       <header className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <h3 className="text-sm font-semibold">Analytical charts</h3>
         <span className="tabular text-xs text-status-neutral">
-          {group.analyticalCharts.length} analytical chart{group.analyticalCharts.length === 1 ? "" : "s"}
+          {chartCount} analytical chart{chartCount === 1 ? "" : "s"}
         </span>
       </header>
-      {group.analyticalCharts.length > 1 ? (
+      {charts.length > 1 ? (
         <div className="grid gap-3 @4xl/data-page:grid-cols-2">
-          {group.analyticalCharts.map((chart) => (
+          {charts.map((chart) => (
             <ChartCard
               key={chart.artifact_id}
               chart={chart}
@@ -628,9 +631,9 @@ function ChartGroupSection({
         </div>
       ) : (
         <ChartCard
-          chart={group.analyticalCharts[0]!}
+          chart={charts[0]!}
           sessionId={sessionId}
-          onZoom={() => onZoom(group.analyticalCharts[0]!)}
+          onZoom={() => onZoom(charts[0]!)}
         />
       )}
     </section>
@@ -876,6 +879,7 @@ function DatasetInsightsWorkspace({
   const charts = useCharts(sessionId);
   const quality = useQuality(sessionId);
   const [zoomed, setZoomed] = useState<ChartSummary | null>(null);
+  const [visibleChartCount, setVisibleChartCount] = useState(CHART_RENDER_BATCH_SIZE);
   const [datasetParam, setDatasetParam] = useRouteSearchParam("dataset");
   const [viewParam, setViewParam] = useRouteSearchParam("view");
   const [splitParam, setSplitParam] = useRouteSearchParam("split");
@@ -903,6 +907,8 @@ function DatasetInsightsWorkspace({
       diagnosticCharts: [],
     };
   const activeView = viewParam === "charts" ? "charts" : "profiles";
+  const visibleCharts = selectedGroup.analyticalCharts.slice(0, visibleChartCount);
+  const hasMoreVisibleCharts = selectedGroup.analyticalCharts.length > visibleChartCount;
   const selectedMissingness = missingnessSummary(
     (quality.data?.issues ?? []).filter(
       (issue) => issue.dataset_id === selectedDatasetId,
@@ -934,6 +940,10 @@ function DatasetInsightsWorkspace({
     splitLeft,
     splitRight,
   ]);
+
+  useEffect(() => {
+    setVisibleChartCount(CHART_RENDER_BATCH_SIZE);
+  }, [selectedDatasetId]);
 
   const splitPair =
     splitLeft &&
@@ -1002,12 +1012,8 @@ function DatasetInsightsWorkspace({
           />
         </section>
       ) : (
-        <section role="tabpanel" aria-label="Charts" className="flex min-w-0 flex-col gap-4">
-          <CustomChartBuilder
-            sessionId={sessionId}
-            projectId={projectId}
-            datasetId={selectedDatasetId}
-          />
+        <section role="tabpanel" aria-label="Charts" className="grid min-w-0 gap-4 @5xl/data-page:grid-cols-[minmax(0,1fr)_12rem]">
+          <div className="order-2 flex min-w-0 flex-col gap-4 @5xl/data-page:order-1">
           {charts.data && initialSplitPair && !splitPair && (
             <button
               type="button"
@@ -1044,24 +1050,40 @@ function DatasetInsightsWorkspace({
           {charts.isError && (
             <ErrorState error={charts.error} onRetry={() => charts.refetch()} />
           )}
-          {charts.data && selectedGroup.analyticalCharts.length > 0 ? (
-            <ChartGroupSection group={selectedGroup} sessionId={sessionId} onZoom={setZoomed} />
+          {charts.data && visibleCharts.length > 0 ? (
+            <ChartGroupSection
+              charts={visibleCharts}
+              chartCount={selectedGroup.analyticalCharts.length}
+              sessionId={sessionId}
+              onZoom={setZoomed}
+            />
           ) : charts.data ? (
             <EmptyState
               title={charts.hasNextPage ? "No analytical charts loaded for this dataset yet" : "No analytical charts for this dataset"}
               description={charts.hasNextPage ? "Load the next chart batch to continue checking this dataset." : "Its single-field evidence is available in Profile and Quality."}
             />
           ) : null}
-          {charts.hasNextPage && (
+          {hasMoreVisibleCharts && (
             <button
               type="button"
-              onClick={() => charts.fetchNextPage()}
-              disabled={charts.isFetchingNextPage}
-              className="self-start rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface disabled:opacity-50"
+              onClick={() =>
+                setVisibleChartCount((count) => count + CHART_RENDER_BATCH_SIZE)
+              }
+              className="self-start rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface"
             >
-              {charts.isFetchingNextPage ? "Loading charts…" : "Load more charts"}
+              Load more charts
             </button>
           )}
+          </div>
+          <aside className="order-1 self-start @5xl/data-page:order-2 @5xl/data-page:sticky @5xl/data-page:top-3">
+            <CustomChartBuilder
+              sessionId={sessionId}
+              projectId={projectId}
+              datasetId={selectedDatasetId}
+              datasetName={resolvedProfile.name}
+              rowCount={resolvedProfile.rows}
+            />
+          </aside>
         </section>
       )}
       {zoomed && <ChartZoomModal chart={zoomed} sessionId={sessionId} onClose={() => setZoomed(null)} />}

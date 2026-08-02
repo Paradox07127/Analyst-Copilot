@@ -15,14 +15,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  BaseEdge,
   Background,
   Controls,
-  MarkerType,
   MiniMap,
   ReactFlow,
+  useInternalNode,
   useNodesState,
   type Edge,
+  type EdgeProps,
   type Node,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import "./relationships-flow.css";
@@ -65,14 +68,119 @@ import {
   type Tone,
 } from "../../components/ui";
 import { useDialogFocus } from "../../components/use-dialog-focus";
+import {
+  DataWorkspacePage,
+  SegmentedControl,
+} from "../../components/data-workspace";
 
 const NODE_WIDTH = 196;
 const KEYBOARD_NODE_STEP = 24;
+const NEIGHBOR_LIMIT = 6;
 /* Above this many candidates in scope, pair groups open on demand instead of
  * all at once — an 80-row wall of columns is the thing the grouping fixes. */
 const AUTO_EXPAND_LIMIT = 12;
 
+type MeasuredGraphNode = {
+  measured: { width?: number; height?: number };
+  internals: { positionAbsolute: { x: number; y: number } };
+};
+
+function pointOnNodeToward(
+  node: MeasuredGraphNode,
+  toward: MeasuredGraphNode,
+) {
+  const width = node.measured.width ?? NODE_WIDTH;
+  const height = node.measured.height ?? 84;
+  const towardWidth = toward.measured.width ?? NODE_WIDTH;
+  const towardHeight = toward.measured.height ?? 84;
+  const centreX = node.internals.positionAbsolute.x + width / 2;
+  const centreY = node.internals.positionAbsolute.y + height / 2;
+  const towardX = toward.internals.positionAbsolute.x + towardWidth / 2;
+  const towardY = toward.internals.positionAbsolute.y + towardHeight / 2;
+  const deltaX = towardX - centreX;
+  const deltaY = towardY - centreY;
+  const scale = Math.min(
+    deltaX === 0 ? Number.POSITIVE_INFINITY : width / 2 / Math.abs(deltaX),
+    deltaY === 0 ? Number.POSITIVE_INFINITY : height / 2 / Math.abs(deltaY),
+  );
+  return {
+    x: centreX + deltaX * scale,
+    y: centreY + deltaY * scale,
+  };
+}
+
+function OverviewCurveEdge({
+  id,
+  source,
+  target,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  style,
+  label,
+  labelStyle,
+  labelBgStyle,
+  markerStart,
+  markerEnd,
+  interactionWidth,
+}: EdgeProps) {
+  const sourceNode = useInternalNode(source);
+  const targetNode = useInternalNode(target);
+  const floatingSource =
+    sourceNode && targetNode
+      ? pointOnNodeToward(sourceNode, targetNode)
+      : { x: sourceX, y: sourceY };
+  const floatingTarget =
+    sourceNode && targetNode
+      ? pointOnNodeToward(targetNode, sourceNode)
+      : { x: targetX, y: targetY };
+  const deltaX = floatingTarget.x - floatingSource.x;
+  const deltaY = floatingTarget.y - floatingSource.y;
+  const distance = Math.max(1, Math.hypot(deltaX, deltaY));
+  const bend = Math.min(96, Math.max(28, distance * 0.13));
+  const normalX = -deltaY / distance;
+  const normalY = deltaX / distance;
+  const controlX =
+    (floatingSource.x + floatingTarget.x) / 2 + normalX * bend;
+  const controlY =
+    (floatingSource.y + floatingTarget.y) / 2 + normalY * bend;
+  const labelX =
+    (floatingSource.x + 2 * controlX + floatingTarget.x) / 4;
+  const labelY =
+    (floatingSource.y + 2 * controlY + floatingTarget.y) / 4;
+
+  return (
+    <BaseEdge
+      id={id}
+      path={`M ${floatingSource.x},${floatingSource.y} Q ${controlX},${controlY} ${floatingTarget.x},${floatingTarget.y}`}
+      label={label}
+      labelX={labelX}
+      labelY={labelY}
+      labelStyle={labelStyle}
+      labelBgStyle={labelBgStyle}
+      markerStart={markerStart}
+      markerEnd={markerEnd}
+      interactionWidth={interactionWidth}
+      style={style}
+    />
+  );
+}
+
+const RELATIONSHIP_EDGE_TYPES = { overviewCurve: OverviewCurveEdge };
+
 type EdgeState = "candidate" | "validated" | "confirmed";
+type RelationshipView = "overview" | "neighborhood" | "matrix" | "list";
+type RelationshipKind =
+  | "many_to_one"
+  | "one_to_many"
+  | "one_to_one"
+  | "many_to_many"
+  | "likely_key"
+  | "shared_domain"
+  | "partial_coverage"
+  | "possible_match";
+type TableRole = "focus" | "likely_fact" | "likely_lookup" | "bridge" | "hub" | "connected" | "isolated";
 
 /* Semantic tokens, not raw colors: the canvas follows the active theme. */
 const EDGE_STROKE: Record<EdgeState, string> = {
@@ -99,6 +207,38 @@ const EDGE_LEGEND: { state: EdgeState; label: string; hint: string }[] = [
   { state: "confirmed", label: "Confirmed", hint: "usable as a join" },
 ];
 
+const KIND_LABEL: Record<RelationshipKind, string> = {
+  many_to_one: "Many → one lookup",
+  one_to_many: "One → many detail",
+  one_to_one: "One ↔ one entity",
+  many_to_many: "Many ↔ many risk",
+  likely_key: "Likely key join",
+  shared_domain: "Shared domain",
+  partial_coverage: "Partial coverage",
+  possible_match: "Possible match",
+};
+
+const KIND_SHORT: Record<RelationshipKind, string> = {
+  many_to_one: "*:1",
+  one_to_many: "1:*",
+  one_to_one: "1:1",
+  many_to_many: "*:* risk",
+  likely_key: "key?",
+  shared_domain: "domain",
+  partial_coverage: "partial",
+  possible_match: "match?",
+};
+
+const ROLE_LABEL: Record<TableRole, string> = {
+  focus: "Focus",
+  likely_fact: "Likely fact",
+  likely_lookup: "Likely lookup",
+  bridge: "Likely bridge",
+  hub: "Hub",
+  connected: "Connected",
+  isolated: "Isolated",
+};
+
 function edgeState(edge: RelationshipEdge): EdgeState {
   return edge.state === "confirmed" || edge.state === "validated"
     ? edge.state
@@ -113,6 +253,47 @@ function columnList(columns: string[] | undefined): string {
   return (columns ?? []).join(", ") || "—";
 }
 
+function relationshipKind(edge: RelationshipEdge): RelationshipKind {
+  if (
+    edge.cardinality === "many_to_one" ||
+    edge.cardinality === "one_to_many" ||
+    edge.cardinality === "one_to_one" ||
+    edge.cardinality === "many_to_many"
+  ) {
+    return edge.cardinality;
+  }
+  if (
+    edge.overlap_left_in_right >= 0.6 &&
+    edge.overlap_right_in_left >= 0.6 &&
+    edge.right_unique_rate < 0.9
+  ) {
+    return "shared_domain";
+  }
+  if (
+    Math.max(edge.overlap_left_in_right, edge.overlap_right_in_left) >= 0.6 &&
+    Math.min(edge.overlap_left_in_right, edge.overlap_right_in_left) < 0.6
+  ) {
+    return "partial_coverage";
+  }
+  if (edge.overlap_left_in_right >= 0.6 && edge.right_unique_rate >= 0.9) {
+    return "likely_key";
+  }
+  return "possible_match";
+}
+
+function relationshipReasons(edge: RelationshipEdge): string[] {
+  const reasons: string[] = [];
+  if (edge.name_similarity >= 0.95) reasons.push("Same column name");
+  else if (edge.name_similarity >= 0.6) reasons.push("Similar column names");
+  if (edge.overlap_left_in_right >= 0.95) reasons.push("Source values strongly covered");
+  else if (edge.overlap_left_in_right >= 0.6) reasons.push("Source values partly covered");
+  if (edge.right_unique_rate >= 0.99) reasons.push("Target is nearly unique");
+  else if (edge.right_unique_rate >= 0.9) reasons.push("Target is mostly unique");
+  if (edge.verified) reasons.push("Checked against full tables");
+  if (edge.signals_sampled || edge.validation_sampled) reasons.push("Estimated from a sample");
+  return reasons.length > 0 ? reasons : ["Compatible key-like fields"];
+}
+
 /* Screen-reader and test-facing identity of a row: the dotted path string is
  * unreadable on screen but the pair still needs one flat name. */
 function edgeName(edge: RelationshipEdge): string {
@@ -123,9 +304,181 @@ function edgeName(edge: RelationshipEdge): string {
   )}`;
 }
 
-/* Nodes on a circle rather than a grid: with 9 tables a grid runs edges
- * straight through the boxes between them. */
-function layoutPositions(count: number): { x: number; y: number }[] {
+function circularCrossingScore(order: RelationshipNode[], pairs: Pair[]) {
+  const position = new Map(
+    order.map((node, index) => [node.dataset_id, index]),
+  );
+  const graphPairs = pairs.filter((pair) => pair.leftId !== pair.rightId);
+  let crossings = 0;
+  let span = 0;
+
+  for (const pair of graphPairs) {
+    const left = position.get(pair.leftId);
+    const right = position.get(pair.rightId);
+    if (left == null || right == null) continue;
+    const distance = Math.abs(left - right);
+    span += Math.min(distance, order.length - distance);
+  }
+
+  for (let leftIndex = 0; leftIndex < graphPairs.length; leftIndex += 1) {
+    const leftPair = graphPairs[leftIndex]!;
+    const a = position.get(leftPair.leftId);
+    const b = position.get(leftPair.rightId);
+    if (a == null || b == null) continue;
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < graphPairs.length;
+      rightIndex += 1
+    ) {
+      const rightPair = graphPairs[rightIndex]!;
+      if (
+        leftPair.leftId === rightPair.leftId ||
+        leftPair.leftId === rightPair.rightId ||
+        leftPair.rightId === rightPair.leftId ||
+        leftPair.rightId === rightPair.rightId
+      ) {
+        continue;
+      }
+      const c = position.get(rightPair.leftId);
+      const d = position.get(rightPair.rightId);
+      if (c == null || d == null) continue;
+      const between = (point: number, start: number, end: number) =>
+        start < end
+          ? point > start && point < end
+          : point > start || point < end;
+      if (between(c, a, b) !== between(d, a, b)) crossings += 1;
+    }
+  }
+
+  /* Crossings dominate the objective. The smaller span term chooses the more
+   * compact of two orders with the same crossing count. */
+  return crossings * 10_000 + span;
+}
+
+function crossingReducedCircularOrder(
+  nodes: RelationshipNode[],
+  pairs: Pair[],
+) {
+  const degree = new Map(nodes.map((node) => [node.dataset_id, 0]));
+  const adjacency = new Map(
+    nodes.map((node) => [node.dataset_id, new Map<string, number>()]),
+  );
+  for (const pair of pairs) {
+    if (pair.leftId === pair.rightId) continue;
+    degree.set(pair.leftId, (degree.get(pair.leftId) ?? 0) + 1);
+    degree.set(pair.rightId, (degree.get(pair.rightId) ?? 0) + 1);
+    adjacency.get(pair.leftId)?.set(pair.rightId, pair.best);
+    adjacency.get(pair.rightId)?.set(pair.leftId, pair.best);
+  }
+
+  const remaining = new Set(nodes.map((node) => node.dataset_id));
+  const byId = new Map(nodes.map((node) => [node.dataset_id, node]));
+  const first = [...nodes].sort(
+    (left, right) =>
+      (degree.get(right.dataset_id) ?? 0) -
+        (degree.get(left.dataset_id) ?? 0) ||
+      left.name.localeCompare(right.name),
+  )[0];
+  if (!first) return [];
+  const order = [first];
+  remaining.delete(first.dataset_id);
+
+  /* Seed the circle by walking strongest adjacent tables. This gives the swap
+   * pass a stable, graph-aware starting point instead of filename order. */
+  while (remaining.size > 0) {
+    const previous = order[order.length - 1]!;
+    const nextId = [...remaining].sort((leftId, rightId) => {
+      const leftWeight = adjacency.get(previous.dataset_id)?.get(leftId) ?? -1;
+      const rightWeight = adjacency.get(previous.dataset_id)?.get(rightId) ?? -1;
+      return (
+        rightWeight - leftWeight ||
+        (degree.get(rightId) ?? 0) - (degree.get(leftId) ?? 0) ||
+        (byId.get(leftId)?.name ?? leftId).localeCompare(
+          byId.get(rightId)?.name ?? rightId,
+        )
+      );
+    })[0]!;
+    order.push(byId.get(nextId)!);
+    remaining.delete(nextId);
+  }
+
+  /* An exhaustive swap pass is cheap for the overview sizes this page is
+   * designed for and directly optimises the visual problem: chord crossings. */
+  if (order.length <= 24) {
+    let bestScore = circularCrossingScore(order, pairs);
+    let improved = true;
+    while (improved) {
+      improved = false;
+      let bestSwap: [number, number] | null = null;
+      for (let left = 0; left < order.length - 1; left += 1) {
+        for (let right = left + 1; right < order.length; right += 1) {
+          const candidate = [...order];
+          [candidate[left], candidate[right]] = [candidate[right]!, candidate[left]!];
+          const score = circularCrossingScore(candidate, pairs);
+          if (score < bestScore) {
+            bestScore = score;
+            bestSwap = [left, right];
+          }
+        }
+      }
+      if (bestSwap) {
+        [order[bestSwap[0]], order[bestSwap[1]]] = [
+          order[bestSwap[1]]!,
+          order[bestSwap[0]]!,
+        ];
+        improved = true;
+      }
+    }
+  }
+  return order;
+}
+
+/* Overview uses a graph-aware circle: an optimised circular order reduces
+ * chord crossings, keeps every table equally reachable, and avoids the dense
+ * horizontal traffic created by a hub-centred grid. */
+function overviewPositions(nodes: RelationshipNode[], pairs: Pair[]) {
+  if (nodes.length <= 1) return [{ x: 80, y: 120 }];
+  const ordered = crossingReducedCircularOrder(nodes, pairs);
+  const radius = Math.max(
+    360,
+    (nodes.length * (NODE_WIDTH + 34)) / (2 * Math.PI),
+  );
+  const centreX = radius + NODE_WIDTH / 2 + 44;
+  const centreY = radius + 74;
+  const positions = new Map(
+    ordered.map((node, index) => {
+      const angle = (2 * Math.PI * index) / ordered.length - Math.PI / 2;
+      return [
+        node.dataset_id,
+        {
+          x: Math.round(centreX + radius * Math.cos(angle) - NODE_WIDTH / 2),
+          y: Math.round(centreY + radius * Math.sin(angle) - 42),
+        },
+      ];
+    }),
+  );
+  return nodes.map((node) => positions.get(node.dataset_id)!);
+}
+
+function layoutPositions(
+  nodes: RelationshipNode[],
+  focusId: string | null,
+  pairs: Pair[],
+  overview: boolean,
+): { x: number; y: number }[] {
+  if (overview) return overviewPositions(nodes, pairs);
+  const count = nodes.length;
+  if (focusId && count > 1) {
+    let neighborIndex = 0;
+    return nodes.map((node) => {
+      if (node.dataset_id === focusId) {
+        return { x: 0, y: Math.max(0, ((count - 2) * 132) / 2) };
+      }
+      const position = { x: NODE_WIDTH + 190, y: neighborIndex * 132 };
+      neighborIndex += 1;
+      return position;
+    });
+  }
   if (count <= 2) {
     return Array.from({ length: count }, (_, index) => ({
       x: index * (NODE_WIDTH + 140),
@@ -142,7 +495,7 @@ function layoutPositions(count: number): { x: number; y: number }[] {
   });
 }
 
-function nodeLabel(node: RelationshipNode) {
+function nodeLabel(node: RelationshipNode, role: TableRole) {
   return (
     <div className="flex flex-col gap-0.5 text-left">
       <Marquee className="block text-sm font-semibold" title={node.name}>
@@ -155,23 +508,36 @@ function nodeLabel(node: RelationshipNode) {
         {" · "}
         {node.column_count} cols
       </span>
+      <span className="mt-1 block text-[10px] font-medium uppercase tracking-wide text-status-neutral">
+        {ROLE_LABEL[role]}
+        {!["focus", "connected", "isolated"].includes(role) ? " · inferred" : ""}
+      </span>
     </div>
   );
 }
 
-function toNodes(nodes: RelationshipNode[], connected: Set<string>): Node[] {
-  const positions = layoutPositions(nodes.length);
+function toNodes(
+  nodes: RelationshipNode[],
+  connected: Set<string>,
+  focusId: string | null,
+  roles: Map<string, TableRole>,
+  pairs: Pair[],
+  overview: boolean,
+): Node[] {
+  const positions = layoutPositions(nodes, focusId, pairs, overview);
   return nodes.map((node, index) => ({
     id: node.dataset_id,
     position: positions[index] ?? { x: 0, y: 0 },
-    data: { label: nodeLabel(node) },
+    data: { label: nodeLabel(node, node.dataset_id === focusId ? "focus" : (roles.get(node.dataset_id) ?? "isolated")) },
     style: { width: NODE_WIDTH },
-    className: connected.has(node.dataset_id) ? "" : "rel-node-muted",
+    className: `${connected.has(node.dataset_id) ? "" : "rel-node-muted"} ${node.dataset_id === focusId ? "rel-node-focus" : ""}`.trim(),
   }));
 }
 
 type Pair = {
+  identity: string;
   key: string;
+  legacyKeys: string[];
   leftId: string;
   rightId: string;
   leftName: string;
@@ -179,21 +545,39 @@ type Pair = {
   edges: RelationshipEdge[];
   best: number;
   state: EdgeState;
+  representative: RelationshipEdge;
+  kind: RelationshipKind;
 };
 
 function groupByPair(edges: RelationshipEdge[]): Pair[] {
   const pairs = new Map<string, Pair>();
   for (const edge of edges) {
+    const identity = [edge.left_dataset_id, edge.right_dataset_id].sort().join("↔");
     const key = `${edge.left_dataset_id}→${edge.right_dataset_id}`;
     const state = edgeState(edge);
-    const existing = pairs.get(key);
+    const existing = pairs.get(identity);
     if (existing) {
       existing.edges.push(edge);
+      if (!existing.legacyKeys.includes(key)) existing.legacyKeys.push(key);
       existing.best = Math.max(existing.best, edge.ensemble_score);
-      if (STATE_RANK[state] > STATE_RANK[existing.state]) existing.state = state;
+      if (
+        STATE_RANK[state] > STATE_RANK[existing.state] ||
+        (STATE_RANK[state] === STATE_RANK[existing.state] &&
+          edge.ensemble_score > existing.representative.ensemble_score)
+      ) {
+        existing.state = state;
+        existing.representative = edge;
+        existing.kind = relationshipKind(edge);
+        existing.leftId = edge.left_dataset_id;
+        existing.rightId = edge.right_dataset_id;
+        existing.leftName = edge.left_dataset;
+        existing.rightName = edge.right_dataset;
+      }
     } else {
-      pairs.set(key, {
+      pairs.set(identity, {
+        identity,
         key,
+        legacyKeys: [key],
         leftId: edge.left_dataset_id,
         rightId: edge.right_dataset_id,
         leftName: edge.left_dataset,
@@ -201,6 +585,8 @@ function groupByPair(edges: RelationshipEdge[]): Pair[] {
         edges: [edge],
         best: edge.ensemble_score,
         state,
+        representative: edge,
+        kind: relationshipKind(edge),
       });
     }
   }
@@ -211,22 +597,79 @@ function groupByPair(edges: RelationshipEdge[]): Pair[] {
   return list.sort((left, right) => right.best - left.best);
 }
 
-function toGraphEdges(pairs: Pair[], focusKey: string | null): Edge[] {
-  return pairs.map((pair) => {
-    const focused = pair.key === focusKey;
+function inferTableRoles(
+  nodes: RelationshipNode[],
+  pairs: Pair[],
+): Map<string, TableRole> {
+  const stats = new Map<
+    string,
+    { degree: number; factSignals: number; lookupSignals: number }
+  >();
+  for (const node of nodes) {
+    stats.set(node.dataset_id, { degree: 0, factSignals: 0, lookupSignals: 0 });
+  }
+  for (const pair of pairs) {
+    const left = stats.get(pair.leftId);
+    const right = stats.get(pair.rightId);
+    if (left) left.degree += 1;
+    if (right) right.degree += 1;
+    if (pair.kind === "many_to_one" || pair.kind === "likely_key") {
+      if (left) left.factSignals += 1;
+      if (right) right.lookupSignals += 1;
+    } else if (pair.kind === "one_to_many") {
+      if (left) left.lookupSignals += 1;
+      if (right) right.factSignals += 1;
+    }
+  }
+  return new Map(
+    nodes.map((node) => {
+      const stat = stats.get(node.dataset_id)!;
+      let role: TableRole = "connected";
+      if (stat.degree === 0) role = "isolated";
+      else if (stat.degree >= 4) role = "hub";
+      else if (stat.factSignals >= 2 && stat.lookupSignals >= 2) role = "bridge";
+      else if (stat.factSignals >= 2) role = "likely_fact";
+      else if (stat.lookupSignals >= 2) role = "likely_lookup";
+      return [node.dataset_id, role];
+    }),
+  );
+}
+
+function toGraphEdges(
+  pairs: Pair[],
+  focusKey: string | null,
+  overview: boolean,
+  focusTableId: string | null,
+): Edge[] {
+  return pairs.filter((pair) => !overview || pair.leftId !== pair.rightId).map((pair) => {
+    const focused =
+      pair.key === focusKey || pair.legacyKeys.includes(focusKey ?? "");
+    const incident =
+      pair.leftId === focusTableId || pair.rightId === focusTableId;
     const only = pair.edges.length === 1 ? pair.edges[0] : undefined;
     return {
       id: pair.key,
       source: pair.leftId,
       target: pair.rightId,
-      label: only
-        ? columnList(only.left_columns)
-        : `${pair.edges.length} candidates`,
-      markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_STROKE[pair.state] },
+      /* A small quadratic bend keeps the overview fluid without the large
+       * hooks produced by handle-directed Bezier routing. */
+      type: overview ? "overviewCurve" : undefined,
+      label:
+        overview && !focused
+          ? undefined
+          : `${KIND_SHORT[pair.kind]} · ${only ? columnList(only.left_columns) : `${pair.edges.length} candidates`}`,
+      ariaLabel: `${pair.leftName} and ${pair.rightName}: ${KIND_LABEL[pair.kind]}, ${pair.edges.length} candidates`,
       style: {
         stroke: focused ? "var(--color-primary)" : EDGE_STROKE[pair.state],
-        strokeWidth: focused ? 3 : pair.state === "candidate" ? 1.5 : 2,
+        strokeWidth: focused
+          ? 3
+          : overview && incident
+            ? 2.5
+            : pair.state === "candidate"
+              ? 1.5
+              : 2,
         strokeDasharray: pair.state === "candidate" ? "6 4" : undefined,
+        opacity: overview && focusTableId && !incident && !focused ? 0.16 : 1,
       },
       labelStyle: { fill: "var(--color-text)", fontSize: 11 },
       labelBgStyle: { fill: "var(--color-surface)" },
@@ -359,17 +802,26 @@ function staleApprovalHint(error: unknown): string | null {
  * default 0) plus a confidence multiselect (high/medium/low, default
  * high+medium). The filter now drives the canvas as well as the list. */
 const CONFIDENCE_LEVELS = ["high", "medium", "low"] as const;
+const RELATIONSHIP_STATES: EdgeState[] = [
+  "candidate",
+  "validated",
+  "confirmed",
+];
 
 function CandidateFilters({
   minimumScore,
   onMinimumScoreChange,
   confidenceLevels,
   onToggleConfidence,
+  states,
+  onToggleState,
 }: {
   minimumScore: number;
   onMinimumScoreChange: (value: number) => void;
   confidenceLevels: Set<string>;
   onToggleConfidence: (level: string) => void;
+  states: Set<EdgeState>;
+  onToggleState: (state: EdgeState) => void;
 }) {
   return (
     <div className="flex flex-col gap-2 text-xs">
@@ -399,6 +851,19 @@ function CandidateFilters({
           </label>
         ))}
       </fieldset>
+      <fieldset className="flex flex-wrap items-center gap-3">
+        <legend className="text-status-neutral">Status</legend>
+        {RELATIONSHIP_STATES.map((state) => (
+          <label key={state} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={states.has(state)}
+              onChange={() => onToggleState(state)}
+            />
+            {state[0]?.toUpperCase()}{state.slice(1)}
+          </label>
+        ))}
+      </fieldset>
     </div>
   );
 }
@@ -410,6 +875,7 @@ function ScopeReadout({
   visibleCount,
   minimumScore,
   confidenceLevels,
+  states,
   pairsInScope,
   pairsTotal,
 }: {
@@ -417,6 +883,7 @@ function ScopeReadout({
   visibleCount: number;
   minimumScore: number;
   confidenceLevels: Set<string>;
+  states: Set<EdgeState>;
   pairsInScope: number;
   pairsTotal: number;
 }) {
@@ -427,6 +894,12 @@ function ScopeReadout({
     (edge) =>
       edge.ensemble_score >= minimumScore && !confidenceLevels.has(edge.confidence),
   ).length;
+  const offState = edges.filter(
+    (edge) =>
+      edge.ensemble_score >= minimumScore &&
+      confidenceLevels.has(edge.confidence) &&
+      !states.has(edgeState(edge)),
+  ).length;
   const tally = CONFIDENCE_LEVELS.map(
     (level) => `${edges.filter((edge) => edge.confidence === level).length} ${level}`,
   ).join(" · ");
@@ -436,10 +909,11 @@ function ScopeReadout({
       <p className="text-xs text-status-neutral">
         Showing {visibleCount} of {edges.length} candidates.
       </p>
-      {belowScore + offConfidence > 0 && (
+      {belowScore + offConfidence + offState > 0 && (
         <p className="text-xs text-status-neutral">
           Hidden: {belowScore} below score {minimumScore.toFixed(2)} ·{" "}
-          {offConfidence} outside the confidence filter.
+          {offConfidence} outside the confidence filter
+          {offState > 0 ? ` · ${offState} outside the status filter.` : "."}
         </p>
       )}
       <p className="text-xs text-status-neutral">
@@ -507,7 +981,7 @@ function PairGroup({
         <span className="flex min-w-0 items-center gap-2">
           <Dot tone={STATE_TONE[pair.state]} />
           <Marquee className="min-w-0 text-xs">
-            {pair.leftName} → {pair.rightName}
+            {pair.leftName} ↔ {pair.rightName}
           </Marquee>
         </span>
       }
@@ -906,12 +1380,20 @@ function RelationshipGraph({
   nodes: nodeData,
   pairs,
   focusKey,
+  focusTableId,
+  roles,
+  overview,
   onFocusPair,
+  onFocusTable,
 }: {
   nodes: RelationshipNode[];
   pairs: Pair[];
   focusKey: string | null;
+  focusTableId: string | null;
+  roles: Map<string, TableRole>;
+  overview: boolean;
   onFocusPair: (key: string) => void;
+  onFocusTable: (datasetId: string) => void;
 }) {
   const connected = useMemo(() => {
     const ids = new Set<string>();
@@ -922,22 +1404,30 @@ function RelationshipGraph({
     return ids;
   }, [pairs]);
   const initialNodes = useMemo(
-    () => toNodes(nodeData, connected),
-    [nodeData, connected],
+    () => toNodes(nodeData, connected, focusTableId, roles, pairs, overview),
+    [nodeData, connected, focusTableId, roles, pairs, overview],
   );
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const edges = useMemo(() => toGraphEdges(pairs, focusKey), [pairs, focusKey]);
+  const edges = useMemo(
+    () => toGraphEdges(pairs, focusKey, overview, focusTableId),
+    [pairs, focusKey, overview, focusTableId],
+  );
   const [grabbedNodeId, setGrabbedNodeId] = useState<string | null>(null);
   const [keyboardSnapshot, setKeyboardSnapshot] = useState<Node[] | null>(null);
   const [undoNodes, setUndoNodes] = useState<Node[] | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const pointerSnapshot = useRef<Node[] | null>(null);
+  const flowInstance = useRef<ReactFlowInstance<Node, Edge> | null>(null);
 
   useEffect(() => {
     setNodes(initialNodes);
     setGrabbedNodeId(null);
     setKeyboardSnapshot(null);
     setUndoNodes(null);
+    const frame = requestAnimationFrame(() => {
+      void flowInstance.current?.fitView({ maxZoom: 1, padding: 0.15 });
+    });
+    return () => cancelAnimationFrame(frame);
   }, [initialNodes, setNodes]);
 
   const cloneNodes = useCallback(
@@ -1037,8 +1527,16 @@ function RelationshipGraph({
         className="relationships-flow"
         nodes={nodes}
         edges={edges}
+        edgeTypes={RELATIONSHIP_EDGE_TYPES}
         onNodesChange={onNodesChange}
+        onInit={(instance) => {
+          flowInstance.current = instance;
+          requestAnimationFrame(() => {
+            void instance.fitView({ maxZoom: 1, padding: 0.15 });
+          });
+        }}
         onEdgeClick={(_event, edge) => onFocusPair(edge.id)}
+        onNodeClick={(_event, node) => onFocusTable(node.id)}
         onKeyDown={handleCanvasKeyDown}
         onNodeDragStart={() => {
           pointerSnapshot.current = cloneNodes(nodes);
@@ -1052,6 +1550,7 @@ function RelationshipGraph({
         }}
         fitView
         fitViewOptions={{ maxZoom: 1, padding: 0.15 }}
+        minZoom={overview ? 0.2 : 0.5}
         nodesConnectable={false}
         nodesFocusable
         edgesFocusable
@@ -1093,31 +1592,269 @@ function GraphPane({
   pairs,
   pairsTotal,
   focusKey,
+  focusTableId,
+  roles,
+  overview,
   onFocusPair,
+  onFocusTable,
 }: {
   nodes: RelationshipNode[];
   pairs: Pair[];
   pairsTotal: number;
   focusKey: string | null;
+  focusTableId: string | null;
+  roles: Map<string, TableRole>;
+  overview: boolean;
   onFocusPair: (key: string) => void;
+  onFocusTable: (datasetId: string) => void;
 }) {
   return (
-    <Card className="relationship-graph-pane flex min-h-80 min-w-0 flex-1 flex-col overflow-hidden">
+    <Card
+      className={`relationship-graph-pane flex min-h-80 min-w-0 flex-1 flex-col overflow-hidden ${overview ? "relationship-overview-pane" : ""}`}
+    >
       <RelationshipGraph
         nodes={nodes}
         pairs={pairs}
         focusKey={focusKey}
+        focusTableId={focusTableId}
+        roles={roles}
+        overview={overview}
         onFocusPair={onFocusPair}
+        onFocusTable={onFocusTable}
       />
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-hairline px-3 py-2">
         <Legend />
         <p className="text-xs text-status-neutral">
           One line per table pair · {pairs.length} of {pairsTotal} pair(s) match
-          the filter. Click a line, or focus it and press Enter, to scope the
-          list.
+          the filter.{" "}
+          {overview
+            ? "Same-table field matches stay in List. Edge labels appear on selection. "
+            : ""}
+          Click a line, or focus it and press Enter, to scope the list.
         </p>
       </div>
     </Card>
+  );
+}
+
+function PairSummary({ pair }: { pair: Pair }) {
+  const edge = pair.representative;
+  const reasons = relationshipReasons(edge);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={STATE_TONE[pair.state]} caps>{pair.state}</Badge>
+        <Badge tone={pair.kind === "many_to_many" ? "warn" : "neutral"}>
+          {KIND_LABEL[pair.kind]}
+        </Badge>
+        <span className="tabular ml-auto text-xs text-status-neutral">
+          best {pair.best.toFixed(2)}
+        </span>
+      </div>
+      <RelationshipPair edge={edge} />
+      <Card tone="quiet" className="p-2">
+        <dl className="flex flex-col gap-1.5">
+          <Row label="Source values matched" value={percent(edge.overlap_left_in_right)} />
+          <Row label="Reverse value overlap" value={percent(edge.overlap_right_in_left)} />
+          <Row label="Target key uniqueness" value={percent(edge.right_unique_rate)} />
+          <Row label="Cardinality" value={edge.cardinality ?? "not validated"} />
+          <Row
+            label="Expected row multiplier"
+            value={edge.join_row_multiplier == null ? "—" : `×${edge.join_row_multiplier.toFixed(2)}`}
+          />
+        </dl>
+      </Card>
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-status-neutral">Why this pair surfaced</span>
+        <ul className="flex flex-wrap gap-1.5">
+          {reasons.map((reason) => (
+            <li key={reason} className="rounded-sm border border-border bg-bg px-2 py-1 text-xs">
+              {reason}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <p className="text-xs text-status-neutral">
+        {pair.edges.length} directional column candidate{pair.edges.length === 1 ? "" : "s"} are grouped into this single table pair.
+      </p>
+    </div>
+  );
+}
+
+function RelationshipMatrix({
+  nodes,
+  pairs,
+  focusTableId,
+  onFocusPair,
+  onFocusTable,
+}: {
+  nodes: RelationshipNode[];
+  pairs: Pair[];
+  focusTableId: string | null;
+  onFocusPair: (key: string) => void;
+  onFocusTable: (datasetId: string) => void;
+}) {
+  const pairByIdentity = new Map(pairs.map((pair) => [pair.identity, pair]));
+  const ordered = [...nodes].sort((left, right) => left.name.localeCompare(right.name));
+  return (
+    <Card className="relationship-matrix-pane min-w-0 overflow-auto">
+      <table className="relationship-matrix w-full min-w-[48rem] border-collapse text-xs" aria-label="Table relationship matrix">
+        <thead className="sticky top-0 z-10 bg-table-header-bg">
+          <tr>
+            <th className="sticky left-0 z-20 min-w-44 border-b border-r border-table-border bg-table-header-bg px-3 py-2 text-left font-medium">
+              Table pair
+            </th>
+            {ordered.map((node) => (
+              <th key={node.dataset_id} className="min-w-24 max-w-32 border-b border-table-border px-2 py-2 text-left font-medium">
+                <button
+                  type="button"
+                  onClick={() => onFocusTable(node.dataset_id)}
+                  title={node.name}
+                  className={`max-w-28 truncate hover:text-primary ${node.dataset_id === focusTableId ? "text-primary" : ""}`}
+                >
+                  {node.name}
+                </button>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {ordered.map((left, rowIndex) => (
+            <tr key={left.dataset_id} className={rowIndex % 2 === 1 ? "bg-code-bg/35" : ""}>
+              <th className="sticky left-0 z-10 border-r border-t border-table-border bg-bg px-3 py-2 text-left font-medium">
+                <button
+                  type="button"
+                  onClick={() => onFocusTable(left.dataset_id)}
+                  title={left.name}
+                  className={`max-w-40 truncate hover:text-primary ${left.dataset_id === focusTableId ? "text-primary" : ""}`}
+                >
+                  {left.name}
+                </button>
+              </th>
+              {ordered.map((right) => {
+                if (left.dataset_id === right.dataset_id) {
+                  return <td key={right.dataset_id} className="border-t border-table-border bg-surface/40 text-center text-status-neutral">—</td>;
+                }
+                const identity = [left.dataset_id, right.dataset_id].sort().join("↔");
+                const pair = pairByIdentity.get(identity);
+                return (
+                  <td key={right.dataset_id} className="border-t border-table-border p-1 text-center">
+                    {pair ? (
+                      <button
+                        type="button"
+                        onClick={() => onFocusPair(pair.key)}
+                        aria-label={`${left.name} and ${right.name}: ${KIND_LABEL[pair.kind]}, ${pair.edges.length} candidates`}
+                        title={`${KIND_LABEL[pair.kind]} · ${pair.edges.length} candidates · best ${pair.best.toFixed(2)}`}
+                        className="inline-flex min-h-8 w-full items-center justify-center gap-1 rounded-sm px-1 hover:bg-surface focus-visible:outline-2 focus-visible:outline-primary"
+                      >
+                        <Dot tone={STATE_TONE[pair.state]} />
+                        <span className="font-mono text-[10px]">{KIND_SHORT[pair.kind]}</span>
+                        {pair.edges.length > 1 && <span className="tabular text-[10px] text-status-neutral">{pair.edges.length}</span>}
+                      </button>
+                    ) : (
+                      <span className="text-status-neutral/40">·</span>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
+  );
+}
+
+function RelationshipPairList({
+  pairs,
+  onFocusPair,
+}: {
+  pairs: Pair[];
+  onFocusPair: (key: string) => void;
+}) {
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-3 border-b border-table-border bg-table-header-bg px-3 py-2 text-xs font-medium text-status-neutral">
+        <span>Table pair</span><span>Relationship</span><span>Evidence</span>
+      </div>
+      <ul className="flex flex-col">
+        {pairs.map((pair, index) => (
+          <li key={pair.identity} className={index % 2 === 1 ? "bg-code-bg/35" : ""}>
+            <button
+              type="button"
+              onClick={() => onFocusPair(pair.key)}
+              className="grid w-full grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-hairline px-3 py-2.5 text-left first:border-t-0 hover:bg-surface"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <Dot tone={STATE_TONE[pair.state]} />
+                <Marquee className="text-sm font-medium">{pair.leftName} ↔ {pair.rightName}</Marquee>
+              </span>
+              <Badge tone={pair.kind === "many_to_many" ? "warn" : "neutral"}>{KIND_LABEL[pair.kind]}</Badge>
+              <span className="tabular text-xs text-status-neutral">{pair.edges.length} · {pair.best.toFixed(2)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+type PairPanel = "summary" | "candidates" | "validation";
+
+function PairWorkspace({
+  pair,
+  panel,
+  onPanelChange,
+  selectedId,
+  onSelect,
+}: {
+  pair: Pair;
+  panel: PairPanel;
+  onPanelChange: (panel: PairPanel) => void;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <SegmentedControl
+        label="Pair details"
+        value={panel}
+        options={[
+          { value: "summary", label: "Summary" },
+          { value: "candidates", label: `Candidates · ${pair.edges.length}` },
+          { value: "validation", label: "Validate" },
+        ]}
+        onChange={(value) => onPanelChange(value as PairPanel)}
+      />
+      {panel === "summary" && <PairSummary pair={pair} />}
+      {panel === "candidates" && (
+        <PairGroup
+          pair={pair}
+          expanded
+          selectedId={selectedId}
+          onSelect={onSelect}
+        />
+      )}
+      {panel === "validation" && (
+        <div className="flex flex-col gap-2">
+          <Card tone="quiet" className="p-2.5">
+            <p className="text-xs text-status-neutral">
+              Select a column candidate to inspect its evidence and run a
+              full-table validation. Confirmed joins remain available to the
+              project until revoked.
+            </p>
+          </Card>
+          {pair.edges.map((edge) => (
+            <EdgeRow
+              key={edge.relationship_id}
+              edge={edge}
+              selected={edge.relationship_id === selectedId}
+              onSelect={() => onSelect(edge.relationship_id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1155,10 +1892,25 @@ function Workbench({
           ),
         ),
   );
+  const [stateParam, setStateParam] = useRouteSearchParam(
+    "state",
+    "candidate,validated,confirmed",
+  );
+  const states = new Set<EdgeState>(
+    stateParam === "none"
+      ? []
+      : parseCsvParam(stateParam).filter((state): state is EdgeState =>
+          RELATIONSHIP_STATES.includes(state as EdgeState),
+        ),
+  );
   const [focusKeyParam] = useRouteSearchParam("pair");
   const focusKey = focusKeyParam || null;
   const [selectedIdParam, setSelectedId] = useRouteSearchParam("edge");
   const selectedId = selectedIdParam || null;
+  const [viewParam, setViewParam] = useRouteSearchParam("view");
+  const [tableParam] = useRouteSearchParam("table");
+  const [scopeParam, setScopeParam] = useRouteSearchParam("scope");
+  const [panelParam, setPanelParam] = useRouteSearchParam("detail");
   const setRouteSearchParams = useSetRouteSearchParams();
 
   const toggleConfidence = (level: string) => {
@@ -1169,19 +1921,89 @@ function Workbench({
       next.size === 0 ? "none" : serializeCsvParam(next),
     );
   };
+  const toggleState = (state: EdgeState) => {
+    const next = new Set(states);
+    if (next.has(state)) next.delete(state);
+    else next.add(state);
+    setStateParam(
+      next.size === 0 || next.size === RELATIONSHIP_STATES.length
+        ? next.size === 0
+          ? "none"
+          : ""
+        : serializeCsvParam(next),
+    );
+  };
 
   const visibleEdges = useMemo(
     () =>
       edges.filter(
         (edge) =>
           edge.ensemble_score >= minimumScore &&
-          confidenceLevels.has(edge.confidence),
+          confidenceLevels.has(edge.confidence) &&
+          states.has(edgeState(edge)),
       ),
-    [edges, minimumScore, confidenceLevels],
+    [edges, minimumScore, confidenceLevels, states],
   );
+  const allPairs = useMemo(() => groupByPair(edges), [edges]);
   const pairs = useMemo(() => groupByPair(visibleEdges), [visibleEdges]);
-  const pairsTotal = useMemo(() => groupByPair(edges).length, [edges]);
-  const focused = pairs.find((pair) => pair.key === focusKey) ?? null;
+  const pairsTotal = allPairs.length;
+  const overviewPairs = useMemo(
+    () => pairs.filter((pair) => pair.leftId !== pair.rightId),
+    [pairs],
+  );
+  const overviewPairsTotal = useMemo(
+    () => allPairs.filter((pair) => pair.leftId !== pair.rightId).length,
+    [allPairs],
+  );
+  const rolePairs = useMemo(
+    () =>
+      groupByPair(
+        edges.filter(
+          (edge) => edge.confidence !== "low" || edgeState(edge) !== "candidate",
+        ),
+      ),
+    [edges],
+  );
+  const roles = useMemo(() => inferTableRoles(nodes, rolePairs), [nodes, rolePairs]);
+  const defaultFocusTableId = useMemo(() => {
+    if (nodes.length === 0) return null;
+    const degree = new Map(nodes.map((node) => [node.dataset_id, 0]));
+    for (const pair of allPairs) {
+      degree.set(pair.leftId, (degree.get(pair.leftId) ?? 0) + 1);
+      degree.set(pair.rightId, (degree.get(pair.rightId) ?? 0) + 1);
+    }
+    return [...nodes].sort(
+      (left, right) =>
+        (degree.get(right.dataset_id) ?? 0) -
+          (degree.get(left.dataset_id) ?? 0) ||
+        left.name.localeCompare(right.name),
+    )[0]?.dataset_id ?? null;
+  }, [nodes, allPairs]);
+  const focusTableId = nodes.some((node) => node.dataset_id === tableParam)
+    ? tableParam
+    : defaultFocusTableId;
+  const view: RelationshipView =
+    viewParam === "overview" ||
+    viewParam === "neighborhood" ||
+    viewParam === "matrix" ||
+    viewParam === "list"
+      ? viewParam
+      : nodes.length >= 9
+        ? "matrix"
+        : "neighborhood";
+  const panel: PairPanel =
+    panelParam === "candidates" || panelParam === "validation"
+      ? panelParam
+      : "summary";
+  const overviewFocusTableId = nodes.some(
+    (node) => node.dataset_id === tableParam,
+  )
+    ? tableParam
+    : null;
+  const focused =
+    pairs.find(
+      (pair) => pair.key === focusKey || pair.legacyKeys.includes(focusKey ?? ""),
+    ) ?? null;
   const listedPairs = focused ? [focused] : pairs;
   const expandGroups =
     listedPairs.length === 1 || visibleEdges.length <= AUTO_EXPAND_LIMIT;
@@ -1195,14 +2017,65 @@ function Workbench({
   const noHighConfidence =
     edges.length > 0 && !edges.some((edge) => edge.confidence === "high");
 
+  const focusPairs = focusTableId
+    ? pairs.filter(
+        (pair) => pair.leftId === focusTableId || pair.rightId === focusTableId,
+      )
+    : [];
+  const neighborhoodPairs = (() => {
+    if (scopeParam === "all") return focusPairs;
+    if (!focused || !focusPairs.some((pair) => pair.identity === focused.identity)) {
+      return focusPairs.slice(0, NEIGHBOR_LIMIT);
+    }
+    return [
+      focused,
+      ...focusPairs.filter((pair) => pair.identity !== focused.identity),
+    ].slice(0, NEIGHBOR_LIMIT);
+  })();
+  const neighborhoodNodeIds = new Set<string>(
+    focusTableId
+      ? [
+          focusTableId,
+          ...neighborhoodPairs.flatMap((pair) => [pair.leftId, pair.rightId]),
+        ]
+      : [],
+  );
+  const neighborhoodNodes = nodes.filter((node) =>
+    neighborhoodNodeIds.has(node.dataset_id),
+  );
+
   const focusPair = (key: string) => {
-    const pair = pairs.find((item) => item.key === key);
-    setRouteSearchParams({
-      pair: key,
+    const pair = pairs.find(
+      (item) => item.key === key || item.legacyKeys.includes(key),
+    );
+    const next: Record<string, string> = {
+      pair: pair?.key ?? key,
       edge:
         pair && pair.edges.length === 1
           ? (pair.edges[0]?.relationship_id ?? "")
           : "",
+      detail: "",
+    };
+    if (
+      pair &&
+      focusTableId !== pair.leftId &&
+      focusTableId !== pair.rightId
+    ) {
+      next.table = pair.leftId === defaultFocusTableId ? "" : pair.leftId;
+      next.scope = "";
+    }
+    setRouteSearchParams(next);
+  };
+
+  const focusTable = (datasetId: string) => {
+    setRouteSearchParams({
+      table:
+        view === "overview"
+          ? datasetId
+          : datasetId === defaultFocusTableId
+            ? ""
+            : datasetId,
+      scope: "",
     });
   };
 
@@ -1220,7 +2093,93 @@ function Workbench({
 
   return (
     <div className="relationship-workbench min-h-0 flex-1 overflow-auto">
+      <Card className="relationship-toolbar mb-3 flex flex-wrap items-center gap-3 p-2.5">
+        <label className="flex min-w-0 items-center gap-2 text-xs font-medium text-status-neutral">
+          Focus table
+          <select
+            aria-label="Focus table"
+            value={view === "overview" ? overviewFocusTableId ?? "" : focusTableId ?? ""}
+            onChange={(event) => focusTable(event.target.value)}
+            className="min-w-0 max-w-64 rounded-base border border-border bg-bg px-2.5 py-1.5 text-sm text-text"
+          >
+            {view === "overview" && <option value="">All tables</option>}
+            {[...nodes]
+              .sort((left, right) => left.name.localeCompare(right.name))
+              .map((node) => (
+                <option key={node.dataset_id} value={node.dataset_id}>
+                  {node.name} · {ROLE_LABEL[roles.get(node.dataset_id) ?? "isolated"]}
+                </option>
+              ))}
+          </select>
+        </label>
+        <SegmentedControl
+          label="Relationship view"
+          value={view}
+          options={[
+            { value: "overview", label: "Overview" },
+            { value: "neighborhood", label: "Neighborhood" },
+            { value: "matrix", label: "Matrix" },
+            { value: "list", label: "List" },
+          ]}
+          onChange={(value) =>
+            setViewParam(value === (nodes.length >= 9 ? "matrix" : "neighborhood") ? "" : value)
+          }
+        />
+        <span className="ml-auto text-xs text-status-neutral">
+          {view === "overview" ? overviewPairs.length : pairs.length} of{" "}
+          {view === "overview" ? overviewPairsTotal : pairsTotal} table pairs in
+          scope
+        </span>
+        {view === "neighborhood" && focusPairs.length > NEIGHBOR_LIMIT && (
+          <button
+            type="button"
+            onClick={() => setScopeParam(scopeParam === "all" ? "" : "all")}
+            className="rounded-base border border-border px-2.5 py-1.5 text-xs hover:bg-surface"
+          >
+            {scopeParam === "all"
+              ? `Show strongest ${NEIGHBOR_LIMIT}`
+              : `Show all ${focusPairs.length} related tables`}
+          </button>
+        )}
+      </Card>
       <div className="relationship-workbench-layout grid min-h-full min-w-0 gap-4">
+        <main className="relationship-main min-h-0 min-w-0">
+          {view === "overview" ? (
+            <GraphPane
+              nodes={nodes}
+              pairs={overviewPairs}
+              pairsTotal={overviewPairsTotal}
+              focusKey={focusKey}
+              focusTableId={overviewFocusTableId}
+              roles={roles}
+              overview
+              onFocusPair={focusPair}
+              onFocusTable={focusTable}
+            />
+          ) : view === "neighborhood" ? (
+            <GraphPane
+              nodes={neighborhoodNodes}
+              pairs={neighborhoodPairs}
+              pairsTotal={focusPairs.length}
+              focusKey={focusKey}
+              focusTableId={focusTableId}
+              roles={roles}
+              overview={false}
+              onFocusPair={focusPair}
+              onFocusTable={focusTable}
+            />
+          ) : view === "matrix" ? (
+            <RelationshipMatrix
+              nodes={nodes}
+              pairs={pairs}
+              focusTableId={focusTableId}
+              onFocusPair={focusPair}
+              onFocusTable={focusTable}
+            />
+          ) : (
+            <RelationshipPairList pairs={pairs} onFocusPair={focusPair} />
+          )}
+        </main>
         <aside
           aria-label="Relationship inspector"
           className="relationship-review flex min-h-0 min-w-0 flex-col gap-3 overflow-auto rounded-base border border-border bg-surface p-3"
@@ -1282,12 +2241,15 @@ function Workbench({
                         onMinimumScoreChange={setMinimumScore}
                         confidenceLevels={confidenceLevels}
                         onToggleConfidence={toggleConfidence}
+                        states={states}
+                        onToggleState={toggleState}
                       />
                       <ScopeReadout
                         edges={edges}
                         visibleCount={visibleEdges.length}
                         minimumScore={minimumScore}
                         confidenceLevels={confidenceLevels}
+                        states={states}
                         pairsInScope={pairs.length}
                         pairsTotal={pairsTotal}
                       />
@@ -1298,7 +2260,7 @@ function Workbench({
               {focused && (
                 <div className="flex items-center gap-2">
                   <Badge tone="brand">
-                    {focused.leftName} → {focused.rightName}
+                    {focused.leftName} ↔ {focused.rightName}
                   </Badge>
                   <button
                     type="button"
@@ -1323,6 +2285,16 @@ function Workbench({
                 <p className="text-xs text-status-neutral">
                   No candidates match the current filters.
                 </p>
+              ) : focused ? (
+                <PairWorkspace
+                  pair={focused}
+                  panel={panel}
+                  onPanelChange={(next) =>
+                    setPanelParam(next === "summary" ? "" : next)
+                  }
+                  selectedId={selectedId}
+                  onSelect={selectEdge}
+                />
               ) : (
                 <div className="flex flex-col gap-1">
                   {listedPairs.map((pair) => (
@@ -1354,13 +2326,6 @@ function Workbench({
             </>
           )}
         </aside>
-        <GraphPane
-          nodes={nodes}
-          pairs={pairs}
-          pairsTotal={pairsTotal}
-          focusKey={focusKey}
-          onFocusPair={focusPair}
-        />
       </div>
     </div>
   );
@@ -1430,42 +2395,64 @@ export function Component() {
   const graph = useRelationships(sessionId);
 
   if (graph.isPending) {
-    return <LoadingSkeleton lines={4} label="Loading relationships" />;
+    return (
+      <DataWorkspacePage
+        title="Relationships"
+        description="Discover and validate how tables connect. A candidate never becomes usable as a join until it is confirmed."
+      >
+        <LoadingSkeleton lines={4} label="Loading relationships" />
+      </DataWorkspacePage>
+    );
   }
   if (graph.isError) {
     return (
-      <div className="p-6">
+      <DataWorkspacePage
+        title="Relationships"
+        description="Discover and validate how tables connect. A candidate never becomes usable as a join until it is confirmed."
+      >
         <ErrorState error={graph.error} onRetry={() => graph.refetch()} />
-      </div>
+      </DataWorkspacePage>
     );
   }
 
   const nodes = graph.data.nodes ?? [];
   const edges = graph.data.edges ?? [];
   const pairCount = groupByPair(edges).length;
-  const confirmedCount = edges.filter((edge) => edgeState(edge) === "confirmed").length;
+  const confirmedJoinCount = edges.filter(
+    (edge) => edgeState(edge) === "confirmed",
+  ).length;
 
   return (
-    <div className="mx-auto flex w-[95%] max-w-data h-full flex-col gap-4 p-6">
-      <header className="flex flex-col gap-3">
-        <SectionHeader
-          level={1}
-          title="Relationships"
-          description="Discover and validate how tables connect. A candidate never becomes usable as a join until it is confirmed."
+    <DataWorkspacePage
+      title="Relationships"
+      description="Discover and validate how tables connect. A candidate never becomes usable as a join until it is confirmed."
+    >
+      <MetricStrip>
+        <MetricTile label="Datasets" value={formatCompact(nodes.length)} />
+        <MetricTile
+          label="Dataset pairs"
+          value={formatCompact(pairCount)}
+          hint="Unique source-to-target table pairs with at least one candidate."
         />
-        <div className="flex flex-wrap items-center gap-2 rounded-base border border-border bg-surface px-3 py-2 text-sm">
-          <span className="font-medium">Relationship scope</span>
-          <span className="text-status-neutral">{nodes.length} tables</span>
-          <span aria-hidden className="text-status-neutral">·</span>
-          <span className="text-status-neutral">{pairCount} candidate {pairCount === 1 ? "pair" : "pairs"}</span>
-          <span aria-hidden className="text-status-neutral">·</span>
-          <span className="text-status-neutral">{confirmedCount} confirmed</span>
-          <Badge tone={graph.data.discovered ? "ok" : "neutral"}>
-            {graph.data.discovered ? "Discovery complete" : "Discovery not run"}
-          </Badge>
-        </div>
-        <SearchCoverage graph={graph.data} />
-      </header>
+        <MetricTile
+          label="Column candidates"
+          value={formatCompact(edges.length)}
+          hint="Scored column-level relationships across all dataset pairs."
+        />
+        <MetricTile
+          label="Confirmed joins"
+          value={formatCompact(confirmedJoinCount)}
+          tone={confirmedJoinCount > 0 ? "ok" : "neutral"}
+          hint="Column relationships promoted for use as joins."
+        />
+        <MetricTile
+          label="Discovery"
+          value={graph.data.discovered ? "Complete" : "Not run"}
+          tone={graph.data.discovered ? "ok" : "neutral"}
+        />
+      </MetricStrip>
+
+      <SearchCoverage graph={graph.data} />
 
       {nodes.length === 0 ? (
         <EmptyState
@@ -1480,6 +2467,6 @@ export function Component() {
           graph={graph.data}
         />
       )}
-    </div>
+    </DataWorkspacePage>
   );
 }

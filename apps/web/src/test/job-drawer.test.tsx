@@ -31,7 +31,7 @@ async function launchTrackedJob() {
     screen.getByLabelText("Data files (.csv)"),
     new File(["id\n1\n"], "orders.csv", { type: "text/csv" }),
   );
-  await screen.findByText(/Ready · ds_orders/);
+  await screen.findByRole("checkbox", { name: "Exclude orders.csv" });
   await user.click(screen.getByRole("button", { name: "Run analysis" }));
   await screen.findByRole("heading", { name: "Data Map" });
   await user.click(screen.getByRole("button", { name: "Open activity" }));

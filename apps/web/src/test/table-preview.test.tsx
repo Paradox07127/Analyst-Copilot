@@ -130,11 +130,11 @@ describe("Table Preview toolbar (integration)", () => {
     expect(router.state.location.search).toBe("");
   });
 
-  it("keeps table selection and icon search in one borderless toolbar", async () => {
+  it("keeps dataset selection and icon search in one borderless toolbar", async () => {
     renderAppAt("/projects/p1/sessions/r1/table/sample");
     await screen.findByText("row-0");
 
-    expect(screen.getByLabelText("Table")).toHaveValue("sample");
+    expect(screen.getByLabelText("Dataset")).toHaveValue("sample");
     expect(screen.getByRole("button", { name: "Search loaded rows" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Export loaded rows" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "All tables" })).not.toBeInTheDocument();

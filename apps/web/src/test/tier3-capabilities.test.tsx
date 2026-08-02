@@ -40,7 +40,7 @@ describe("Launchpad pre-cleaning", () => {
     renderAppAt("/projects/p1/new-session");
     await screen.findByRole("heading", { name: "New session" });
     await user.upload(screen.getByLabelText("Data files (.csv)"), csvFile());
-    await screen.findByText(/Ready · ds_orders/);
+    await screen.findByRole("checkbox", { name: "Exclude orders.csv" });
     await user.click(screen.getByRole("button", { name: "Run analysis" }));
 
     await screen.findByRole("heading", { name: "Data Map" });
@@ -63,7 +63,7 @@ describe("Launchpad pre-cleaning", () => {
     renderAppAt("/projects/p1/new-session");
     await screen.findByRole("heading", { name: "New session" });
     await user.upload(screen.getByLabelText("Data files (.csv)"), csvFile());
-    await screen.findByText(/Ready · ds_orders/);
+    await screen.findByRole("checkbox", { name: "Exclude orders.csv" });
 
     /* Cleaning is optional tuning and the compact checkbox is its only entry
      * point. Thresholds appear only after it is enabled. */

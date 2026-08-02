@@ -15,6 +15,10 @@ const featuresDir = path.resolve(
 );
 const source = (file: string) =>
   readFileSync(path.join(featuresDir, file), "utf8");
+const sharedDataWorkspace = readFileSync(
+  path.resolve(featuresDir, "../components/data-workspace.tsx"),
+  "utf8",
+);
 
 
 /* One width for every page.
@@ -25,7 +29,7 @@ const source = (file: string) =>
  * honest: `FULL_WIDTH` had contained a page capped at max-w-data, and two more
  * pages sat at Tailwind's max-w-4xl with one at an arbitrary max-w-[72rem].
  *
- * 90% gives a visible gutter at any panel width; max-w-data stops the shell
+ * 95% gives a visible gutter at any panel width; max-w-data stops the shell
  * before a wide monitor turns running text into 180-character lines. Prose is
  * bounded separately and closer to the text: report-markdown.css caps the
  * report body at 72ch, SectionHeader descriptions carry max-w-content, and the
@@ -74,6 +78,13 @@ function pageRoots(file: string): string[] {
 
 describe("page width adoption", () => {
   it.each(PAGE_ROOTS)("%s uses the shared page width", (file) => {
+    const src = source(file);
+    if (src.includes("<DataWorkspacePage")) {
+      expect(sharedDataWorkspace).toContain("mx-auto");
+      expect(sharedDataWorkspace).toContain("w-[95%]");
+      expect(sharedDataWorkspace).toContain("max-w-data");
+      return;
+    }
     const roots = pageRoots(file);
     expect(roots.length, `${file}: no page root found`).toBeGreaterThan(0);
     for (const cls of roots) {
@@ -87,6 +98,7 @@ describe("page width adoption", () => {
    * arbitrary values, so "aligned" is checkable rather than asserted. */
   it("no page root carries a competing width", () => {
     for (const file of PAGE_ROOTS) {
+      if (source(file).includes("<DataWorkspacePage")) continue;
       for (const cls of pageRoots(file)) {
         expect(cls, file).not.toMatch(/max-w-content/);
         expect(cls, file).not.toMatch(/max-w-\[/);

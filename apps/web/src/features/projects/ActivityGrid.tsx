@@ -1,9 +1,14 @@
 /* Sessions with activity per UTC day, newest column last. Home switches this
  * between seven, thirty and one hundred eighty days. */
 
+import type { CSSProperties } from "react";
 import type { UsageDay } from "../../api/client";
 
 const WEEKDAYS = 7;
+const GRID_GAP_PX = 4;
+const GRID_TARGET_WIDTH_PX = 412;
+const MIN_CELL_PX = 12;
+const MAX_CELL_PX = 20;
 
 /* Four steps, not a continuous ramp: with a handful of runs a day, a smooth
  * scale makes 1 and 2 indistinguishable. */
@@ -36,38 +41,57 @@ export function ActivityGrid({ days }: { days: UsageDay[] }) {
   for (let index = 0; index < days.length; index += WEEKDAYS) {
     weeks.push(days.slice(index, index + WEEKDAYS));
   }
+  const isSingleWeek = days.length <= WEEKDAYS;
+  /* Keep the selected range honest — seven days should not render 173 blank
+   * dates — while allocating a comfortable tile size for short windows. Once
+   * the view grows, cells shrink just enough to keep the half-year grid within
+   * the same visual measure rather than turning 30d into five giant columns. */
+  const weekCount = Math.max(1, weeks.length);
+  const cellSize = Math.max(
+    MIN_CELL_PX,
+    Math.min(
+      MAX_CELL_PX,
+      Math.floor(
+        (GRID_TARGET_WIDTH_PX - (weekCount - 1) * GRID_GAP_PX) / weekCount,
+      ),
+    ),
+  );
+  const gridStyle = {
+    "--activity-cell-size": `${cellSize}px`,
+  } as CSSProperties;
   return (
     <div className="flex flex-col gap-2">
       <div
         data-activity-grid
-        data-activity-layout="fixed-180"
+        data-activity-layout="selected-window"
+        data-activity-window={days.length}
+        data-activity-cell-size={cellSize}
         role="img"
         aria-label={`Active sessions per day over the last ${days.length} days; busiest day had ${busiest}`}
-        className="grid w-full grid-flow-col auto-cols-fr gap-[3px] pb-1"
+        style={gridStyle}
+        className={`grid w-fit gap-1 pb-1 ${
+          isSingleWeek
+            ? "grid-cols-[repeat(7,var(--activity-cell-size))]"
+            : "grid-flow-col grid-rows-7 auto-cols-[var(--activity-cell-size)]"
+        }`}
       >
-        {weeks.map((week) => (
-          <div
-            key={week[0]?.date}
-            aria-hidden="true"
-            className="flex min-w-0 flex-col gap-[3px]"
-          >
-            {week.map((day) => (
+        {isSingleWeek
+          ? days.map((day) => (
               <span
                 key={day.date}
                 title={label(day)}
-                className={`aspect-square w-full rounded-[2px] ${levelClass(day.sessions, busiest)}`}
+                className={`size-[var(--activity-cell-size)] rounded-[2px] ${levelClass(day.sessions, busiest)}`}
               />
-            ))}
-          </div>
-        ))}
-      </div>
-      <div className="flex items-center gap-1.5 text-xs text-status-neutral">
-        <span>Less</span>
-        <span className="size-2 rounded-[2px] bg-track" />
-        <span className="size-2 rounded-[2px] bg-primary/30" />
-        <span className="size-2 rounded-[2px] bg-primary/60" />
-        <span className="size-2 rounded-[2px] bg-primary" />
-        <span>More</span>
+            ))
+          : weeks.flatMap((week) =>
+              week.map((day) => (
+                <span
+                  key={day.date}
+                  title={label(day)}
+                  className={`size-[var(--activity-cell-size)] rounded-[2px] ${levelClass(day.sessions, busiest)}`}
+                />
+              )),
+            )}
       </div>
     </div>
   );

@@ -64,21 +64,100 @@ function scoredEdges() {
   ];
 }
 
+async function waitForRelationshipWorkspace() {
+  await screen.findByText("Column candidates");
+}
+
 async function openInspector(name: RegExp) {
   const user = userEvent.setup();
   renderAppAt(PAGE_PATH);
-  await screen.findByRole("heading", { name: "Relationships" });
+  await waitForRelationshipWorkspace();
   await user.click(screen.getByRole("button", { name }));
   return user;
 }
 
 describe("Relationships page", () => {
+  it("keeps pair, candidate, and confirmed-join units explicit", async () => {
+    renderAppAt(PAGE_PATH);
+    await waitForRelationshipWorkspace();
+
+    expect(screen.getByText("Datasets").parentElement).toHaveTextContent("2");
+    expect(screen.getByText("Dataset pairs").parentElement).toHaveTextContent("1");
+    expect(screen.getByText("Column candidates").parentElement).toHaveTextContent("2");
+    expect(screen.getByText("Confirmed joins").parentElement).toHaveTextContent("0");
+    expect(screen.getByText("Discovery").parentElement).toHaveTextContent(
+      "Complete",
+    );
+  });
+
+  it("defaults large table sets to the matrix and keeps view state in the URL", async () => {
+    const base = relationshipGraph("r1");
+    const seed = base.nodes![0]!;
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/relationships", () =>
+        HttpResponse.json({
+          ...base,
+          nodes: [
+            ...base.nodes!,
+            ...Array.from({ length: 7 }, (_, index) => ({
+              ...seed,
+              dataset_id: `extra_${index}`,
+              name: `extra_${index}.csv`,
+            })),
+          ],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    const router = renderAppWithRouter(PAGE_PATH);
+    await waitForRelationshipWorkspace();
+
+    expect(
+      screen.getByRole("table", { name: "Table relationship matrix" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Matrix" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Overview" }));
+    expect(
+      document.querySelectorAll(".relationships-flow .react-flow__node"),
+    ).toHaveLength(9);
+    expect(new URLSearchParams(router.state.location.search).get("view")).toBe(
+      "overview",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Neighborhood" }));
+    expect(document.querySelector(".relationships-flow")).not.toBeNull();
+    expect(new URLSearchParams(router.state.location.search).get("view")).toBe(
+      "neighborhood",
+    );
+  });
+
+  it("shows pair-level explanation before column-level validation", async () => {
+    const user = userEvent.setup();
+    const router = renderAppWithRouter(
+      `${PAGE_PATH}?pair=${encodeURIComponent("sample→lookup")}`,
+    );
+    await waitForRelationshipWorkspace();
+
+    expect(screen.getByText("Many → one lookup")).toBeInTheDocument();
+    expect(screen.getByText("Why this pair surfaced")).toBeInTheDocument();
+    expect(screen.getByText("Target key uniqueness")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Candidates · 2" }));
+    expect(screen.getByRole("button", { name: CANDIDATE_NAME })).toBeInTheDocument();
+    expect(new URLSearchParams(router.state.location.search).get("detail")).toBe(
+      "candidates",
+    );
+  });
+
   it("restores score, confidence, pair, and edge context from the URL", async () => {
     const user = userEvent.setup();
     renderAppAt(
       `${PAGE_PATH}?score=0.9&confidence=high&pair=${encodeURIComponent("sample→lookup")}&edge=rel_candidate`,
     );
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     expect(
       screen.getByRole("list", { name: "Relationship review progress" }),
@@ -96,7 +175,7 @@ describe("Relationships page", () => {
   it("updates pair and edge route context atomically", async () => {
     const user = userEvent.setup();
     const router = renderAppWithRouter(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     await user.click(screen.getByRole("button", { name: CANDIDATE_NAME }));
     let params = new URLSearchParams(router.state.location.search);
@@ -114,7 +193,7 @@ describe("Relationships page", () => {
 
   it("lists edges with their three states and the legend", async () => {
     renderAppAt(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     const inspector = screen.getByRole("complementary", {
       name: "Relationship inspector",
@@ -139,7 +218,7 @@ describe("Relationships page", () => {
     /* Candidates are grouped under the table pair they join. */
     expect(
       within(inspector).getByRole("button", {
-        name: /sample\.csv → lookup\.csv/,
+        name: /sample\.csv ↔ lookup\.csv/,
       }),
     ).toBeInTheDocument();
 
@@ -151,7 +230,7 @@ describe("Relationships page", () => {
   it("supports keyboard move cancel, commit, undo, and edge selection on the canvas", async () => {
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     /* jsdom does not lay out handles, so React Flow cannot materialise its SVG
      * edges. Add the same focusable edge target React Flow renders in-browser
@@ -372,7 +451,7 @@ describe("Relationships page", () => {
     );
     const user = userEvent.setup();
     renderAppAt(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
     const inspector = screen.getByRole("complementary", {
       name: "Relationship inspector",
     });
@@ -416,6 +495,26 @@ describe("Relationships page", () => {
     ).toBeInTheDocument();
   });
 
+  it("filters candidates by validation status", async () => {
+    const user = userEvent.setup();
+    const router = renderAppWithRouter(PAGE_PATH);
+    await waitForRelationshipWorkspace();
+    const inspector = screen.getByRole("complementary", {
+      name: "Relationship inspector",
+    });
+
+    await user.click(within(inspector).getByLabelText("Candidate"));
+    expect(
+      within(inspector).queryByRole("button", { name: CANDIDATE_NAME }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(inspector).getByRole("button", { name: VALIDATED_NAME }),
+    ).toBeInTheDocument();
+    expect(new URLSearchParams(router.state.location.search).get("state")).toBe(
+      "confirmed,validated",
+    );
+  });
+
   it("resets the candidate filters when the user switches run", async () => {
     server.use(
       http.get("/api/v1/sessions/:sessionId/relationships", ({ params }) =>
@@ -427,7 +526,7 @@ describe("Relationships page", () => {
     );
     const user = userEvent.setup();
     const router = renderAppWithRouter(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     // Narrow run r1 down to nothing: high min score plus medium unchecked.
     await user.click(screen.getByRole("checkbox", { name: "medium" }));
@@ -461,7 +560,7 @@ describe("Relationships page", () => {
       ),
     );
     renderAppAt(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     /* The prose line is now a figure in the search-coverage strip. */
     expect(screen.getByText("Omitted by size cap").nextElementSibling)
@@ -475,7 +574,7 @@ describe("Relationships page", () => {
 
   it("stays quiet about truncation when nothing was dropped", async () => {
     renderAppAt(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     expect(screen.queryByText(/output-size cap/)).not.toBeInTheDocument();
   });
@@ -495,7 +594,7 @@ describe("Relationships page", () => {
       }),
     );
     renderAppAt(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     expect(
       screen.getByText(
@@ -506,7 +605,7 @@ describe("Relationships page", () => {
 
   it("does not warn when a high-confidence relationship exists", async () => {
     renderAppAt(PAGE_PATH);
-    await screen.findByRole("heading", { name: "Relationships" });
+    await waitForRelationshipWorkspace();
 
     expect(
       screen.queryByText(/No high-confidence relationship was found/),

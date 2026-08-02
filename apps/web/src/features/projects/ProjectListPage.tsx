@@ -147,14 +147,14 @@ function DashboardMetric({
   value: string | number;
 }) {
   return (
-    <div className="flex min-w-0 flex-col rounded-md bg-surface px-1.5 py-1 xl:px-1 xl:py-0.5">
-      <Marquee className="text-[11px] leading-tight text-status-neutral xl:hidden 2xl:block">
+    <div className="flex min-w-0 flex-col rounded-md bg-surface px-1.5 py-1.5 xl:px-2 xl:py-1">
+      <Marquee
+        title={compactLabel ?? label}
+        className="text-xs leading-tight text-status-neutral"
+      >
         {label}
       </Marquee>
-      <span className="hidden truncate text-[10px] leading-tight text-status-neutral xl:block 2xl:hidden">
-        {compactLabel ?? label}
-      </span>
-      <span className="tabular whitespace-nowrap text-base leading-tight font-semibold xl:text-sm 2xl:text-base">
+      <span className="tabular whitespace-nowrap text-lg leading-tight font-semibold">
         {value}
       </span>
     </div>
@@ -180,10 +180,10 @@ function UsageDashboard({
   return (
     <Card
       tone="quiet"
-      className="flex h-full min-w-0 flex-col gap-2.5 p-3 sm:p-4 xl:p-3 2xl:p-4"
+      className="flex h-full min-w-0 flex-col gap-3 p-4 sm:p-5 xl:p-4 2xl:p-5"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold" id="workspace-overview">
+        <h1 className="text-xl font-semibold" id="workspace-overview">
           Overview
         </h1>
         <UsagePeriodToggle period={period} onChange={onPeriodChange} />
@@ -191,7 +191,7 @@ function UsageDashboard({
 
       <div
         data-dashboard-metrics
-        className="grid grid-cols-2 gap-x-1 gap-y-0.5 md:grid-cols-4"
+        className="grid grid-cols-2 gap-x-3 gap-y-2 md:grid-cols-4"
       >
         <DashboardMetric
           label="Active days"
@@ -235,8 +235,8 @@ function UsageDashboard({
         />
       </div>
 
-      <section className="flex min-w-0 flex-col gap-1.5 border-t border-border pt-2">
-        <h2 className="text-xs font-medium">
+      <section className="flex min-w-0 flex-col gap-2 border-t border-border pt-3">
+        <h2 className="text-sm font-semibold">
           Activity · {windowDays} days
         </h2>
         <ActivityGrid days={activityDays} />
@@ -338,12 +338,11 @@ function UsagePeriodToggle({
   );
 }
 
-/* The launch surface itself, not a link to it: dropping a CSV is the first thing
- * a returning user does here, and it used to cost a navigation to reach a page
- * that then asked for the same project this one already lists. */
+/* A compact final action keeps Home scan-friendly and sends every launch
+ * through the one authoritative composer on New session. */
 function QuickStart() {
   return (
-    <Card tone="quiet" className="flex flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3.5 sm:px-5">
+    <Card tone="quiet" className="flex flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3.5 shadow-overlay sm:px-5">
       <div className="min-w-0 flex-1">
         <h2 className="text-base font-semibold">Start an analysis</h2>
         <p className="text-sm text-status-neutral">
@@ -393,10 +392,10 @@ export function Component() {
   };
 
   return (
-    <div className="mx-auto flex w-[95%] max-w-data flex-col gap-4 py-4 sm:py-5 lg:py-6">
+    <div className="mx-auto flex min-h-full w-[95%] max-w-data flex-col gap-4 py-4 sm:py-5 lg:py-6">
       <div
         data-home-layout="workspace"
-        className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(20rem,2fr)] lg:items-stretch"
+        className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-stretch"
       >
         <div
           data-home-column="overview"
@@ -485,7 +484,9 @@ export function Component() {
         </aside>
       </div>
 
-      <QuickStart />
+      <div data-home-launch className="sticky bottom-3 z-10 mt-auto pt-2">
+        <QuickStart />
+      </div>
     </div>
   );
 }

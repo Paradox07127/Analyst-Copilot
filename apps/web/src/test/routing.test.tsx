@@ -175,7 +175,7 @@ describe("Routing", () => {
     expect(
       await screen.findByRole("heading", { name: "Table Preview" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Table")).toHaveValue("sample");
+    expect(screen.getByLabelText("Dataset")).toHaveValue("sample");
   });
 
   it("keeps Table preview active for a non-default dataset route", async () => {

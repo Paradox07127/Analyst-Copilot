@@ -34,12 +34,11 @@ const FINISHED_SESSION_STATUSES = new Set([
  * with the investigation pages because it is the kanban over them; Trace & cost
  * and Artifacts sit together because both answer "where did this number come
  * from". */
-function useNavGroups(
+function buildNavGroups(
   projectId: string,
   sessionId: string,
+  firstDatasetId?: string,
 ): NavGroup[] {
-  const datasets = useDatasets(sessionId);
-  const firstDatasetId = datasets.data?.[0]?.dataset_id;
   const at = (section: string) => sessionSectionPath(projectId, sessionId, section);
   const pinned = readBaseline(projectId);
   /* Compare belongs to the current run's workbench, not a project-level
@@ -115,7 +114,7 @@ function useNavGroups(
 /* A handoff is more trustworthy than a session's coarse lifecycle status:
  * auto-EDA publishes it when the data surfaces are safe to browse, while the
  * agent can still be drafting questions and the report afterwards. */
-function usePipelineReadiness(sessionId: string): {
+function usePipelineReadiness(sessionId: string, hasDatasets: boolean): {
   data: StageState;
   agent: StageState;
 } {
@@ -124,7 +123,10 @@ function usePipelineReadiness(sessionId: string): {
   const status = session.data?.status?.toLowerCase();
   const finished = status ? FINISHED_SESSION_STATUSES.has(status) : false;
   const completed = status === "complete" || status === "completed";
-  const dataReady = Boolean(edaHandoff.data) || completed;
+  /* A failed or cancelled run can still leave a complete, browseable dataset
+   * workspace behind. The data itself is stronger evidence than the coarse
+   * session status, so do not lock users out of partial EDA results. */
+  const dataReady = Boolean(edaHandoff.data) || completed || hasDatasets;
   const active = Boolean(status && !finished);
 
   useEffect(() => {
@@ -146,7 +148,7 @@ function usePipelineReadiness(sessionId: string): {
  * panel so the session rail and the Inspector keep their full height, and the
  * rail stays a session switcher rather than competing with 17 page links. */
 const barClass =
-  "relative flex min-w-0 shrink-0 flex-col gap-1 border-b border-border bg-bg px-3 py-1.5 sm:px-4";
+  "relative z-30 flex min-w-0 shrink-0 flex-col gap-1 overflow-visible border-b border-border bg-bg px-3 py-1.5 sm:px-4";
 
 const itemClass = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-1.5 rounded-base px-2 py-1 text-sm transition-colors duration-150 ease-out-quart ${
@@ -184,12 +186,14 @@ function unavailableReason(
  * rest and the full three-way choice only takes space while needed. */
 function StagePickerButton({
   group,
+  index,
   selected,
   current,
   panelId,
   onSelect,
 }: {
   group: NavGroup;
+  index: number;
   selected: boolean;
   current: boolean;
   panelId: string;
@@ -208,7 +212,10 @@ function StagePickerButton({
           : "border-transparent text-status-neutral hover:bg-surface hover:text-text"
       }`}
     >
-      {group.title}
+      <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full border border-current/25 font-mono text-[11px]">
+        {index + 1}
+      </span>
+      <span>{group.title}</span>
       {/* Only when the two diverge: looking ahead at another stage must not
        * make the bar forget which stage the open page belongs to. */}
       {current && !selected && (
@@ -225,8 +232,16 @@ function SessionNavGroups({
   projectId: string;
   sessionId: string;
 }) {
-  const readiness = usePipelineReadiness(sessionId);
-  const groups = useNavGroups(projectId, sessionId);
+  const datasets = useDatasets(sessionId);
+  const readiness = usePipelineReadiness(
+    sessionId,
+    Boolean(datasets.data?.length),
+  );
+  const groups = buildNavGroups(
+    projectId,
+    sessionId,
+    datasets.data?.[0]?.dataset_id,
+  );
   const { pathname } = useLocation();
   const panelId = useId();
   const pickerId = useId();
@@ -249,6 +264,13 @@ function SessionNavGroups({
   useEffect(() => {
     setStagePickerOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    const activeLink = navRef.current?.querySelector<HTMLAnchorElement>(
+      'a[aria-current="page"]',
+    );
+    activeLink?.scrollIntoView?.({ block: "nearest", inline: "center" });
+  }, [pathname, selected.title]);
 
   useEffect(() => {
     if (!stagePickerOpen) return;
@@ -329,12 +351,13 @@ function SessionNavGroups({
         <div
           id={pickerId}
           aria-label="Choose a work stage"
-          className="animate-enter flex flex-wrap items-center gap-1 border-t border-hairline pt-1"
+          className="animate-enter absolute left-3 top-[calc(100%+0.25rem)] z-40 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-1 rounded-base border border-border bg-surface p-2 shadow-overlay"
         >
-          {groups.map((group) => (
+          {groups.map((group, index) => (
             <StagePickerButton
               key={group.title}
               group={group}
+              index={index}
               selected={group.title === selected.title}
               current={group.title === currentGroup.title}
               panelId={panelId}

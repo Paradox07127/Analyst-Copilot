@@ -57,7 +57,7 @@ describe("Launchpad", () => {
         files: [new File(["notes"], "notes.txt", { type: "text/plain" })],
       },
     });
-    expect(await screen.findByText("Add CSV files only.")).toBeInTheDocument();
+    expect(await screen.findByText("Choose CSV files only.")).toBeInTheDocument();
   });
 
   it("keeps the run panel focused on the current LLM connection", async () => {
@@ -140,6 +140,56 @@ describe("Launchpad", () => {
     expect(screen.getByText("Locked after adding data.")).toBeInTheDocument();
   });
 
+  it("creates a staged project only when the analysis starts", async () => {
+    let projectBody: Record<string, unknown> | null = null;
+    let jobBody: Record<string, unknown> | null = null;
+    server.use(
+      http.post("/api/v1/projects", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        projectBody = body;
+        return HttpResponse.json(
+          {
+            project_id: String(body["project_id"]),
+            name: String(body["name"]),
+            session_count: 0,
+          },
+          { status: 201 },
+        );
+      }),
+      http.post("/api/v1/sessions/:sessionId/jobs", async ({ request, params }) => {
+        jobBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            job_id: "job_new_project",
+            session_id: String(params["sessionId"]),
+            status: "queued",
+            events_url: "/api/v1/jobs/job_new_project/events",
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/new-session");
+
+    const project = await screen.findByRole("combobox", { name: "Project" });
+    await user.selectOptions(project, "new");
+    await user.type(screen.getByLabelText("Project name"), "Revenue review");
+    await user.upload(screen.getByLabelText("Data files (.csv)"), csvFile());
+    expect(projectBody).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Run analysis" }));
+    await screen.findByRole("heading", { name: "Data Map" });
+    expect(projectBody).toEqual({
+      project_id: "Revenue review",
+      name: "Revenue review",
+    });
+    expect(jobBody).toMatchObject({
+      project_id: "Revenue review",
+      datasets: ["ds_orders"],
+    });
+  });
+
   it("uses the server-provisioned private bucket without creating it", async () => {
     let createAttempts = 0;
     server.use(
@@ -205,7 +255,7 @@ describe("Launchpad", () => {
     expect(runButton).toBeDisabled();
 
     await user.upload(screen.getByLabelText("Data files (.csv)"), csvFile());
-    expect(await screen.findByText(/Ready · ds_orders/)).toBeInTheDocument();
+    expect(await screen.findByText("Saved to project")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Business context"), {
       target: { value: "E-commerce orders" },
@@ -228,7 +278,7 @@ describe("Launchpad", () => {
     expect(FakeEventSource.latest().url).toBe("/api/v1/jobs/job_1/events");
   });
 
-  it("removes a fresh upload from this session without deleting project data", async () => {
+  it("deselects a saved fresh upload without deleting project data", async () => {
     let deletes = 0;
     server.use(
       http.delete("/api/v1/projects/:projectId/uploads/:datasetId", () => {
@@ -243,16 +293,14 @@ describe("Launchpad", () => {
       await screen.findByLabelText("Data files (.csv)"),
       csvFile(),
     );
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Remove orders.csv from this session",
-      }),
-    );
+    const uploaded = await screen.findByRole("checkbox", {
+      name: "Exclude orders.csv",
+    });
+    await user.click(uploaded);
 
     expect(deletes).toBe(0);
-    expect(
-      screen.queryByRole("checkbox", { name: /orders\.csv/ }),
-    ).not.toBeInTheDocument();
+    expect(uploaded).toHaveAccessibleName("Include orders.csv");
+    expect(uploaded).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Run analysis" })).toBeDisabled();
   });
 
@@ -289,7 +337,7 @@ describe("Launchpad", () => {
       await screen.findByLabelText("Data files (.csv)"),
       csvFile(),
     );
-    await screen.findByText(/Ready · ds_orders/);
+    await screen.findByText("Saved to project");
     await user.click(screen.getByRole("button", { name: "Run analysis" }));
     await screen.findByText("Boom.");
     await user.click(screen.getByRole("button", { name: "Run analysis" }));
@@ -297,6 +345,50 @@ describe("Launchpad", () => {
     await screen.findByRole("heading", { name: "Data Map" });
     expect(attempts[0]!.sessionId).toBe(attempts[1]!.sessionId);
     expect(attempts[0]!.key).toBe(attempts[1]!.key);
+  });
+
+  it("rotates the run id and key after launch inputs change", async () => {
+    const attempts: { sessionId: string; key: string | null }[] = [];
+    server.use(
+      http.post("/api/v1/sessions/:sessionId/jobs", ({ request, params }) => {
+        const sessionId = String(params["sessionId"]);
+        attempts.push({
+          sessionId,
+          key: request.headers.get("Idempotency-Key"),
+        });
+        if (attempts.length === 1) {
+          return HttpResponse.json(
+            { error: { code: "internal", message: "Boom." } },
+            { status: 500 },
+          );
+        }
+        return HttpResponse.json(
+          {
+            job_id: "job_changed",
+            session_id: sessionId,
+            status: "queued",
+            events_url: "/api/v1/jobs/job_changed/events",
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/new-session");
+    await user.upload(await screen.findByLabelText("Data files (.csv)"), csvFile());
+    await screen.findByText("Saved to project");
+
+    await user.click(screen.getByRole("button", { name: "Run analysis" }));
+    await screen.findByText("Boom.");
+    fireEvent.change(screen.getByLabelText("Business context"), {
+      target: { value: "Use the revised scope" },
+    });
+    await user.click(screen.getByRole("button", { name: "Run analysis" }));
+    await screen.findByRole("heading", { name: "Data Map" });
+
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.sessionId).not.toBe(attempts[0]!.sessionId);
+    expect(attempts[1]!.key).not.toBe(attempts[0]!.key);
   });
 
   it("shows the conflict branch with a jump link", async () => {
@@ -320,7 +412,7 @@ describe("Launchpad", () => {
       await screen.findByLabelText("Data files (.csv)"),
       csvFile(),
     );
-    await screen.findByText(/Ready · ds_orders/);
+    await screen.findByText("Saved to project");
     await user.click(screen.getByRole("button", { name: "Run analysis" }));
 
     expect(
@@ -368,6 +460,29 @@ describe("Launchpad", () => {
 });
 
 describe("Reusing project data", () => {
+  it("select all and clear selection include fresh uploads", async () => {
+    const user = userEvent.setup();
+    const customerFile = new File(["id,name\n1,b\n"], "customers.csv", {
+      type: "text/csv",
+    });
+    renderAppAt("/projects/p1/new-session");
+
+    await user.upload(await screen.findByLabelText("Data files (.csv)"), [
+      csvFile(),
+      customerFile,
+    ]);
+    await waitFor(() =>
+      expect(screen.getAllByText("Saved to project")).toHaveLength(2),
+    );
+    await user.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.getByRole("checkbox", { name: "Include orders.csv" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Include customers.csv" })).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Select all" }));
+    expect(screen.getByRole("checkbox", { name: "Exclude orders.csv" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Exclude customers.csv" })).toBeChecked();
+  });
+
   it("launches from a table an earlier session uploaded", async () => {
     let jobBody: Record<string, unknown> | null = null;
     server.use(
@@ -452,7 +567,10 @@ describe("Reusing project data", () => {
     const list = await screen.findByRole("list", {
       name: "Data files in this session",
     });
-    expect(list).toHaveClass("max-h-72", "overflow-y-auto");
+    expect(list).toHaveClass(
+      "max-h-[min(13rem,28dvh)]",
+      "overflow-y-auto",
+    );
     for (const file of files) {
       await user.click(
         screen.getByRole("checkbox", {

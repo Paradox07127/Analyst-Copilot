@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import type { QualityIssueRow } from "../../api/client";
 import { useQuality } from "../../api/hooks";
@@ -157,6 +157,8 @@ export function Component() {
    * selection; without the sentinel, clearing the last checkbox silently
    * turned every code back on. */
   const [codesParam, setCodesParam] = useRouteSearchParam("codes");
+  const [issueTypesOpen, setIssueTypesOpen] = useState(false);
+  const issueTypesRef = useRef<HTMLDetailsElement>(null);
   const selectedCodes =
     codesParam === "none"
       ? new Set<string>()
@@ -189,6 +191,26 @@ export function Component() {
       (a, b) => a.code.localeCompare(b.code),
     );
   }, [quality.data]);
+
+  useEffect(() => {
+    if (!issueTypesOpen) return;
+
+    const closeIfOutside = (event: PointerEvent) => {
+      if (!issueTypesRef.current?.contains(event.target as Node)) {
+        setIssueTypesOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIssueTypesOpen(false);
+    };
+
+    document.addEventListener("pointerdown", closeIfOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeIfOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [issueTypesOpen]);
 
   const toggleCode = (code: string) => {
     const base =
@@ -312,7 +334,12 @@ export function Component() {
                       ]}
                     />
                   </div>
-                  <details className="relative">
+                  <details
+                    ref={issueTypesRef}
+                    open={issueTypesOpen}
+                    onToggle={(event) => setIssueTypesOpen(event.currentTarget.open)}
+                    className="relative"
+                  >
                     <summary className="cursor-pointer list-none rounded-base border border-border px-3 py-2 text-sm font-medium hover:bg-surface">Issue types <span className="tabular text-status-neutral">· {selectedCodes?.size ?? codeOptions.length}</span></summary>
                     <fieldset className="absolute right-0 z-30 mt-1 flex max-h-72 w-72 flex-col gap-1 overflow-y-auto rounded-base border border-border bg-surface p-2 shadow-overlay text-sm">
                       <legend className="sr-only">Code type</legend>

@@ -391,6 +391,11 @@ describe("Run navigation groups", () => {
     const trigger = screen.getByRole("button", { name: "Understand the data" });
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     await user.click(trigger);
+    const picker = screen.getByLabelText("Choose a work stage");
+    expect(picker).toHaveClass("absolute", "z-40", "shadow-overlay");
+    expect(
+      screen.getByRole("button", { name: "Show Investigate with the agent pages" }),
+    ).toHaveTextContent(/2.*Investigate with the agent/);
     expect(
       screen.getByRole("button", { name: "Show Investigate with the agent pages" }),
     ).toBeInTheDocument();
@@ -408,6 +413,42 @@ describe("Run navigation groups", () => {
     expect(screen.getByRole("heading", { name: "Data Map" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Show Understand the data pages" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps partial EDA browseable when a failed session still has datasets", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          project_id: "p1",
+          title: "Partial run",
+          status: "failed",
+          created_at: "2026-07-20T10:00:00Z",
+          updated_at: "2026-07-21T10:00:00Z",
+          dataset_names: ["sample"],
+          artifact_count: 1,
+          report_status: null,
+          chat_message_count: 0,
+          code_version: "abc123",
+          seed: 42,
+          source_session_id: null,
+          artifact_type_counts: { table: 1 },
+          warnings: ["analysis stopped after profiling"],
+        }),
+      ),
+    );
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    await screen.findByRole("heading", { name: "Data Map" });
+
+    const navigation = screen.getByRole("navigation", {
+      name: "Session sections",
+    });
+    expect(
+      await within(navigation).findByRole("link", { name: "Quality" }),
+    ).toBeInTheDocument();
+    expect(
+      within(navigation).queryByText("EDA is still preparing this workspace."),
     ).not.toBeInTheDocument();
   });
 

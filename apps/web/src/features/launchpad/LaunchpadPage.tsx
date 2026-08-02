@@ -424,16 +424,12 @@ function SupportDocsBar({
 
 /* ------------------------------------------------------------------- panel */
 
-export function NewSessionPanel({
+function NewSessionPanel({
   projectId: fixedProjectId,
-  layout = "inline",
 }: {
   /** Set by the per-project route: the destination is decided, so the picker
    *  collapses to a label instead of offering to move the session. */
   projectId?: string;
-  /** The route keeps launch confirmation visible beside the composer. Home
-   * embeds the same panel inline inside its quick-start card. */
-  layout?: "inline" | "route";
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -988,13 +984,7 @@ export function NewSessionPanel({
   );
 
   return (
-    <div
-      className={
-        layout === "route"
-          ? "grid min-w-0 grid-cols-1 items-start gap-4 @2xl/launchpad:grid-cols-[minmax(0,1fr)_19rem]"
-          : "flex min-w-0 flex-col gap-2"
-      }
-    >
+    <div className="grid min-w-0 grid-cols-1 items-start gap-4 @2xl/launchpad:grid-cols-[minmax(0,1fr)_19rem]">
       <div className="flex min-w-0 flex-col gap-4">
         <section
           aria-labelledby="launchpad-project-title"
@@ -1114,9 +1104,7 @@ export function NewSessionPanel({
             className={`flex flex-wrap items-center gap-x-3 gap-y-2 px-3 ${
               rows.length > 0 || projectUploads.isPending
                 ? "border-t border-hairline py-2.5"
-                : layout === "inline"
-                  ? "py-3"
-                  : "py-8"
+                : "py-8"
             }`}
           >
             <Button
@@ -1164,69 +1152,42 @@ export function NewSessionPanel({
             aria-label="Business context"
             value={businessContext}
             onChange={(event) => setBusinessContext(event.target.value)}
-            rows={layout === "inline" ? 1 : 2}
+            rows={2}
             placeholder="What is this data about, and what decision should the analysis support?"
             className="w-full resize-y rounded-base border border-border bg-bg p-2.5 text-sm outline-none placeholder:text-status-neutral"
           />
         </label>
 
-        {layout === "inline" && (
-          <div className="flex flex-col rounded-base border border-border bg-surface">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5">
-              {runOptions}
-              <span className="ml-auto flex flex-wrap items-center gap-3">
-                <span aria-live="polite" className="text-xs text-status-neutral">
-                  {blockedReason ??
-                    `${selectedFileCount} file${
-                      selectedFileCount === 1 ? "" : "s"
-                    } · report on · ${modelLabel}`}
-                </span>
-                {startButton}
-              </span>
-            </div>
-            {precleanEnabled(preclean) && (
-              <PrecleaningFields value={preclean} onChange={setPreclean} />
-            )}
-          </div>
-        )}
       </div>
 
-      {layout === "route" && (
-        <Card
-          as="section"
-          tone="quiet"
-          aria-labelledby="launchpad-run-title"
-          className="flex min-w-0 flex-col gap-3 p-3.5 @2xl/launchpad:sticky @2xl/launchpad:top-4"
-        >
-          <SectionHeader
-            level={2}
-            title={<span id="launchpad-run-title">Run analysis</span>}
-            description="Profile the data, check quality and generate a report."
-          />
-          {runSummary}
-          <div className="border-t border-border pt-3">{runOptions}</div>
-          {precleanEnabled(preclean) && (
-            <PrecleaningFields value={preclean} onChange={setPreclean} />
-          )}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
-            <span
-              aria-live="polite"
-              className="min-w-0 flex-1 text-xs text-status-neutral"
-            >
-              {blockedReason ?? "Ready to start."}
-            </span>
-            {startButton}
-          </div>
-        </Card>
-      )}
-
-      <div
-        className={
-          layout === "route"
-            ? "flex flex-col gap-3 @2xl/launchpad:col-span-2"
-            : ""
-        }
+      <Card
+        as="section"
+        tone="quiet"
+        aria-labelledby="launchpad-run-title"
+        className="flex min-w-0 flex-col gap-3 p-3.5 @2xl/launchpad:sticky @2xl/launchpad:top-4"
       >
+        <SectionHeader
+          level={2}
+          title={<span id="launchpad-run-title">Run analysis</span>}
+          description="Profile the data, check quality and generate a report."
+        />
+        {runSummary}
+        <div className="border-t border-border pt-3">{runOptions}</div>
+        {precleanEnabled(preclean) && (
+          <PrecleaningFields value={preclean} onChange={setPreclean} />
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+          <span
+            aria-live="polite"
+            className="min-w-0 flex-1 text-xs text-status-neutral"
+          >
+            {blockedReason ?? "Ready to start."}
+          </span>
+          {startButton}
+        </div>
+      </Card>
+
+      <div className="flex flex-col gap-3 @2xl/launchpad:col-span-2">
         {conflict ? (
           <div
             role="alert"
@@ -1263,8 +1224,8 @@ export function NewSessionPanel({
 
 /* --------------------------------------------------------------- route shell */
 
-/* The route gets a quiet sticky confirmation panel; Home embeds the same
- * composer inline, where a second column would compete with the dashboard. */
+/* The launch workflow has one route and one confirmation pattern. Home points
+ * here instead of keeping a second, inevitably drifting composer. */
 export function Component() {
   const { projectId } = useParams();
   return (
@@ -1276,7 +1237,7 @@ export function Component() {
         </p>
       </header>
       <div className="@container/launchpad">
-        <NewSessionPanel projectId={projectId} layout="route" />
+        <NewSessionPanel projectId={projectId} />
       </div>
     </div>
   );
