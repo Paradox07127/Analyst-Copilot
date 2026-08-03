@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
@@ -208,6 +209,15 @@ class ReceiptMethod(BaseModel):
     assumptions: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
+    def hypothesis_evidence_is_explicitly_invalid(self) -> bool:
+        """Return the producer-owned validity decision for hypothesis evidence.
+
+        Warning prose is intentionally not interpreted here. Tool adapters and
+        executor-side adjudicators can set this structured parameter when a
+        method precondition invalidates the receipt as hypothesis evidence.
+        """
+        return self.parameters.get("hypothesis_evidence_valid") is False
+
     @field_validator("parameters", mode="after")
     @classmethod
     def _freeze_parameters(
@@ -230,6 +240,11 @@ class ReceiptStatistics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     hypothesis_id: str | None = None
+    statistical_family_id: str | None = None
+    # Executor-owned relation between the measured result and the named
+    # hypothesis. The reducer never infers this from prose, p-values, ordering,
+    # or the model's requested tool sequence.
+    hypothesis_outcome: Literal["supports", "contradicts"] | None = None
     test_name: str
     test_statistic: float | None = None
     p_value: float | None = None
@@ -239,6 +254,30 @@ class ReceiptStatistics(BaseModel):
     ci_high: float | None = None
     sample_size: int | None = None
     sequence_index: int | None = None
+
+    @model_validator(mode="after")
+    def _outcome_requires_a_hypothesis(self) -> ReceiptStatistics:
+        if self.hypothesis_outcome is not None and not (self.hypothesis_id or "").strip():
+            raise ValueError("hypothesis_outcome requires a non-empty hypothesis_id.")
+        return self
+
+    def has_valid_numeric_values(self) -> bool:
+        """Whether populated statistics are finite and internally ordered."""
+        values = (
+            self.test_statistic,
+            self.p_value,
+            self.adjusted_p_value,
+            self.effect_size,
+            self.ci_low,
+            self.ci_high,
+        )
+        if any(value is not None and not math.isfinite(value) for value in values):
+            return False
+        return not (
+            self.ci_low is not None
+            and self.ci_high is not None
+            and self.ci_low > self.ci_high
+        )
 
 
 class EvidenceReceipt(BaseModel):
@@ -394,6 +433,19 @@ def receipt_content_digest(receipt_fields: dict[str, object]) -> str:
         if key != "content_digest"
         and not (value is None and key in _OMITTED_FROM_DIGEST_WHEN_NONE)
     }
+    # ``hypothesis_outcome`` was added after statistical receipts were already
+    # persisted. Omit its unset form so those receipts retain their original
+    # digest; any explicit supports/contradicts value remains covered.
+    statistics = body.get("statistics")
+    if isinstance(statistics, dict):
+        body["statistics"] = {
+            key: value
+            for key, value in statistics.items()
+            if not (
+                value is None
+                and key in {"hypothesis_outcome", "statistical_family_id"}
+            )
+        }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

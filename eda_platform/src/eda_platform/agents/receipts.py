@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 
+from eda_platform.agents.tool_context import HypothesisExecutionBinding
 from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.receipts import (
     EvidenceReceipt,
@@ -113,3 +114,159 @@ def build_receipt(
     digest_view["artifact_ids"] = list(artifact_ids)
     fields["content_digest"] = receipt_content_digest(digest_view)
     return EvidenceReceipt.model_validate(fields)
+
+
+def adjudicate_receipt_hypothesis(
+    receipt: EvidenceReceipt,
+    binding: HypothesisExecutionBinding | None,
+) -> EvidenceReceipt:
+    """Bind a typed predicate to tool facts using versioned deterministic rules.
+
+    The binding is minted by the exploration control plane and is absent for
+    ordinary agent tool calls. The model never authors the outcome.
+    """
+    if binding is None:
+        return receipt
+    outcome = _predicate_outcome(receipt, binding)
+    if (
+        receipt.method.hypothesis_evidence_is_explicitly_invalid()
+        or (
+            receipt.statistics is not None
+            and not receipt.statistics.has_valid_numeric_values()
+        )
+    ):
+        outcome = None
+    statistics = receipt.statistics
+    if statistics is None:
+        statistics = ReceiptStatistics(
+            hypothesis_id=binding.hypothesis_id,
+            hypothesis_outcome=outcome,
+            test_name="system_predicate_adjudication_v1",
+        )
+    else:
+        statistics = statistics.model_copy(
+            update={
+                "hypothesis_id": binding.hypothesis_id,
+                "hypothesis_outcome": outcome,
+            }
+        )
+    fields = receipt.model_dump(mode="json", exclude={"content_digest"})
+    fields["statistics"] = statistics.model_dump(mode="json")
+    fields["content_digest"] = receipt_content_digest(fields)
+    return EvidenceReceipt.model_validate(fields)
+
+
+def _predicate_outcome(
+    receipt: EvidenceReceipt,
+    binding: HypothesisExecutionBinding,
+) -> Literal["supports", "contradicts"] | None:
+    if not _method_matches_tool(binding.method_family, receipt.tool_name):
+        return None
+    if not set(binding.dataset_ids).issubset(receipt.scope.dataset_ids):
+        return None
+    if receipt.scope.scope_resolution != "whole_dataset" and not set(
+        binding.columns
+    ).issubset(receipt.scope.columns):
+        return None
+    predicate = binding.predicate
+    operator = predicate.operator
+    statistics = receipt.statistics
+    if statistics is not None and operator in {"differs", "associated_with"}:
+        p_value = (
+            statistics.adjusted_p_value
+            if statistics.adjusted_p_value is not None
+            else statistics.p_value
+        )
+        if p_value is not None and p_value <= 0.05:
+            effect = statistics.effect_size
+            if operator in {"differs", "associated_with"}:
+                materiality = predicate.threshold or 0.0
+                if effect is None or abs(effect) > materiality:
+                    return "supports"
+
+    # A statistical group-comparison effect is a standardized difference,
+    # rank effect, eta-squared, odds ratio, or another test-family quantity. It
+    # is not the predicate metric in that metric's own units. Therefore
+    # greater_than/less_than must fall through to a recorded numeric fact named
+    # by predicate.metric; a run_stat_test receipt does not currently publish
+    # such a fact and correctly remains unadjudicated instead of turning the
+    # sign of an effect into an absolute-threshold claim.
+
+    facts = {fact.fact_id: fact.value for fact in receipt.facts}
+    if operator == "associated_with" and receipt.tool_name == "diagnose_missingness":
+        threshold = predicate.threshold
+        if threshold is None or predicate.right_operand is None:
+            return None
+        target_pair = {
+            predicate.metric.casefold(),
+            predicate.right_operand.casefold(),
+        }
+        for fact_id, value in facts.items():
+            if not fact_id.startswith("group_range") or not fact_id.endswith(".columns"):
+                continue
+            if not isinstance(value, str) or {
+                item.strip().casefold() for item in value.split("~")
+            } != target_pair:
+                continue
+            prefix = fact_id.removesuffix(".columns")
+            delta = facts.get(prefix + ".percentage_points")
+            if isinstance(delta, (int, float)) and not isinstance(delta, bool):
+                return "supports" if abs(float(delta)) >= threshold else "contradicts"
+        return None
+
+    if operator == "has_spike" and receipt.tool_name == "analyze_time_series":
+        detected = facts.get("spike_detected")
+        if isinstance(detected, bool):
+            return "supports" if detected else "contradicts"
+        return None
+
+    if operator in {"exists", "absent"}:
+        exists = receipt.result_count > 0
+        return "supports" if exists == (operator == "exists") else "contradicts"
+
+    value = _predicate_numeric_value(facts, predicate.metric)
+    threshold = predicate.threshold
+    if value is None or threshold is None:
+        return None
+    if operator == "greater_than":
+        return "supports" if value > threshold else "contradicts"
+    if operator == "less_than":
+        return "supports" if value < threshold else "contradicts"
+    if operator == "equal_to":
+        return "supports" if value == threshold else "contradicts"
+    if operator == "not_equal_to":
+        return "supports" if value != threshold else "contradicts"
+    return None
+
+
+def _method_matches_tool(method_family: str, tool_name: str) -> bool:
+    """Resolve the small system-owned conceptual-method alias set fail closed."""
+    normalized_method = method_family.strip().casefold()
+    normalized_tool = tool_name.strip().casefold()
+    aliases = {
+        "compare_groups": frozenset({"run_stat_test"}),
+    }
+    allowed = aliases.get(normalized_method, frozenset({normalized_method}))
+    return normalized_tool in allowed
+
+
+def _predicate_numeric_value(
+    facts: dict[str, float | int | str | bool | None], metric: str
+) -> float | None:
+    normalized = metric.casefold()
+    for fact_id, value in facts.items():
+        if fact_id.casefold() == normalized and isinstance(value, (int, float)) and not isinstance(
+            value, bool
+        ):
+            return float(value)
+    for fact_id, value in facts.items():
+        if not fact_id.endswith(".name") or not isinstance(value, str):
+            continue
+        if value.casefold() != normalized:
+            continue
+        prefix = fact_id.removesuffix(".name")
+        for suffix in (".missing_percent", ".value", ".mean"):
+            candidate = facts.get(prefix + suffix)
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+                return float(candidate)
+    return None

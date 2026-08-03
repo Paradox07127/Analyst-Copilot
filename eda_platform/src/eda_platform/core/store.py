@@ -1770,6 +1770,19 @@ class ArtifactStore:
             ).fetchone()
         return None if row is None else self._job_row_to_dict(row)
 
+    def latest_job_for_session(self, session_id: str) -> dict | None:
+        """Newest lifecycle attempt attached to one concrete derived run."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"""
+                select {self._JOB_COLUMNS} from jobs
+                where session_id = ?
+                order by created_at desc limit 1
+                """,
+                (session_id,),
+            ).fetchone()
+        return None if row is None else self._job_row_to_dict(row)
+
     def list_active_jobs(self) -> list[dict]:
         with closing(self._connect()) as conn:
             rows = conn.execute(

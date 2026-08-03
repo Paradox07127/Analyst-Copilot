@@ -9,15 +9,17 @@ are injected; every domain transition rule lives in the reducer.
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Protocol, cast
+from typing import BinaryIO, Protocol, cast
 
 from pydantic import TypeAdapter
 
 from eda_platform.core.file_lock import lock_exclusive, unlock
+from eda_platform.core.fs import BINARY_FLAG
 from eda_platform.core.ids import stable_hash
 
 _writer_locks = threading.local()
@@ -186,7 +188,7 @@ class JsonlEventJournal[EventT: JournalEventLike, StateT: JournalStateLike]:
                 )
             )
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+b") as handle:
+        with _open_append_no_follow(lock_path) as handle:
             lock_exclusive(handle.fileno())
             try:
                 yield
@@ -219,20 +221,31 @@ class JsonlEventJournal[EventT: JournalEventLike, StateT: JournalStateLike]:
             if state is not None and state != rebuilt:
                 raise self._transition_error("snapshot state does not match the journal.")
             self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.snapshot_path.with_suffix(self.snapshot_path.suffix + ".tmp")
             body = rebuilt.model_dump_json(indent=2).encode("utf-8")
-            with temporary.open("wb") as handle:
-                handle.write(body)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.snapshot_path)
-            return self.snapshot_path
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=self.snapshot_path.parent,
+                prefix=f".{self.snapshot_path.stem}-",
+                suffix=".tmp",
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(body)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self.snapshot_path)
+                _fsync_directory(self.snapshot_path.parent)
+                return self.snapshot_path
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def read_snapshot(self) -> StateT | None:
         if not self.snapshot_path.exists():
             return None
         try:
-            return self._state_adapter.validate_json(self.snapshot_path.read_bytes())
+            return self._state_adapter.validate_json(
+                _read_bytes_no_follow(self.snapshot_path)
+            )
         except (OSError, ValueError) as exc:
             raise self._corruption_error(
                 f"Invalid {self._label} snapshot {self.snapshot_path}: {exc}"
@@ -250,20 +263,23 @@ class JsonlEventJournal[EventT: JournalEventLike, StateT: JournalStateLike]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._truncate_unterminated_tail_unlocked()
         encoded = event.model_dump_json().encode("utf-8") + b"\n"
-        with self.path.open("ab") as handle:
+        with _open_append_no_follow(self.path) as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
+        _fsync_directory(self.path.parent)
 
     def _truncate_unterminated_tail_unlocked(self) -> None:
         """Discard an uncommitted crash tail before appending the next event."""
         if not self.path.exists():
             return
-        raw = self.path.read_bytes()
+        raw = _read_bytes_no_follow(self.path)
         if not raw or raw.endswith(b"\n"):
             return
         committed_end = raw.rfind(b"\n") + 1
-        with self.path.open("r+b") as handle:
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | BINARY_FLAG
+        descriptor = os.open(self.path, flags)
+        with os.fdopen(descriptor, "r+b") as handle:
             handle.truncate(committed_end)
             handle.flush()
             os.fsync(handle.fileno())
@@ -302,7 +318,7 @@ class JsonlEventJournal[EventT: JournalEventLike, StateT: JournalStateLike]:
         )
         if session_dir is None:
             self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.lock_path.open("a+b") as handle:
+            with _open_append_no_follow(self.lock_path) as handle:
                 lock_exclusive(handle.fileno())
                 try:
                     yield
@@ -314,7 +330,7 @@ class JsonlEventJournal[EventT: JournalEventLike, StateT: JournalStateLike]:
         store = ArtifactStore(workspace, init_db=False)
         with store.session_write_guard(project_dir.name, session_dir.name):
             self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.lock_path.open("a+b") as handle:
+            with _open_append_no_follow(self.lock_path) as handle:
                 lock_exclusive(handle.fileno())
                 try:
                     yield
@@ -323,7 +339,7 @@ class JsonlEventJournal[EventT: JournalEventLike, StateT: JournalStateLike]:
 
     def _read_events(self) -> Iterator[EventT]:
         try:
-            raw = self.path.read_bytes()
+            raw = _read_bytes_no_follow(self.path)
         except OSError as exc:
             raise self._corruption_error(
                 f"Cannot read {self._label} journal {self.path}: {exc}"
@@ -349,3 +365,35 @@ class JsonlEventJournal[EventT: JournalEventLike, StateT: JournalStateLike]:
                 raise self._corruption_error(
                     f"Invalid committed record at line {index + 1} in {self.path}: {exc}"
                 ) from exc
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist a newly created/replaced directory entry on POSIX filesystems."""
+    if os.name == "nt":  # opening directories with os.open is not supported
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_bytes_no_follow(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read()
+
+
+@contextmanager
+def _open_append_no_follow(path: Path) -> Iterator[BinaryIO]:
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_APPEND
+        | getattr(os, "O_NOFOLLOW", 0)
+        | BINARY_FLAG
+    )
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "a+b") as handle:
+        yield handle

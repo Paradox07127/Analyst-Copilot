@@ -69,6 +69,9 @@ IDEMPOTENT_OPERATIONS = frozenset(
         "reject_investigation_plan_api_v1_sessions__session_id__investigations__plan_id__reject_post",
         "execute_investigation_plans_api_v1_sessions__session_id__investigations_execute_post",
         "start_macro_loop_api_v1_sessions__session_id__investigations_macro_loop_post",
+        "start_exploration_api_v1_sessions__session_id__explorations_post",
+        "resume_exploration_api_v1_sessions__session_id__explorations__exploration_id__resume_post",
+        "extend_exploration_budget_api_v1_sessions__session_id__explorations__exploration_id__extend_budget_post",
     }
 )
 
@@ -120,6 +123,9 @@ INTRINSIC_OPERATIONS = frozenset(
         "prepare_investigation_decision_api_v1_sessions__session_id__investigations__plan_id__prepare_decision_post",
         "prepare_investigation_execution_api_v1_sessions__session_id__investigations_prepare_execute_post",
         "prepare_macro_loop_api_v1_sessions__session_id__investigations_prepare_macro_loop_post",
+        "prepare_exploration_api_v1_sessions__session_id__explorations_prepare_post",
+        "pause_exploration_api_v1_sessions__session_id__explorations__exploration_id__pause_post",
+        "cancel_exploration_api_v1_sessions__session_id__explorations__exploration_id__cancel_post",
         # Renaming is naturally convergent: repeating the same display name
         # does not create a second resource or require optimistic locking.
         "rename_project_api_v1_projects__project_id__patch",

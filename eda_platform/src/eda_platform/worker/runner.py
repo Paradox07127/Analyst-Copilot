@@ -162,6 +162,8 @@ def run_job(
                 handler = _run_dataset_distributions_job
             elif job["kind"] == "custom_chart":
                 handler = _run_custom_chart_job
+            elif job["kind"] == "exploration_run":
+                handler = _run_exploration_job
             else:
                 raise ValueError(f"Unsupported job kind: {job['kind']}")
             _invoke_job_handler(
@@ -355,6 +357,56 @@ def _run_auto_eda_job(
                 temp_file.unlink(missing_ok=True)
             with suppress(OSError):
                 temp_file.parent.rmdir()
+
+
+def _run_exploration_job(
+    store: ArtifactStore,
+    workspace: str,
+    job: dict,
+    params: dict,
+    *,
+    cancel_check: CancelCheck | None = None,
+) -> None:
+    """Execute the certified E4a root while the journal owns product status."""
+    from eda_platform.core.exploration_journal import JsonlExplorationJournal
+    from eda_platform.core.exploration_shadow_store import shadow_run_root
+    from eda_platform.worker.exploration import run_exploration_worker
+
+    _checkpoint(cancel_check)
+    source_session_id = str(params.get("source_session_id", ""))
+    exploration_id = str(params.get("exploration_id", ""))
+    policy = params.get("policy")
+    goal = policy.get("goal") if isinstance(policy, dict) else None
+    _start_derived_run(
+        store,
+        job,
+        source_session_id=source_session_id,
+        title=str(goal or "Autonomous exploration"),
+    )
+    run_exploration_worker(
+        store,
+        workspace,
+        job,
+        params,
+        llm=_build_llm(params),
+        cancel_check=cancel_check,
+    )
+    state = JsonlExplorationJournal(
+        shadow_run_root(store.root, exploration_id) / "journal.jsonl"
+    ).rebuild()
+    if state is None:
+        raise RuntimeError("exploration worker returned without a journal state")
+    emit_job_event(
+        store,
+        job,
+        "exploration.attempt_finished",
+        {
+            "exploration_id": exploration_id,
+            "exploration_status": state.status,
+            "stop_reason": state.stop_reason,
+            "journal_seq": state.last_seq,
+        },
+    )
 
 
 def _preclean_options(params: dict) -> dict[str, Any] | None:

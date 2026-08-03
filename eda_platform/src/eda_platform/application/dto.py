@@ -1864,7 +1864,11 @@ class SettingsView(BaseModel):
     usd_per_1k_completion: float = 0.0
     """0 means "use the built-in model pricing defaults" (core.llm)."""
     analysis_depth: int = 0
-    """Thinking level: 0 Standard, 1 Deep (deep investigation), 2+ Ultra (macro loop)."""
+    """Exploration tier: 0 Quick, 1 Standard, 2/3 Deep.
+
+    The legacy investigation path still uses 1+ for deep analysis and 2+ for
+    its macro loop; no additional product-facing tier vocabulary is created.
+    """
     dev_mode: bool = False
     api_key_set: bool = False
     api_key_last4: str = ""
@@ -1901,8 +1905,7 @@ class SettingsPatch(BaseModel):
     usd_per_1k_prompt: float | None = None
     usd_per_1k_completion: float | None = None
     analysis_depth: int | None = None
-    """0-3. Raising it to 1 enables deep investigation, 2+ additionally
-    authorizes the macro loop's automatic follow-up rounds."""
+    """0-3, mapped centrally to Quick / Standard / Deep exploration tiers."""
     dev_mode: bool | None = None
     api_key: str | None = Field(default=None, repr=False)
     clear_api_key: bool | None = None
@@ -1966,6 +1969,9 @@ class SystemCapabilitiesView(BaseModel):
     pdf_export_available: bool
     pdf_export_hint: str = ""
     """Install instructions; empty when PDF export already works."""
+    exploration_available: bool = False
+    exploration_hint: str = ""
+    """Exploration is visible only with a verified, runtime-bound E4a release."""
 
 
 class SandboxStatusView(BaseModel):

@@ -97,6 +97,7 @@ DERIVED_SESSION_PREFIXES = (
     "mlsess_",
     "sbsess_",
     "drsess_",
+    "explsess_",
     "dop_",
     "investigation_",
 )

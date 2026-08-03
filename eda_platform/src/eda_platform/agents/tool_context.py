@@ -15,6 +15,18 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from eda_platform.core.ids import stable_hash
+from eda_platform.schemas.hypotheses import HypothesisPredicate
+
+
+@dataclass(frozen=True, slots=True)
+class HypothesisExecutionBinding:
+    """System-owned proposition passed to deterministic tool adapters."""
+
+    hypothesis_id: str
+    predicate: HypothesisPredicate
+    method_family: str
+    dataset_ids: tuple[str, ...]
+    columns: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +36,7 @@ class ToolExecutionContext:
     logical_step_id: str
     attempt_epoch: int = 0
     sequence_index: int = 0
+    hypothesis: HypothesisExecutionBinding | None = None
 
     def call_identity(self) -> str:
         # provider_call_id is model-emitted text, and both provider adapters fall

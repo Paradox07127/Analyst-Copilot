@@ -20,6 +20,9 @@ import {
   type CustomChartRequest,
   type DecisionStoryDraftRequest,
   type DecisionReportGenerateRequest,
+  type ExplorationBudgetIncrease,
+  type ExplorationPrepareRequest,
+  type ExplorationViewDto,
   type VerifiedRelationDeleteRequest,
 } from "./client";
 import {
@@ -103,6 +106,8 @@ export const queryKeys = {
   projectUploads: (projectId: string) => ["project-uploads", projectId] as const,
   sandboxStatus: ["system", "sandbox"] as const,
   capabilities: ["system", "capabilities"] as const,
+  exploration: (sessionId: string, explorationId: string) =>
+    ["exploration", sessionId, explorationId] as const,
 };
 
 export const CHAT_PAGE_SIZE = 50;
@@ -241,6 +246,103 @@ export function useSessionDetail(sessionId: string) {
     queryKey: queryKeys.session(sessionId),
     queryFn: ({ signal }) => api.getSession(sessionId, signal),
     enabled: Boolean(sessionId),
+  });
+}
+
+export function useExploration(
+  sessionId: string,
+  explorationId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: queryKeys.exploration(sessionId, explorationId),
+    queryFn: ({ signal }) =>
+      api.getExploration(sessionId, explorationId, signal),
+    enabled: enabled && Boolean(sessionId && explorationId),
+  });
+}
+
+export function usePrepareExploration(sessionId: string) {
+  return useMutation({
+    mutationFn: (body: ExplorationPrepareRequest) =>
+      api.prepareExploration(sessionId, body),
+  });
+}
+
+function setExploration(
+  queryClient: ReturnType<typeof useQueryClient>,
+  view: ExplorationViewDto,
+) {
+  queryClient.setQueryData(
+    queryKeys.exploration(view.session_id, view.exploration_id),
+    view,
+  );
+}
+
+export function useStartExploration(sessionId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      action_hash: string;
+      approval_token: string;
+      idempotencyKey: string;
+    }) =>
+      api.startExploration(
+        sessionId,
+        {
+          action_hash: vars.action_hash,
+          approval_token: vars.approval_token,
+        },
+        vars.idempotencyKey,
+      ),
+    onSuccess: (result) => setExploration(queryClient, result.exploration),
+  });
+}
+
+export function usePauseExploration(sessionId: string, explorationId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.pauseExploration(sessionId, explorationId),
+    onSuccess: (view) => setExploration(queryClient, view),
+  });
+}
+
+export function useResumeExploration(sessionId: string, explorationId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (idempotencyKey: string) =>
+      api.resumeExploration(sessionId, explorationId, idempotencyKey),
+    onSuccess: (result) => setExploration(queryClient, result.exploration),
+  });
+}
+
+export function useCancelExploration(sessionId: string, explorationId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.cancelExploration(sessionId, explorationId),
+    onSuccess: (view) => setExploration(queryClient, view),
+  });
+}
+
+export function useExtendExplorationBudget(
+  sessionId: string,
+  explorationId: string,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      increase: ExplorationBudgetIncrease;
+      reason: string;
+      idempotencyKey: string;
+    }) =>
+      api.extendExplorationBudget(
+        sessionId,
+        explorationId,
+        vars.increase,
+        vars.reason,
+        vars.idempotencyKey,
+      ),
+    onSuccess: (result) => setExploration(queryClient, result.exploration),
   });
 }
 

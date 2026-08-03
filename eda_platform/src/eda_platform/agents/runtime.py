@@ -9,9 +9,10 @@ the local registry validates and executes every request.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,6 +25,7 @@ from eda_platform.agents.tool_context import (
 )
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.cancellation import CancellationError
+from eda_platform.core.ids import stable_hash
 from eda_platform.core.llm import LLMToolCall, ToolCallingLLM
 
 TraceSink = Callable[[str, str, dict[str, Any]], None]
@@ -52,6 +54,43 @@ class AgentTool:
             "description": self.description,
             "parameters": self.args_schema.model_json_schema(),
         }
+
+
+def canonical_tool_arguments(
+    args_schema: type[BaseModel], arguments: BaseModel | Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate and include schema defaults exactly as the executor does."""
+    raw = (
+        arguments.model_dump(mode="json")
+        if isinstance(arguments, BaseModel)
+        else dict(arguments)
+    )
+    return args_schema.model_validate(raw).model_dump(mode="json")
+
+
+def canonical_tool_arguments_digest(
+    args_schema: type[BaseModel], arguments: BaseModel | Mapping[str, Any]
+) -> str:
+    """Registry/provenance digest over canonical provider arguments."""
+    return stable_hash(canonical_tool_arguments(args_schema, arguments), length=32)
+
+
+def canonical_tool_input_digest(
+    args_schema: type[BaseModel], arguments: BaseModel | Mapping[str, Any]
+) -> str:
+    """Receipt SHA-256 over the same normalized argument document."""
+    return canonical_json_sha256(canonical_tool_arguments(args_schema, arguments))
+
+
+def canonical_json_sha256(value: Any) -> str:
+    """Receipt-compatible SHA-256 for a canonical JSON-like value."""
+    canonical = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)

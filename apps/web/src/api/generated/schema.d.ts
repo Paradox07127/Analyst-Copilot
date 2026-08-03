@@ -1749,6 +1749,142 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/explorations/prepare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Prepare Exploration */
+        post: operations["prepare_exploration_api_v1_sessions__session_id__explorations_prepare_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/explorations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Exploration */
+        post: operations["start_exploration_api_v1_sessions__session_id__explorations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Exploration */
+        get: operations["get_exploration_api_v1_sessions__session_id__explorations__exploration_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pause Exploration */
+        post: operations["pause_exploration_api_v1_sessions__session_id__explorations__exploration_id__pause_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Exploration */
+        post: operations["resume_exploration_api_v1_sessions__session_id__explorations__exploration_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Exploration */
+        post: operations["cancel_exploration_api_v1_sessions__session_id__explorations__exploration_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/extend-budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Extend Exploration Budget */
+        post: operations["extend_exploration_budget_api_v1_sessions__session_id__explorations__exploration_id__extend_budget_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stream Exploration Events */
+        get: operations["stream_exploration_events_api_v1_sessions__session_id__explorations__exploration_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/investigations": {
         parameters: {
             query?: never;
@@ -2342,6 +2478,143 @@ export interface components {
         Body_create_upload_api_v1_projects__project_id__uploads_post: {
             /** File */
             file: string;
+        };
+        /**
+         * BudgetAmendment
+         * @description One monotonic link in the amendment chain (R3.2: caps only go up).
+         */
+        BudgetAmendment: {
+            /** Amendment Id */
+            amendment_id: string;
+            /** Previous Effective Fingerprint */
+            previous_effective_fingerprint: string;
+            increase: components["schemas"]["BudgetCapIncrease-Output"];
+            /** Reason */
+            reason: string;
+            /** Approved By */
+            approved_by: string;
+            /** Created At */
+            created_at: string;
+        };
+        /**
+         * BudgetCapIncrease
+         * @description Strictly additive deltas; a zero increase across the board is invalid.
+         */
+        "BudgetCapIncrease-Input": {
+            /**
+             * Max Requests
+             * @default 0
+             */
+            max_requests: number;
+            /**
+             * Max Input Tokens
+             * @default 0
+             */
+            max_input_tokens: number;
+            /**
+             * Max Output Tokens
+             * @default 0
+             */
+            max_output_tokens: number;
+            /**
+             * Max Total Tokens
+             * @default 0
+             */
+            max_total_tokens: number;
+            /**
+             * Max Cost Usd
+             * @default 0
+             */
+            max_cost_usd: number | string;
+            /**
+             * Max Wall Seconds
+             * @default 0
+             */
+            max_wall_seconds: number;
+            /**
+             * Max Successful Tool Calls
+             * @default 0
+             */
+            max_successful_tool_calls: number;
+            /** Max Tool Calls By Kind */
+            max_tool_calls_by_kind?: {
+                [key: string]: number;
+            };
+            /**
+             * Max Rows Scanned
+             * @default 0
+             */
+            max_rows_scanned: number;
+            /**
+             * Max Result Cells
+             * @default 0
+             */
+            max_result_cells: number;
+            /**
+             * Max Rounds
+             * @default 0
+             */
+            max_rounds: number;
+        };
+        /**
+         * BudgetCapIncrease
+         * @description Strictly additive deltas; a zero increase across the board is invalid.
+         */
+        "BudgetCapIncrease-Output": {
+            /**
+             * Max Requests
+             * @default 0
+             */
+            max_requests: number;
+            /**
+             * Max Input Tokens
+             * @default 0
+             */
+            max_input_tokens: number;
+            /**
+             * Max Output Tokens
+             * @default 0
+             */
+            max_output_tokens: number;
+            /**
+             * Max Total Tokens
+             * @default 0
+             */
+            max_total_tokens: number;
+            /**
+             * Max Cost Usd
+             * @default 0
+             */
+            max_cost_usd: string;
+            /**
+             * Max Wall Seconds
+             * @default 0
+             */
+            max_wall_seconds: number;
+            /**
+             * Max Successful Tool Calls
+             * @default 0
+             */
+            max_successful_tool_calls: number;
+            /** Max Tool Calls By Kind */
+            max_tool_calls_by_kind?: {
+                [key: string]: number;
+            };
+            /**
+             * Max Rows Scanned
+             * @default 0
+             */
+            max_rows_scanned: number;
+            /**
+             * Max Result Cells
+             * @default 0
+             */
+            max_result_cells: number;
+            /**
+             * Max Rounds
+             * @default 0
+             */
+            max_rounds: number;
         };
         /**
          * CandidateDecisionView
@@ -4032,6 +4305,345 @@ export interface components {
             /** Note */
             note: string;
         };
+        /** ExplorationBudgetExtended */
+        ExplorationBudgetExtended: {
+            exploration: components["schemas"]["ExplorationView"];
+            amendment: components["schemas"]["BudgetAmendment"];
+            /** Effective Policy Fingerprint */
+            effective_policy_fingerprint: string;
+        };
+        /**
+         * ExplorationBudgetPolicy
+         * @description Multi-dimensional hard limits for one exploration run (plan §4.2).
+         */
+        ExplorationBudgetPolicy: {
+            llm: components["schemas"]["SessionBudgetPolicyModel"];
+            /** Max Successful Tool Calls */
+            max_successful_tool_calls: number;
+            /** Max Tool Calls By Kind */
+            max_tool_calls_by_kind: {
+                [key: string]: number;
+            };
+            /** Max Rows Scanned */
+            max_rows_scanned?: number | null;
+            /** Max Result Cells */
+            max_result_cells?: number | null;
+            /** Idle Timeout Seconds */
+            idle_timeout_seconds: number;
+            /** Max Rounds */
+            max_rounds: number;
+        };
+        /** ExplorationBudgetView */
+        ExplorationBudgetView: {
+            base: components["schemas"]["ExplorationBudgetPolicy"];
+            /** Max Llm Requests */
+            max_llm_requests: number | null;
+            /** Remaining Llm Requests */
+            remaining_llm_requests: number | null;
+            /** Max Successful Tool Calls */
+            max_successful_tool_calls: number;
+            /** Remaining Successful Tool Calls */
+            remaining_successful_tool_calls: number;
+            /** Max Rows Scanned */
+            max_rows_scanned: number | null;
+            /** Rows Scanned */
+            rows_scanned: number;
+            /** Max Result Cells */
+            max_result_cells: number | null;
+            /** Result Cells */
+            result_cells: number;
+            /** Max Rounds */
+            max_rounds: number;
+            /** Remaining Rounds */
+            remaining_rounds: number;
+            /** Max Cost Usd */
+            max_cost_usd: string | null;
+            /** Cost Usd */
+            cost_usd: string;
+            /** Remaining Cost Usd */
+            remaining_cost_usd: string | null;
+            /** Llm Requests Used */
+            llm_requests_used: number;
+            /** Successful Tool Calls Used */
+            successful_tool_calls_used: number;
+            /** Rounds Used */
+            rounds_used: number;
+            /**
+             * Amendments
+             * @default []
+             */
+            amendments: components["schemas"]["BudgetAmendment"][];
+        };
+        /**
+         * ExplorationControlRequest
+         * @description Empty on purpose: policy identities are always reconstructed server-side.
+         */
+        ExplorationControlRequest: Record<string, never>;
+        /** ExplorationCostRange */
+        ExplorationCostRange: {
+            /** Minimum Usd */
+            minimum_usd: string;
+            /** Maximum Usd */
+            maximum_usd: string;
+            /**
+             * Basis
+             * @default policy_hard_cap
+             * @constant
+             */
+            basis: "policy_hard_cap";
+            /**
+             * Exact
+             * @default false
+             * @constant
+             */
+            exact: false;
+        };
+        /** ExplorationEvidenceView */
+        ExplorationEvidenceView: {
+            /** Receipt Id */
+            receipt_id: string;
+            /** Tool Name */
+            tool_name: string;
+            /** Summary */
+            summary: string;
+            /**
+             * Fact Ids
+             * @default []
+             */
+            fact_ids: string[];
+        };
+        /**
+         * ExplorationExtendBudgetRequest
+         * @description Only additive caps and a human reason; no client-provided fingerprints.
+         */
+        ExplorationExtendBudgetRequest: {
+            increase: components["schemas"]["BudgetCapIncrease-Input"];
+            /** Reason */
+            reason: string;
+        };
+        /** ExplorationHypothesisView */
+        ExplorationHypothesisView: {
+            /** Hypothesis Id */
+            hypothesis_id: string;
+            /** Statement */
+            statement: string;
+            /** Why Selected */
+            why_selected: string;
+            /** Status */
+            status: string;
+            /** Priority */
+            priority: number;
+        };
+        /** ExplorationInsightView */
+        ExplorationInsightView: {
+            /** Insight Id */
+            insight_id: string;
+            /** Hypothesis Id */
+            hypothesis_id: string;
+            /** Statement */
+            statement: string;
+            /** Family */
+            family: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "new" | "reinforced" | "refuted" | "inconclusive";
+            /**
+             * Trust Level
+             * @enum {string}
+             */
+            trust_level: "supported" | "contested" | "refuted" | "unsupported";
+            /**
+             * Evidence Lane
+             * @enum {string}
+             */
+            evidence_lane: "exploratory" | "confirmatory";
+            /** Proof */
+            proof: components["schemas"]["InsightProof"][];
+            /**
+             * Limitations
+             * @default []
+             */
+            limitations: string[];
+        };
+        /** ExplorationJobView */
+        ExplorationJobView: {
+            /** Job Id */
+            job_id: string;
+            /** Execution Session Id */
+            execution_session_id: string;
+            /** Status */
+            status: string;
+        };
+        /**
+         * ExplorationPolicy
+         * @description Immutable per-run policy; the fingerprint covers every field but itself.
+         */
+        ExplorationPolicy: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "open" | "goal_directed";
+            /** Goal */
+            goal?: string | null;
+            /** Dataset Scope */
+            dataset_scope: string[];
+            /**
+             * Thinking Level
+             * @enum {string}
+             */
+            thinking_level: "quick" | "standard" | "deep";
+            /** Coverage Targets */
+            coverage_targets: components["schemas"]["InsightFamily"][];
+            budget: components["schemas"]["ExplorationBudgetPolicy"];
+            /** Scoring Policy Version */
+            scoring_policy_version: string;
+            /** Statistical Policy Version */
+            statistical_policy_version: string;
+            /** Tool Capability Digest */
+            tool_capability_digest: string;
+            /**
+             * Policy Fingerprint
+             * @default
+             */
+            policy_fingerprint: string;
+        };
+        /** ExplorationPrepareRequest */
+        ExplorationPrepareRequest: {
+            /**
+             * Mode
+             * @default open
+             * @enum {string}
+             */
+            mode: "open" | "goal_directed";
+            /** Goal */
+            goal?: string | null;
+            /** Dataset Ids */
+            dataset_ids: string[];
+            /**
+             * Thinking Level
+             * @default standard
+             * @enum {string}
+             */
+            thinking_level: "quick" | "standard" | "deep";
+        };
+        /** ExplorationPrepared */
+        ExplorationPrepared: {
+            /** Exploration Id */
+            exploration_id: string;
+            /** Session Id */
+            session_id: string;
+            /** Project Id */
+            project_id: string;
+            policy: components["schemas"]["ExplorationPolicy"];
+            /** Data State Witness */
+            data_state_witness: string;
+            cost_range: components["schemas"]["ExplorationCostRange"];
+            /** Action Hash */
+            action_hash: string;
+            /** Approval Token */
+            approval_token: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Release Certificate Digest */
+            release_certificate_digest: string;
+        };
+        /** ExplorationReportView */
+        ExplorationReportView: {
+            /** Available */
+            available: boolean;
+            /** Artifact Ref */
+            artifact_ref?: string | null;
+        };
+        /** ExplorationStartRequest */
+        ExplorationStartRequest: {
+            /** Action Hash */
+            action_hash: string;
+            /** Approval Token */
+            approval_token: string;
+        };
+        /** ExplorationStarted */
+        ExplorationStarted: {
+            exploration: components["schemas"]["ExplorationView"];
+            job: components["schemas"]["ExplorationJobView"];
+        };
+        /** ExplorationView */
+        ExplorationView: {
+            /** Exploration Id */
+            exploration_id: string;
+            /** Session Id */
+            session_id: string;
+            /** Project Id */
+            project_id: string;
+            /** Goal */
+            goal: string;
+            /**
+             * Thinking Level
+             * @enum {string}
+             */
+            thinking_level: "quick" | "standard" | "deep";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "pause_requested" | "paused" | "stopped";
+            /** Stop Reason */
+            stop_reason?: ("completed" | "budget_exhausted" | "cancelled" | "failed" | "state_witness_changed" | "no_new_information") | null;
+            /** Last Seq */
+            last_seq: number;
+            /** Policy Fingerprint */
+            policy_fingerprint: string;
+            /** Effective Policy Fingerprint */
+            effective_policy_fingerprint: string;
+            /** Data State Witness */
+            data_state_witness: string;
+            /**
+             * Amendment Ids
+             * @default []
+             */
+            amendment_ids: string[];
+            current_hypothesis?: components["schemas"]["ExplorationHypothesisView"] | null;
+            /**
+             * Current Evidence
+             * @default []
+             */
+            current_evidence: components["schemas"]["ExplorationEvidenceView"][];
+            /**
+             * Insights
+             * @default []
+             */
+            insights: components["schemas"]["ExplorationInsightView"][];
+            /**
+             * Limitations
+             * @default []
+             */
+            limitations: string[];
+            /**
+             * Coverage Targets
+             * @default []
+             */
+            coverage_targets: string[];
+            /**
+             * Coverage Completed
+             * @default []
+             */
+            coverage_completed: string[];
+            /**
+             * Coverage Unexplored
+             * @default []
+             */
+            coverage_unexplored: string[];
+            report: components["schemas"]["ExplorationReportView"];
+            budget: components["schemas"]["ExplorationBudgetView"];
+            job?: components["schemas"]["ExplorationJobView"] | null;
+            /** Events Url */
+            events_url: string;
+        };
         /** FieldMeaningView */
         FieldMeaningView: {
             /** Dataset */
@@ -4381,6 +4993,30 @@ export interface components {
              * @constant
              */
             status: "ok";
+        };
+        /**
+         * InsightFamily
+         * @description Six-family taxonomy; values stay literally identical to InsightEval's
+         *     ``data_type`` (snapshot-tested against the Eval-0 checkers, doc §10.1).
+         * @enum {string}
+         */
+        InsightFamily: "Descriptive" | "Diagnostic" | "Predictive" | "Prescriptive" | "Evaluative" | "Exploratory";
+        /**
+         * InsightProof
+         * @description Fact-level, machine-checkable edge from an insight to one receipt.
+         */
+        InsightProof: {
+            /** Receipt Id */
+            receipt_id: string;
+            /** Fact Ids */
+            fact_ids: string[];
+            /**
+             * Comparison
+             * @enum {string}
+             */
+            comparison: "supports" | "contradicts";
+            /** Evidence Independence Key */
+            evidence_independence_key?: string | null;
         };
         /** InvestigationDecisionPrepareRequest */
         InvestigationDecisionPrepareRequest: {
@@ -6374,6 +7010,55 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /**
+         * SessionBudgetPolicyModel
+         * @description Pydantic mirror of core.budget.SessionBudgetPolicy (field-for-field).
+         */
+        SessionBudgetPolicyModel: {
+            /** Max Requests */
+            max_requests?: number | null;
+            /** Max Input Tokens */
+            max_input_tokens?: number | null;
+            /** Max Output Tokens */
+            max_output_tokens?: number | null;
+            /** Max Total Tokens */
+            max_total_tokens?: number | null;
+            /** Max Cost Usd */
+            max_cost_usd?: string | null;
+            /** Max Wall Seconds */
+            max_wall_seconds?: number | null;
+            /**
+             * Protected Requests
+             * @default 0
+             */
+            protected_requests: number;
+            /**
+             * Protected Input Tokens
+             * @default 0
+             */
+            protected_input_tokens: number;
+            /**
+             * Protected Output Tokens
+             * @default 0
+             */
+            protected_output_tokens: number;
+            /**
+             * Protected Total Tokens
+             * @default 0
+             */
+            protected_total_tokens: number;
+            /**
+             * Protected Cost Usd
+             * @default 0
+             */
+            protected_cost_usd: string;
+            /**
+             * Unknown Usage Policy
+             * @default consume_reservation
+             * @enum {string}
+             */
+            unknown_usage_policy: "consume_reservation" | "reject";
+        };
         /** SessionDebugSummary */
         SessionDebugSummary: {
             /**
@@ -7556,6 +8241,16 @@ export interface components {
              * @default
              */
             pdf_export_hint: string;
+            /**
+             * Exploration Available
+             * @default false
+             */
+            exploration_available: boolean;
+            /**
+             * Exploration Hint
+             * @default
+             */
+            exploration_hint: string;
         };
         /**
          * TraceEventPage
@@ -15817,6 +16512,694 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    prepare_exploration_api_v1_sessions__session_id__explorations_prepare_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-EDA-Session"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExplorationPrepareRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationPrepared"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    start_exploration_api_v1_sessions__session_id__explorations_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+                "X-EDA-Session"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExplorationStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationStarted"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_exploration_api_v1_sessions__session_id__explorations__exploration_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                exploration_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationView"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    pause_exploration_api_v1_sessions__session_id__explorations__exploration_id__pause_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                exploration_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExplorationControlRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationView"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    resume_exploration_api_v1_sessions__session_id__explorations__exploration_id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+                "X-EDA-Session"?: string | null;
+            };
+            path: {
+                session_id: string;
+                exploration_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExplorationControlRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationStarted"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cancel_exploration_api_v1_sessions__session_id__explorations__exploration_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                exploration_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExplorationControlRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationView"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    extend_exploration_budget_api_v1_sessions__session_id__explorations__exploration_id__extend_budget_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                session_id: string;
+                exploration_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExplorationExtendBudgetRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationBudgetExtended"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    stream_exploration_events_api_v1_sessions__session_id__explorations__exploration_id__events_get: {
+        parameters: {
+            query?: {
+                last_event_id?: string | null;
+            };
+            header?: {
+                "Last-Event-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+                exploration_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

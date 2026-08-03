@@ -9,7 +9,8 @@ consumes its reservation without terminating the run (plan R3.1/R3.3).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import TypeAdapter
@@ -49,6 +50,22 @@ from eda_platform.schemas.exploration_budget import BudgetCapIncrease
 
 _POLICY_FINGERPRINT_PREFIX = "xplcy_"
 _NATURAL_STOP_REASONS = frozenset({"completed", "budget_exhausted", "no_new_information"})
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveredToolCommit:
+    receipt_id: str
+    result_digest: str
+    rows_scanned: int = 0
+    result_cells: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.receipt_id:
+            raise ValueError("recovered tool commit requires receipt_id.")
+        if not self.result_digest:
+            raise ValueError("recovered tool commit requires result_digest.")
+        if self.rows_scanned < 0 or self.result_cells < 0:
+            raise ValueError("recovered tool usage cannot be negative.")
 
 
 class ExplorationResumeIncompatibleError(EventJournalError):
@@ -133,6 +150,10 @@ def reduce_exploration_event(
     elif isinstance(event, RoundStartedEvent):
         _require_running(state, "round_started")
         _require_no_pending(state)
+        if state.pending_terminal_reason is not None:
+            raise EventTransitionError(
+                "cannot start a round while a terminal decision is pending."
+            )
         if state.current_round_index is not None:
             raise EventTransitionError("the previous round is still open.")
         if state.remaining_round_budget <= 0:
@@ -144,6 +165,7 @@ def reduce_exploration_event(
         values["current_round_index"] = event.round_index
         values["rounds_started"] = state.rounds_started + 1
         values["remaining_round_budget"] = state.remaining_round_budget - 1
+        values["current_round_reduction_committed"] = False
     elif isinstance(event, LlmCallStartedEvent):
         _require_running(state, "llm_call_started")
         _require_no_pending(state)
@@ -155,11 +177,18 @@ def reduce_exploration_event(
                 "llm call would exceed the llm request cap (max_requests)."
             )
         values["pending_call_id"] = event.call_id
+        values["pending_call_step_id"] = event.step_id
     elif isinstance(event, LlmCallCompletedEvent):
         if event.call_id != state.pending_call_id:
             raise EventTransitionError("completed call does not match the pending call.")
+        if (
+            state.pending_call_step_id is not None
+            and event.step_id != state.pending_call_step_id
+        ):
+            raise EventTransitionError("completed step does not match the pending call.")
         _append_completed_step(values, state, event.step_id)
         values["pending_call_id"] = None
+        values["pending_call_step_id"] = None
         values["llm_calls_settled"] = state.llm_calls_settled + 1
         if state.remaining_llm_call_budget is not None:
             values["remaining_llm_call_budget"] = state.remaining_llm_call_budget - 1
@@ -167,6 +196,7 @@ def reduce_exploration_event(
         if event.call_id != state.pending_call_id:
             raise EventTransitionError("rejected call does not match the pending call.")
         values["pending_call_id"] = None
+        values["pending_call_step_id"] = None
         # A known provider rejection is still one attempted request. Treat it
         # as settled so repeated 4xx/5xx responses cannot bypass max_requests.
         values["llm_calls_settled"] = state.llm_calls_settled + 1
@@ -179,7 +209,9 @@ def reduce_exploration_event(
         if event.call_id != state.pending_call_id:
             raise EventTransitionError("uncertain call does not match the pending call.")
         values["pending_call_id"] = None
+        values["pending_call_step_id"] = None
         values["llm_calls_uncertain"] = state.llm_calls_uncertain + 1
+        values["uncertain_call_ids"] = [*state.uncertain_call_ids, event.call_id]
         if state.remaining_llm_call_budget is not None:
             values["remaining_llm_call_budget"] = state.remaining_llm_call_budget - 1
         values["failure_history"] = [*state.failure_history, event.error]
@@ -196,13 +228,23 @@ def reduce_exploration_event(
                 "adopt its receipt instead of re-running."
             )
         values["pending_logical_step_id"] = event.logical_step_id
+        values["pending_tool_kind"] = event.tool_kind
+        values["pending_tool_input_fingerprint"] = event.input_fingerprint
+        values["pending_projected_rows_scanned"] = event.projected_rows_scanned
+        values["pending_projected_result_cells"] = event.projected_result_cells
     elif isinstance(event, ReceiptPreparedEvent):
         if event.logical_step_id != state.pending_logical_step_id:
             raise EventTransitionError("receipt does not match the pending tool step.")
         prior = state.prepared_receipt_id
         if prior is not None and prior != event.receipt_id:
             raise EventTransitionError("prepared receipt cannot be replaced.")
+        if (
+            state.prepared_result_digest is not None
+            and state.prepared_result_digest != event.result_digest
+        ):
+            raise EventTransitionError("prepared tool result digest cannot be replaced.")
         values["prepared_receipt_id"] = event.receipt_id
+        values["prepared_result_digest"] = event.result_digest
     elif isinstance(event, ReceiptCommittedEvent):
         if event.logical_step_id != state.pending_logical_step_id:
             raise EventTransitionError("receipt does not match the pending tool step.")
@@ -212,12 +254,34 @@ def reduce_exploration_event(
             raise EventTransitionError(
                 "committed receipt does not match the prepared receipt."
             )
+        if state.prepared_result_digest != event.result_digest:
+            raise EventTransitionError(
+                "committed tool result digest does not match the prepared body."
+            )
         _append_completed_step(values, state, event.logical_step_id)
         refs = dict(state.step_receipt_refs)
         refs[event.logical_step_id] = event.receipt_id
         values["step_receipt_refs"] = refs
+        if event.result_digest is not None:
+            result_digests = dict(state.step_result_digests)
+            result_digests[event.logical_step_id] = event.result_digest
+            values["step_result_digests"] = result_digests
         values["pending_logical_step_id"] = None
         values["prepared_receipt_id"] = None
+        values["prepared_result_digest"] = None
+        tool_kind = state.pending_tool_kind or "legacy_unknown"
+        values["tool_calls_by_kind"] = {
+            **state.tool_calls_by_kind,
+            tool_kind: state.tool_calls_by_kind.get(tool_kind, 0) + 1,
+        }
+        values["rows_scanned"] = state.rows_scanned + event.rows_scanned
+        values["result_cells"] = state.result_cells + event.result_cells
+        if state.pending_tool_input_fingerprint is not None:
+            values["completed_probe_fingerprints"] = [
+                *state.completed_probe_fingerprints,
+                state.pending_tool_input_fingerprint,
+            ]
+        _clear_pending_tool_metadata(values)
         values["tool_calls_committed"] = state.tool_calls_committed + 1
         values["remaining_tool_call_budget"] = state.remaining_tool_call_budget - 1
     elif isinstance(event, ToolCallFailedEvent):
@@ -226,15 +290,32 @@ def reduce_exploration_event(
             raise EventTransitionError("failed call does not match the pending tool step.")
         values["pending_logical_step_id"] = None
         values["prepared_receipt_id"] = None
+        values["prepared_result_digest"] = None
+        values["rows_scanned"] = state.rows_scanned + event.rows_scanned
+        values["result_cells"] = state.result_cells + event.result_cells
+        _clear_pending_tool_metadata(values)
         values["failure_history"] = [*state.failure_history, event.error]
     elif isinstance(event, GateVerdictEvent):
+        _require_running(state, "gate_verdict")
+        _require_no_pending(state)
+        if state.current_round_index is None:
+            raise EventTransitionError("gate verdict requires an open round.")
+        prior_verdict = state.gate_verdicts.get(event.claim_bundle_id)
+        if prior_verdict is not None and prior_verdict != event.verdict:
+            raise EventTransitionError("a gate verdict cannot be overwritten.")
         values["gate_verdicts"] = {
             **state.gate_verdicts,
             event.claim_bundle_id: event.verdict,
         }
     elif isinstance(event, ReductionCommittedEvent):
+        _require_running(state, "reduction_committed")
+        _require_no_pending(state)
+        if state.current_round_index is None:
+            raise EventTransitionError("reduction requires an open round.")
         values["frontier_digest"] = event.frontier_digest
         values["ledger_digest"] = event.ledger_digest
+        values["reduction_digest"] = event.reduction_digest
+        values["current_round_reduction_committed"] = True
     elif isinstance(event, RoundSettledEvent):
         _require_no_pending(state)
         if state.current_round_index is None:
@@ -244,11 +325,22 @@ def reduce_exploration_event(
                 f"round_settled round_index must be {state.current_round_index}, "
                 f"got {event.round_index}."
             )
+        if (
+            event.terminal_reason is not None
+            and event.terminal_has_reduction
+            != state.current_round_reduction_committed
+        ):
+            raise EventTransitionError(
+                "terminal reduction metadata does not match the settled round."
+            )
         values["current_round_index"] = None
+        values["current_round_reduction_committed"] = False
         values["rounds_settled"] = state.rounds_settled + 1
         values["consecutive_no_progress"] = (
             0 if event.progress else state.consecutive_no_progress + 1
         )
+        values["pending_terminal_reason"] = event.terminal_reason
+        values["pending_terminal_has_reduction"] = event.terminal_has_reduction
     elif isinstance(event, PauseRequestedEvent):
         if state.status != "running":
             raise EventTransitionError("pause can only be requested while running.")
@@ -286,6 +378,18 @@ def reduce_exploration_event(
         values["max_successful_tool_calls"] = (
             state.max_successful_tool_calls + increase.max_successful_tool_calls
         )
+        max_by_kind = dict(state.max_tool_calls_by_kind)
+        for kind, delta in increase.max_tool_calls_by_kind.items():
+            max_by_kind[kind] = max_by_kind.get(kind, 0) + delta
+        values["max_tool_calls_by_kind"] = max_by_kind
+        if state.max_rows_scanned is not None:
+            values["max_rows_scanned"] = (
+                state.max_rows_scanned + increase.max_rows_scanned
+            )
+        if state.max_result_cells is not None:
+            values["max_result_cells"] = (
+                state.max_result_cells + increase.max_result_cells
+            )
         values["remaining_tool_call_budget"] = (
             state.remaining_tool_call_budget + increase.max_successful_tool_calls
         )
@@ -302,12 +406,41 @@ def reduce_exploration_event(
                     f"stop_reason {event.stop_reason!r} requires a running exploration."
                 )
             _require_no_pending(state)
+            if (
+                state.pending_terminal_reason is not None
+                and event.stop_reason != state.pending_terminal_reason
+            ):
+                raise EventTransitionError(
+                    "natural stop reason does not match the durable terminal decision."
+                )
         values["status"] = "stopped"
         values["stop_reason"] = event.stop_reason
         values["final_report_ref"] = event.final_report_ref
+        if state.pending_call_id is not None:
+            values["llm_calls_uncertain"] = state.llm_calls_uncertain + 1
+            values["uncertain_call_ids"] = [
+                *state.uncertain_call_ids,
+                state.pending_call_id,
+            ]
+            if state.remaining_llm_call_budget is not None:
+                values["remaining_llm_call_budget"] = (
+                    state.remaining_llm_call_budget - 1
+                )
         values["pending_call_id"] = None
+        values["pending_call_step_id"] = None
+        if state.pending_logical_step_id is not None:
+            values["rows_scanned"] = (
+                state.rows_scanned + state.pending_projected_rows_scanned
+            )
+            values["result_cells"] = (
+                state.result_cells + state.pending_projected_result_cells
+            )
         values["pending_logical_step_id"] = None
         values["prepared_receipt_id"] = None
+        values["prepared_result_digest"] = None
+        _clear_pending_tool_metadata(values)
+        values["pending_terminal_reason"] = None
+        values["pending_terminal_has_reduction"] = False
     else:  # pragma: no cover - the discriminated union is exhaustive
         raise EventTransitionError(f"unsupported transition: {event.event_type}.")
 
@@ -390,6 +523,9 @@ class JsonlExplorationJournal(
     def claim_recovery(
         self,
         *,
+        completed_response_digest: Callable[[str], str | None] | None = None,
+        completed_tool_result: Callable[[str], RecoveredToolCommit | None] | None = None,
+        settle_pending_tool: bool = True,
         uncertain_error: str = (
             "provider call outcome unknown after crash; "
             "reservation consumed (fail closed)."
@@ -401,11 +537,72 @@ class JsonlExplorationJournal(
         receipt outbox guarantees the single logical commit."""
         state = self.claim_attempt()
         if state.pending_call_id is not None:
-            state = self.append_new(
-                "llm_call_uncertain",
-                call_id=state.pending_call_id,
-                error=uncertain_error,
+            digest = None
+            if (
+                state.pending_call_step_id is not None
+                and completed_response_digest is not None
+            ):
+                digest = completed_response_digest(state.pending_call_step_id)
+            if digest:
+                state = self.append_new(
+                    "llm_call_completed",
+                    call_id=state.pending_call_id,
+                    step_id=state.pending_call_step_id,
+                    response_digest=digest,
+                )
+            else:
+                state = self.append_new(
+                    "llm_call_uncertain",
+                    call_id=state.pending_call_id,
+                    error=uncertain_error,
+                )
+        if settle_pending_tool and state.pending_logical_step_id is not None:
+            recovered_tool = (
+                completed_tool_result(state.pending_logical_step_id)
+                if completed_tool_result is not None
+                else None
             )
+            if recovered_tool is not None:
+                if state.prepared_receipt_id not in {None, recovered_tool.receipt_id}:
+                    raise EventTransitionError(
+                        "durable tool body does not match the prepared receipt."
+                    )
+                if state.prepared_receipt_id is not None:
+                    if state.prepared_result_digest is None:
+                        raise EventTransitionError(
+                            "prepared receipt has no durable tool-result digest; "
+                            "refusing crash adoption."
+                        )
+                    if state.prepared_result_digest != recovered_tool.result_digest:
+                        raise EventTransitionError(
+                            "durable tool body digest does not match the prepared receipt."
+                        )
+                if state.prepared_receipt_id is None:
+                    state = self.append_new(
+                        "receipt_prepared",
+                        logical_step_id=state.pending_logical_step_id,
+                        receipt_id=recovered_tool.receipt_id,
+                        result_digest=recovered_tool.result_digest,
+                    )
+                state = self.append_new(
+                    "receipt_committed",
+                    logical_step_id=state.pending_logical_step_id,
+                    receipt_id=recovered_tool.receipt_id,
+                    rows_scanned=recovered_tool.rows_scanned,
+                    result_cells=recovered_tool.result_cells,
+                    result_digest=recovered_tool.result_digest,
+                )
+            else:
+                state = self.append_new(
+                    "tool_call_failed",
+                    logical_step_id=state.pending_logical_step_id,
+                    error=(
+                        "tool outcome unknown after crash; projected resource usage "
+                        "charged before safe logical rerun."
+                    ),
+                    rows_scanned=state.pending_projected_rows_scanned,
+                    result_cells=state.pending_projected_result_cells,
+                )
         return state
 
     def amend_budget(
@@ -449,6 +646,9 @@ def _start_exploration(event: ExplorationLoopEvent) -> ExplorationLoopState:
         attempt_epoch=event.attempt_epoch,
         max_llm_requests=max_llm_requests,
         max_successful_tool_calls=event.budget.max_successful_tool_calls,
+        max_tool_calls_by_kind=event.budget.max_tool_calls_by_kind,
+        max_rows_scanned=event.budget.max_rows_scanned,
+        max_result_cells=event.budget.max_result_cells,
         max_rounds=event.budget.max_rounds,
         remaining_llm_call_budget=max_llm_requests,
         remaining_tool_call_budget=event.budget.max_successful_tool_calls,
@@ -485,6 +685,13 @@ def _require_no_pending(state: ExplorationLoopState) -> None:
         raise EventTransitionError(
             "another exploration operation is already pending."
         )
+
+
+def _clear_pending_tool_metadata(values: dict[str, object]) -> None:
+    values["pending_tool_kind"] = None
+    values["pending_tool_input_fingerprint"] = None
+    values["pending_projected_rows_scanned"] = 0
+    values["pending_projected_result_cells"] = 0
 
 
 def _append_completed_step(

@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from eda_platform.core.budget import BudgetDimension, BudgetExceeded, SessionBudgetState
 from eda_platform.core.ids import stable_hash
+from eda_platform.schemas.exploration import ExplorationLoopState
 from eda_platform.schemas.exploration_budget import (
     BudgetAmendment,
     BudgetCapIncrease,
@@ -160,6 +161,29 @@ class ToolCallLedger:
             self._result_cells += actual.result_cells
             self._enforce_used(kind=actual.kind)
 
+    def record_failure_usage(
+        self,
+        kind: str,
+        *,
+        rows_scanned: int = 0,
+        result_cells: int = 0,
+    ) -> None:
+        """Settle measurable resource use without charging the success counters.
+
+        A tool that scans data and then fails must not be free to repeat the
+        same expensive failure until the run ends. Callers use their projected
+        usage when an executed tool cannot report a more precise measurement.
+        """
+        actual = ToolCallProjection(
+            kind=kind,
+            rows_scanned=rows_scanned,
+            result_cells=result_cells,
+        )
+        with self._lock:
+            self._rows_scanned += actual.rows_scanned
+            self._result_cells += actual.result_cells
+            self._enforce_resource_usage()
+
     def exhausted_dimensions(self) -> tuple[str, ...]:
         """Latched dimensions, derived from counts vs the current policy."""
         with self._lock:
@@ -243,6 +267,48 @@ class ToolCallLedger:
         ledger._result_cells = snapshot["result_cells"]
         return ledger
 
+    @classmethod
+    def restore_from_journal_state(
+        cls,
+        policy: ExplorationBudgetPolicy,
+        state: ExplorationLoopState,
+    ) -> ToolCallLedger:
+        """Rebuild every durable tool dimension from the journal projection."""
+        expected_caps = (
+            policy.max_successful_tool_calls,
+            policy.max_tool_calls_by_kind,
+            policy.max_rows_scanned,
+            policy.max_result_cells,
+        )
+        journal_caps = (
+            state.max_successful_tool_calls,
+            state.max_tool_calls_by_kind,
+            state.max_rows_scanned,
+            state.max_result_cells,
+        )
+        if expected_caps != journal_caps:
+            raise ValueError(
+                "effective tool policy does not match the journal amendment chain."
+            )
+        return cls.restore(
+            policy,
+            {
+                "successful_tool_calls": state.tool_calls_committed,
+                "calls_by_kind": state.tool_calls_by_kind,
+                "rows_scanned": state.rows_scanned,
+                "result_cells": state.result_cells,
+            },
+        )
+
+    def restore_durable_state(self, state: ExplorationLoopState) -> None:
+        """Refresh an already-wired ledger after journal crash recovery settles work."""
+        restored = self.restore_from_journal_state(self._policy, state)
+        with self._lock:
+            self._successful_calls = restored._successful_calls
+            self._calls_by_kind = dict(restored._calls_by_kind)
+            self._rows_scanned = restored._rows_scanned
+            self._result_cells = restored._result_cells
+
     def _enforce(
         self,
         dimension: ToolBudgetDimension,
@@ -289,6 +355,21 @@ class ToolCallLedger:
                     latched=True,
                 )
 
+    def _enforce_resource_usage(self) -> None:
+        checks: tuple[tuple[ToolBudgetDimension, int, int | None], ...] = (
+            ("rows_scanned", self._rows_scanned, self._policy.max_rows_scanned),
+            ("result_cells", self._result_cells, self._policy.max_result_cells),
+        )
+        for dimension, used, limit in checks:
+            if limit is not None and used > limit:
+                raise ToolBudgetExceeded(
+                    dimension,
+                    limit=limit,
+                    attempted=used,
+                    stage="settlement",
+                    latched=True,
+                )
+
 
 def policy_fingerprint(policy: ExplorationBudgetPolicy) -> str:
     """Deterministic digest over every budget field (R3.2: approvals/resume bind to it)."""
@@ -331,6 +412,23 @@ def effective_policy(
         current = amended
         fingerprint = policy_fingerprint(current)
     return current
+
+
+def apply_budget_increase(
+    policy: ExplorationBudgetPolicy,
+    increase: BudgetCapIncrease,
+) -> ExplorationBudgetPolicy:
+    """Apply one schema-validated, monotonic increase to an effective policy.
+
+    Exploration journal events use the run's policy-fingerprint chain rather
+    than the standalone budget-chain fingerprint.  Resume composition therefore
+    replays their already-validated ``BudgetCapIncrease`` values through this
+    narrow public helper instead of reaching into the private implementation.
+    """
+    validated = BudgetCapIncrease.model_validate(increase.model_dump())
+    amended = _apply_increase(policy, validated)
+    _verify_monotonic(policy, amended)
+    return amended
 
 
 def finalization_view(

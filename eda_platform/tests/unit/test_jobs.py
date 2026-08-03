@@ -732,6 +732,22 @@ def _create_kind_for_idempotency_matrix(
             brief_session_id="brief_run",
             **common,
         )
+    if kind == "exploration_run":
+        return service.create_exploration_job(
+            execution_session_id,
+            source_session_id="source_run",
+            exploration_id="expl_1",
+            policy={"policy_fingerprint": "xplcy_1"},
+            data_state_witness="dsw1_witness",
+            code_fingerprint="code-v1",
+            release_certificate_digest="certificate-v1",
+            provider="openai",
+            payload_policy="schema+aggregates",
+            llm_env=None,
+            operation="start",
+            idempotency_content={"exploration_id": "expl_1"},
+            **common,
+        )
     if kind in {
         "cleaning_preview",
         "cleaning_apply",

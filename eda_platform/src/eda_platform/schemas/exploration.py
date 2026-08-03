@@ -42,6 +42,12 @@ ExplorationStopReason = Literal[
     "no_new_information",
 ]
 
+ExplorationGracefulStopReason = Literal[
+    "completed",
+    "budget_exhausted",
+    "no_new_information",
+]
+
 ExplorationRunStatus = Literal["running", "pause_requested", "paused", "stopped"]
 
 GateVerdictValue = Literal["passed", "rejected"]
@@ -106,6 +112,7 @@ class RoundStartedEvent(ExplorationEventBase):
 class LlmCallStartedEvent(ExplorationEventBase):
     event_type: Literal["llm_call_started"] = "llm_call_started"
     call_id: str = Field(min_length=1)
+    step_id: str | None = Field(default=None, min_length=1)
 
 
 class LlmCallCompletedEvent(ExplorationEventBase):
@@ -131,24 +138,33 @@ class ToolCallStartedEvent(ExplorationEventBase):
     event_type: Literal["tool_call_started"] = "tool_call_started"
     logical_step_id: str = Field(min_length=1)
     input_fingerprint: str = Field(min_length=1)
+    tool_kind: str = Field(default="legacy_unknown", min_length=1)
+    projected_rows_scanned: int = Field(default=0, ge=0)
+    projected_result_cells: int = Field(default=0, ge=0)
 
 
 class ReceiptPreparedEvent(ExplorationEventBase):
     event_type: Literal["receipt_prepared"] = "receipt_prepared"
     logical_step_id: str = Field(min_length=1)
     receipt_id: str = Field(min_length=1)
+    result_digest: str | None = Field(default=None, min_length=1)
 
 
 class ReceiptCommittedEvent(ExplorationEventBase):
     event_type: Literal["receipt_committed"] = "receipt_committed"
     logical_step_id: str = Field(min_length=1)
     receipt_id: str = Field(min_length=1)
+    rows_scanned: int = Field(default=0, ge=0)
+    result_cells: int = Field(default=0, ge=0)
+    result_digest: str | None = Field(default=None, min_length=1)
 
 
 class ToolCallFailedEvent(ExplorationEventBase):
     event_type: Literal["tool_call_failed"] = "tool_call_failed"
     logical_step_id: str = Field(min_length=1)
     error: str = Field(min_length=1)
+    rows_scanned: int = Field(default=0, ge=0)
+    result_cells: int = Field(default=0, ge=0)
 
 
 class GateVerdictEvent(ExplorationEventBase):
@@ -161,12 +177,21 @@ class ReductionCommittedEvent(ExplorationEventBase):
     event_type: Literal["reduction_committed"] = "reduction_committed"
     frontier_digest: str = Field(min_length=1)
     ledger_digest: str = Field(min_length=1)
+    reduction_digest: str | None = Field(default=None, min_length=1)
 
 
 class RoundSettledEvent(ExplorationEventBase):
     event_type: Literal["round_settled"] = "round_settled"
     round_index: int = Field(ge=0)
     progress: bool
+    terminal_reason: ExplorationGracefulStopReason | None = None
+    terminal_has_reduction: bool = False
+
+    @model_validator(mode="after")
+    def _terminal_metadata_is_consistent(self) -> RoundSettledEvent:
+        if self.terminal_has_reduction and self.terminal_reason is None:
+            raise ValueError("terminal_has_reduction requires terminal_reason.")
+        return self
 
 
 class PauseRequestedEvent(ExplorationEventBase):
@@ -235,32 +260,51 @@ class ExplorationLoopState(BaseModel):
 
     max_llm_requests: int | None = Field(default=None, ge=1)
     max_successful_tool_calls: int = Field(ge=1)
+    max_tool_calls_by_kind: dict[str, int] = Field(default_factory=dict)
+    max_rows_scanned: int | None = Field(default=None, ge=1)
+    max_result_cells: int | None = Field(default=None, ge=1)
     max_rounds: int = Field(ge=1)
 
     llm_calls_settled: int = Field(ge=0, default=0)
     llm_calls_uncertain: int = Field(ge=0, default=0)
     tool_calls_committed: int = Field(ge=0, default=0)
+    tool_calls_by_kind: dict[str, int] = Field(default_factory=dict)
+    rows_scanned: int = Field(ge=0, default=0)
+    result_cells: int = Field(ge=0, default=0)
     rounds_started: int = Field(ge=0, default=0)
     rounds_settled: int = Field(ge=0, default=0)
     consecutive_no_progress: int = Field(ge=0, default=0)
     current_round_index: int | None = Field(default=None, ge=0)
+    current_round_reduction_committed: bool = False
+    pending_terminal_reason: ExplorationGracefulStopReason | None = None
+    pending_terminal_has_reduction: bool = False
 
     remaining_llm_call_budget: int | None = Field(default=None, ge=0)
     remaining_tool_call_budget: int = Field(ge=0)
     remaining_round_budget: int = Field(ge=0)
 
     pending_call_id: str | None = None
+    pending_call_step_id: str | None = None
     pending_logical_step_id: str | None = None
     prepared_receipt_id: str | None = None
+    prepared_result_digest: str | None = None
+    pending_tool_kind: str | None = None
+    pending_tool_input_fingerprint: str | None = None
+    pending_projected_rows_scanned: int = Field(ge=0, default=0)
+    pending_projected_result_cells: int = Field(ge=0, default=0)
 
     completed_step_ids: list[str] = Field(default_factory=list)
+    completed_probe_fingerprints: list[str] = Field(default_factory=list)
+    uncertain_call_ids: list[str] = Field(default_factory=list)
     step_receipt_refs: dict[str, str] = Field(default_factory=dict)
+    step_result_digests: dict[str, str] = Field(default_factory=dict)
     failure_history: list[str] = Field(default_factory=list)
     amendment_ids: list[str] = Field(default_factory=list)
     gate_verdicts: dict[str, GateVerdictValue] = Field(default_factory=dict)
 
     frontier_digest: str | None = None
     ledger_digest: str | None = None
+    reduction_digest: str | None = None
 
     last_seq: int = Field(ge=0)
 
@@ -270,8 +314,35 @@ class ExplorationLoopState(BaseModel):
             raise ValueError("completed_step_ids must be unique.")
         if self.pending_call_id is not None and self.pending_logical_step_id is not None:
             raise ValueError("a call and a tool step cannot both be pending.")
+        if self.pending_call_step_id is not None and self.pending_call_id is None:
+            raise ValueError("a pending call step requires a pending call.")
         if self.prepared_receipt_id is not None and self.pending_logical_step_id is None:
             raise ValueError("a prepared receipt requires a pending tool step.")
+        if self.prepared_result_digest is not None and self.prepared_receipt_id is None:
+            raise ValueError("a prepared result digest requires a prepared receipt.")
+        if self.pending_logical_step_id is None and any(
+            (
+                self.pending_tool_kind is not None,
+                self.pending_tool_input_fingerprint is not None,
+                self.pending_projected_rows_scanned,
+                self.pending_projected_result_cells,
+            )
+        ):
+            raise ValueError("pending tool metadata requires a pending tool step.")
+        if len(self.completed_probe_fingerprints) != len(
+            set(self.completed_probe_fingerprints)
+        ):
+            raise ValueError("completed_probe_fingerprints must be unique.")
+        if len(self.uncertain_call_ids) != len(set(self.uncertain_call_ids)):
+            raise ValueError("uncertain_call_ids must be unique.")
+        if any(not kind or count < 0 for kind, count in self.tool_calls_by_kind.items()):
+            raise ValueError("tool_calls_by_kind must contain non-negative counts.")
+        if any(
+            not kind or cap < 1 for kind, cap in self.max_tool_calls_by_kind.items()
+        ):
+            raise ValueError("max_tool_calls_by_kind must contain positive caps.")
+        if sum(self.tool_calls_by_kind.values()) != self.tool_calls_committed:
+            raise ValueError("tool_calls_by_kind must sum to tool_calls_committed.")
         if self.remaining_tool_call_budget != (
             self.max_successful_tool_calls - self.tool_calls_committed
         ):
@@ -289,6 +360,12 @@ class ExplorationLoopState(BaseModel):
             1 if self.current_round_index is not None else 0
         ):
             raise ValueError("round counters are inconsistent with the open round.")
+        if self.current_round_reduction_committed and self.current_round_index is None:
+            raise ValueError("a current-round reduction requires an open round.")
+        if self.pending_terminal_reason is not None and self.current_round_index is not None:
+            raise ValueError("a pending terminal decision cannot have an open round.")
+        if self.pending_terminal_has_reduction and self.pending_terminal_reason is None:
+            raise ValueError("pending terminal reduction requires a terminal decision.")
         if (self.stop_reason is not None) != (self.status == "stopped"):
             raise ValueError("stop_reason must be set exactly when status is stopped.")
         return self

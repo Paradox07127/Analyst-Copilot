@@ -8,6 +8,7 @@ import { Children, isValidElement, useMemo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Badge, type Tone } from "../../components/ui";
+import { EvidenceLaneBadge } from "../exploration/ExplorationView";
 import { headingId, isArtifactIdShape } from "./report-outline";
 
 /* exporter.py:_narrative_claim_text — the only prefixes it emits. Anything
@@ -22,6 +23,11 @@ const QUALIFIERS: Record<string, { tone: Tone; meaning: string }> = {
     tone: "neutral",
     meaning:
       "A lead, not a conclusion. It suggests where to look next; it does not settle anything.",
+  },
+  "Confirmatory evidence — not a claim of certainty": {
+    tone: "info",
+    meaning:
+      "Evidence from a designated confirmation lane. It still carries limitations and is not a claim of certainty.",
   },
   "Low relevance": {
     tone: "neutral",
@@ -66,9 +72,18 @@ function QualifierBadges({ labels }: { labels: string[] }) {
     <>
       {labels.map((label) => (
         <span key={label} className="mr-1 inline-flex align-baseline">
-          <Badge tone={QUALIFIERS[label]?.tone ?? "neutral"} title={QUALIFIERS[label]?.meaning}>
-            {label}
-          </Badge>
+          {label === "Exploratory — hypothesis-generating" ? (
+            <EvidenceLaneBadge lane="exploratory" label={label} />
+          ) : label === "Confirmatory evidence — not a claim of certainty" ? (
+            <EvidenceLaneBadge lane="confirmatory" label={label} />
+          ) : (
+            <Badge
+              tone={QUALIFIERS[label]?.tone ?? "neutral"}
+              title={QUALIFIERS[label]?.meaning}
+            >
+              {label}
+            </Badge>
+          )}
         </span>
       ))}
     </>

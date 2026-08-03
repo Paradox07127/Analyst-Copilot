@@ -49,6 +49,14 @@ export function newSessionPath(): string {
   return "/new-session";
 }
 
+export function explorationRunPath(
+  projectId: string,
+  sessionId: string,
+  explorationId: string,
+): string {
+  return `${sessionSectionPath(projectId, sessionId, "explorations")}/${encodeURIComponent(explorationId)}`;
+}
+
 export function tablePath(
   projectId: string,
   sessionId: string,

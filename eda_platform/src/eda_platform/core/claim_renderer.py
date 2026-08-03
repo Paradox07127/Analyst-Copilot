@@ -23,28 +23,6 @@ _MISSING_METADATA = "(not provided)"
 _EMPTY_SECTION = "(none)"
 _WITNESS_SHORT_CHARS = 12
 
-# Statistical-gate violation codes rendered as fixed qualifiers. The phrases
-# must stay digit-free: they are outside the allowed pool by design, so the
-# final rescan turns any numeric drift here into a hard failure.
-_CAVEAT_PHRASES = {
-    "confirmatory_without_statistics": (
-        "confirmatory claim without a statistics receipt; treat as exploratory."
-    ),
-    "p_value_without_effect_ci_n": (
-        "exploratory only: a p-value is reported without effect size, "
-        "confidence interval and sample size."
-    ),
-    "sequence_index_missing": (
-        "the statistical test carries no registry sequence index; "
-        "selective reporting cannot be ruled out."
-    ),
-    "test_not_confirmatory_ready": (
-        "the test method is not confirmatory-ready; treat the finding as "
-        "exploratory."
-    ),
-}
-
-
 class RenderedNumberLeakError(ValueError):
     """The rendered text contains a numeric token outside the allowed pool."""
 
@@ -126,8 +104,6 @@ def render_claim_report(
     lines += _lane_lines(rendered_pairs, "confirmatory")
     lines += ["", "## Exploratory observations", ""]
     lines += _lane_lines(rendered_pairs, "exploratory")
-    lines += ["", "## Statistical caveats", ""]
-    lines += _caveat_lines(rendered_pairs)
     lines += ["", "## Evidence trail", ""]
     lines += _trail_lines(rendered_pairs)
     lines += ["", "## Not rendered", ""]
@@ -180,28 +156,6 @@ def _lane_lines(
         if bundle.evidence_lane == lane
         for claim in sorted(bundle.claims, key=lambda c: c.claim_id)
     ]
-    return lines or [_EMPTY_SECTION]
-
-
-def _caveat_lines(pairs: list[tuple[ClaimBundle, GateReport]]) -> list[str]:
-    lines: list[str] = []
-    for bundle, report in pairs:
-        keys = sorted(
-            {
-                (violation.claim_id or "", violation.code)
-                for verdict in report.verdicts
-                if verdict.gate == "statistical"
-                for violation in verdict.violations
-            }
-        )
-        for claim_id, code in keys:
-            subject = (
-                f"{bundle.claim_bundle_id}/{claim_id}"
-                if claim_id
-                else bundle.claim_bundle_id
-            )
-            phrase = _CAVEAT_PHRASES.get(code, f"registered statistical violation: {code}.")
-            lines.append(f"- {subject}: {phrase}")
     return lines or [_EMPTY_SECTION]
 
 

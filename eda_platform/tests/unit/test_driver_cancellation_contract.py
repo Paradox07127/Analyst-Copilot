@@ -81,6 +81,10 @@ DRIVER_ENTRYPOINTS = {
         "eda_platform.application.services.insight_service",
         "InsightService.build_custom_chart",
     ),
+    "exploration_run": (
+        "eda_platform.worker.exploration",
+        "run_exploration_worker",
+    ),
 }
 
 

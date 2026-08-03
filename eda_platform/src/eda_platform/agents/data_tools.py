@@ -11,15 +11,25 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from eda_platform.agents.receipts import build_receipt
-from eda_platform.agents.runtime import AgentTool, AgentToolResult
+from eda_platform.agents.data_tool_result_contracts import (
+    verify_data_tool_result_contract,
+)
+from eda_platform.agents.receipts import (
+    adjudicate_receipt_hypothesis,
+    build_receipt,
+)
+from eda_platform.agents.runtime import (
+    AgentTool,
+    AgentToolResult,
+    canonical_tool_arguments_digest,
+)
 from eda_platform.agents.tool_context import (
     ToolExecutionContext,
     current_execution_context,
     mint_local_execution_context,
 )
 from eda_platform.core.column_roles import ColumnRoleSet
-from eda_platform.core.ids import make_artifact_id, stable_hash
+from eda_platform.core.ids import make_artifact_id
 from eda_platform.core.permissions import PermissionTier, require_permission
 from eda_platform.core.query import DuckDBQueryEngine
 from eda_platform.core.receipt_outbox import ReceiptOutbox
@@ -243,6 +253,35 @@ class RunBaselineModelArguments(BaseModel):
         if self.group_column is not None and self.split_policy != "group":
             raise ValueError("group_column may be used only with split_policy `group`.")
         return self
+
+
+_DATA_TOOL_ARGUMENT_SCHEMAS: dict[str, type[BaseModel]] = {
+    "inspect_data_catalog": _NoArguments,
+    "list_artifacts": _NoArguments,
+    "read_artifact": ReadArtifactArguments,
+    "run_sql": RunSqlArguments,
+    "list_saved_skills": _NoArguments,
+    "run_saved_skill": RunSavedSkillArguments,
+    "assess_join_keys": AssessJoinKeysArguments,
+    "screen_anomalies": ScreenAnomaliesArguments,
+    "run_domain_metrics": RunDomainMetricsArguments,
+    "recommend_cleaning": RecommendCleaningArguments,
+    "run_stat_test": RunStatTestArguments,
+    "correlate_columns": CorrelateColumnsArguments,
+    "profile_slice": ProfileSliceArguments,
+    "analyze_time_series": AnalyzeTimeSeriesArguments,
+    "diagnose_missingness": DiagnoseMissingnessArguments,
+    "run_baseline_model": RunBaselineModelArguments,
+    "run_open_analysis": OpenAnalysisArguments,
+}
+
+
+def data_tool_argument_schema(tool_name: str) -> type[BaseModel]:
+    """Return the single production argument contract for a built-in data tool."""
+    try:
+        return _DATA_TOOL_ARGUMENT_SCHEMAS[tool_name]
+    except KeyError as exc:
+        raise ValueError(f"unknown production data tool {tool_name!r}") from exc
 
 
 OpenAnalysisExecutor = Callable[[OpenAnalysisArguments], AgentToolResult]
@@ -506,6 +545,9 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 ),
             )
         )
+    for tool in tools:
+        if tool.args_schema is not data_tool_argument_schema(tool.name):
+            raise RuntimeError(f"data tool {tool.name!r} diverges from its argument contract")
     return [_bind_payload_policy(context, tool) for tool in tools]
 
 
@@ -1154,6 +1196,7 @@ def _emit_receipt(
         data_state_witness=data_state_witness_digest(_witness_entries(context)),
         created_at=datetime.now(UTC).isoformat(),
     )
+    receipt = adjudicate_receipt_hypothesis(receipt, execution.hypothesis)
     payload = receipt.model_dump(mode="json")
     artifact = Artifact(
         id=make_artifact_id("receipt", payload),
@@ -1366,8 +1409,6 @@ def _assess_join_keys(context: DataToolContext, args: AssessJoinKeysArguments) -
         artifacts=[primary],
         receipt_artifact=receipt_artifact,
     )
-
-
 def _screen_anomalies(context: DataToolContext, args: ScreenAnomaliesArguments) -> AgentToolResult:
     dataset = _single_dataset(context, args.dataset_id)
     result = screen_anomaly_column(
@@ -1669,7 +1710,7 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
     attempt = registry.begin_attempt(
         family_id=family_id,
         requested_test_type=args.test_type,
-        arguments_digest=stable_hash(args.model_dump(mode="json"), length=32),
+        arguments_digest=canonical_tool_arguments_digest(RunStatTestArguments, args),
         logical_step_id=execution.logical_step_id,
     )
     switch_notes: list[str] = []
@@ -1758,7 +1799,7 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
             ),
         ),
         statistics=ReceiptStatistics(
-            hypothesis_id=family_id,
+            statistical_family_id=family_id,
             test_name=result.test_type,
             test_statistic=result.statistic,
             p_value=result.p_value,
@@ -1772,7 +1813,7 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
         execution=execution,
     )
     registry.record_completion(attempt.attempt_id, receipt_id=receipt.receipt_id)
-    return AgentToolResult(
+    durable_result = AgentToolResult(
         content={
             "artifact_id": primary.id,
             "receipt_id": receipt.receipt_id,
@@ -1791,6 +1832,10 @@ def _run_stat_test(context: DataToolContext, args: RunStatTestArguments) -> Agen
         artifacts=[primary],
         receipt_artifact=receipt_artifact,
     )
+    verify_data_tool_result_contract(
+        receipt, durable_result, args.model_dump(mode="json")
+    )
+    return durable_result
 
 
 def _correlate_columns(
@@ -2104,6 +2149,10 @@ def _analyze_time_series(
         _fact("gap_count", result.gap_count, "count"),
         _fact("regular_frequency", result.regular_frequency, "string"),
         _fact("trend_direction", result.trend_direction, "string"),
+        _fact("spike_detected", result.spike_detected, "bool"),
+        _fact("spike_period", result.spike_period, "string"),
+        _numeric_fact("spike_value", result.spike_value),
+        _numeric_fact("spike_score", result.spike_score),
         _numeric_fact("seasonal_strength", result.seasonal_strength),
         _numeric_fact("ljung_box_p", result.ljung_box_p),
         _numeric_fact("adf_p", result.adf_p),
@@ -2141,7 +2190,7 @@ def _analyze_time_series(
             sample_size=result.n_periods,
         ),
     )
-    return AgentToolResult(
+    durable_result = AgentToolResult(
         content={
             "artifact_id": primary.id,
             "receipt_id": receipt.receipt_id,
@@ -2149,6 +2198,10 @@ def _analyze_time_series(
             "gap_count": result.gap_count,
             "regular_frequency": result.regular_frequency,
             "trend_direction": result.trend_direction,
+            "spike_detected": result.spike_detected,
+            "spike_period": result.spike_period,
+            "spike_value": result.spike_value,
+            "spike_score": result.spike_score,
             "seasonal_strength": result.seasonal_strength,
             "ljung_box_p": result.ljung_box_p,
             "adf_p": result.adf_p,
@@ -2159,6 +2212,10 @@ def _analyze_time_series(
         artifacts=[primary],
         receipt_artifact=receipt_artifact,
     )
+    verify_data_tool_result_contract(
+        receipt, durable_result, args.model_dump(mode="json")
+    )
+    return durable_result
 
 
 def _diagnose_missingness(
@@ -2281,7 +2338,7 @@ def _diagnose_missingness(
             warnings=tuple(result.limitations),
         ),
     )
-    return AgentToolResult(
+    durable_result = AgentToolResult(
         content=cast(
             dict[str, Any],
             _clip_json(
@@ -2313,6 +2370,10 @@ def _diagnose_missingness(
         artifacts=[primary],
         receipt_artifact=receipt_artifact,
     )
+    verify_data_tool_result_contract(
+        receipt, durable_result, args.model_dump(mode="json")
+    )
+    return durable_result
 
 
 def _run_baseline_model(

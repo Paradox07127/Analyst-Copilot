@@ -280,6 +280,15 @@ def score_item(item: SuiteItem, output: AgentRunOutput) -> tuple[bool | None, di
             "duplicate_rate": planted.duplicate_rate,
             "grounding_rate": grounding.grounding_rate,
             "fabricated_receipt_rate": grounding.fabricated_receipt_rate,
+            "region_difference_recall": float(
+                "planted_group_diff_region_revenue" in planted.matched_expected_ids
+            ),
+            "missingness_mechanism_recall": float(
+                "planted_missing_satisfaction_phone" in planted.matched_expected_ids
+            ),
+            "spike_day_recall": float(
+                "planted_outlier_20250415_revenue" in planted.matched_expected_ids
+            ),
         }
         passed = (
             planted.precision >= PLANTED_PASS_PRECISION

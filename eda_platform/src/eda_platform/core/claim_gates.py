@@ -832,6 +832,21 @@ def _statistical_gate(
         for receipt in stats_receipts:
             statistics = receipt.statistics
             assert statistics is not None  # enforced by the reachability gate
+            # Every check below keys off p_value, so a receipt without one would
+            # otherwise satisfy "confirmatory cites statistics" while skipping
+            # completeness and multiplicity entirely.
+            if confirmatory and statistics.p_value is None:
+                violations.append(
+                    GateViolation(
+                        code="confirmatory_without_test_statistic",
+                        message=(
+                            f"receipt {receipt.receipt_id} backs a confirmatory "
+                            "claim but reports no test statistic."
+                        ),
+                        claim_id=claim.claim_id,
+                        tool_call_id=receipt.tool_call_id,
+                    )
+                )
             if statistics.p_value is not None and any(
                 value is None
                 for value in (
@@ -864,7 +879,7 @@ def _statistical_gate(
                         tool_call_id=receipt.tool_call_id,
                     )
                 )
-            family_id = statistics.hypothesis_id
+            family_id = statistics.statistical_family_id or statistics.hypothesis_id
             if statistics.p_value is not None and not family_id:
                 violations.append(
                     GateViolation(
@@ -941,11 +956,18 @@ def _final_stat_family_counts(
             receipt.receipt_id != receipt_id
             or not verify_receipt_digest(receipt)
             or receipt.statistics is None
-            or not receipt.statistics.hypothesis_id
+            or not (
+                receipt.statistics.statistical_family_id
+                or receipt.statistics.hypothesis_id
+            )
             or receipt.statistics.sequence_index is None
         ):
             continue
-        family_id = receipt.statistics.hypothesis_id
+        family_id = (
+            receipt.statistics.statistical_family_id
+            or receipt.statistics.hypothesis_id
+        )
+        assert family_id is not None
         counts[family_id] = max(counts.get(family_id, 0), receipt.statistics.sequence_index)
     for family_id, count in (stat_attempt_counts or {}).items():
         if count < 1:

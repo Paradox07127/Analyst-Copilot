@@ -42,6 +42,7 @@ SUPPORTED_JOB_KINDS = frozenset(
         "cleaning_apply",
         "dataset_distributions",
         "custom_chart",
+        "exploration_run",
     }
 )
 TERMINAL_EVENT_TYPES = frozenset({"job.completed", "job.failed", "job.cancelled"})
@@ -633,6 +634,54 @@ class JobService:
                 "source_session_id": source_session_id,
                 "brief_artifact_id": brief_artifact_id,
                 "brief_session_id": brief_session_id,
+            },
+        )
+
+    def create_exploration_job(
+        self,
+        session_id: str,
+        *,
+        project_id: str,
+        source_session_id: str,
+        exploration_id: str,
+        policy: dict[str, Any],
+        data_state_witness: str,
+        code_fingerprint: str,
+        release_certificate_digest: str,
+        provider: str,
+        payload_policy: str | None,
+        llm_env: dict[str, str] | None,
+        operation: str,
+        idempotency_key: str | None,
+        idempotency_content: dict[str, Any],
+    ) -> JobStatus:
+        """Queue one E4b worker attempt behind the exploration's logical lane.
+
+        The exploration journal remains the state authority. This derived run
+        owns only the normal job lifecycle, while every execution-affecting
+        identity needed by the worker is frozen in non-secret params.
+        """
+        if operation not in {"start", "resume"}:
+            raise JobValidationError(f"Unsupported exploration operation: {operation}")
+        return self._create_and_enqueue(
+            session_id,
+            kind="exploration_run",
+            project_id=project_id,
+            lane_key=source_session_id,
+            idempotency_key=idempotency_key,
+            env=llm_env,
+            idempotency_content=idempotency_content,
+            request_scope=source_session_id,
+            build_params=lambda _resolved: {
+                "source_session_id": source_session_id,
+                "exploration_id": exploration_id,
+                "policy": policy,
+                "data_state_witness": data_state_witness,
+                "code_fingerprint": code_fingerprint,
+                "release_certificate_digest": release_certificate_digest,
+                "provider": provider,
+                "payload_policy": payload_policy,
+                "operation": operation,
             },
         )
 

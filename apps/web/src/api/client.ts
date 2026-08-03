@@ -4,6 +4,24 @@
 
 import type { components, operations } from "./generated/schema";
 import { SESSION_HEADER, sessionId } from "./session";
+export type {
+  ExplorationBudgetExtendedDto,
+  ExplorationBudgetIncrease,
+  ExplorationEventDto,
+  ExplorationPrepareRequest,
+  ExplorationPreparedDto,
+  ExplorationStartedDto,
+  ExplorationTierDto,
+  ExplorationViewDto,
+} from "./exploration-types";
+import type {
+  ExplorationBudgetExtendedDto,
+  ExplorationBudgetIncrease,
+  ExplorationPrepareRequest,
+  ExplorationPreparedDto,
+  ExplorationStartedDto,
+  ExplorationViewDto,
+} from "./exploration-types";
 
 type Schemas = components["schemas"];
 type JsonRequestBody<Operation extends keyof operations> =
@@ -432,6 +450,75 @@ export const api = {
 
   getSession: (sessionId: string, signal?: AbortSignal) =>
     apiFetch<SessionDetail>(`/sessions/${enc(sessionId)}`, { signal }),
+
+  prepareExploration: (sessionId: string, body: ExplorationPrepareRequest) =>
+    apiFetch<ExplorationPreparedDto>(
+      `/sessions/${enc(sessionId)}/explorations/prepare`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  startExploration: (
+    sessionId: string,
+    body: { action_hash: string; approval_token: string },
+    idempotencyKey: string,
+  ) =>
+    apiFetch<ExplorationStartedDto>(`/sessions/${enc(sessionId)}/explorations`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "Idempotency-Key": idempotencyKey },
+    }),
+
+  getExploration: (
+    sessionId: string,
+    explorationId: string,
+    signal?: AbortSignal,
+  ) =>
+    apiFetch<ExplorationViewDto>(
+      `/sessions/${enc(sessionId)}/explorations/${enc(explorationId)}`,
+      { signal },
+    ),
+
+  pauseExploration: (sessionId: string, explorationId: string) =>
+    apiFetch<ExplorationViewDto>(
+      `/sessions/${enc(sessionId)}/explorations/${enc(explorationId)}/pause`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+
+  resumeExploration: (
+    sessionId: string,
+    explorationId: string,
+    idempotencyKey: string,
+  ) =>
+    apiFetch<ExplorationStartedDto>(
+      `/sessions/${enc(sessionId)}/explorations/${enc(explorationId)}/resume`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
+    ),
+
+  cancelExploration: (sessionId: string, explorationId: string) =>
+    apiFetch<ExplorationViewDto>(
+      `/sessions/${enc(sessionId)}/explorations/${enc(explorationId)}/cancel`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+
+  extendExplorationBudget: (
+    sessionId: string,
+    explorationId: string,
+    increase: ExplorationBudgetIncrease,
+    reason: string,
+    idempotencyKey: string,
+  ) =>
+    apiFetch<ExplorationBudgetExtendedDto>(
+      `/sessions/${enc(sessionId)}/explorations/${enc(explorationId)}/extend-budget`,
+      {
+        method: "POST",
+        body: JSON.stringify({ increase, reason }),
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
+    ),
 
   /* Irreversible — the caller must confirm before invoking this. */
   deleteSession: (sessionId: string) =>

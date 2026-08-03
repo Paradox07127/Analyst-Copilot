@@ -11168,6 +11168,1022 @@
         "x-mutation-policy": "intrinsic"
       }
     },
+    "/api/v1/sessions/{session_id}/explorations/prepare": {
+      "post": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Prepare Exploration",
+        "operationId": "prepare_exploration_api_v1_sessions__session_id__explorations_prepare_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "X-EDA-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Eda-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplorationPrepareRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplorationPrepared"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "intrinsic"
+      }
+    },
+    "/api/v1/sessions/{session_id}/explorations": {
+      "post": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Start Exploration",
+        "operationId": "start_exploration_api_v1_sessions__session_id__explorations_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "name": "X-EDA-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Eda-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplorationStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplorationStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "idempotency"
+      }
+    },
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}": {
+      "get": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Get Exploration",
+        "operationId": "get_exploration_api_v1_sessions__session_id__explorations__exploration_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "exploration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Exploration Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplorationView"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/pause": {
+      "post": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Pause Exploration",
+        "operationId": "pause_exploration_api_v1_sessions__session_id__explorations__exploration_id__pause_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "exploration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Exploration Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplorationControlRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplorationView"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "intrinsic"
+      }
+    },
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/resume": {
+      "post": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Resume Exploration",
+        "operationId": "resume_exploration_api_v1_sessions__session_id__explorations__exploration_id__resume_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "exploration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Exploration Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "name": "X-EDA-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Eda-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplorationControlRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplorationStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "idempotency"
+      }
+    },
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/cancel": {
+      "post": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Cancel Exploration",
+        "operationId": "cancel_exploration_api_v1_sessions__session_id__explorations__exploration_id__cancel_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "exploration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Exploration Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplorationControlRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplorationView"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "intrinsic"
+      }
+    },
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/extend-budget": {
+      "post": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Extend Exploration Budget",
+        "operationId": "extend_exploration_budget_api_v1_sessions__session_id__explorations__exploration_id__extend_budget_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "exploration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Exploration Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplorationExtendBudgetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplorationBudgetExtended"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "413": {
+            "description": "Request body exceeds the global size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Remote deployment CSRF policy rejected the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "x-mutation-policy": "idempotency"
+      }
+    },
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/events": {
+      "get": {
+        "tags": [
+          "explorations"
+        ],
+        "summary": "Stream Exploration Events",
+        "operationId": "stream_exploration_events_api_v1_sessions__session_id__explorations__exploration_id__events_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "exploration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Exploration Id"
+            }
+          },
+          {
+            "name": "last_event_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last Event Id"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{session_id}/investigations": {
       "get": {
         "tags": [
@@ -13531,6 +14547,209 @@
           "file"
         ],
         "title": "Body_create_upload_api_v1_projects__project_id__uploads_post"
+      },
+      "BudgetAmendment": {
+        "properties": {
+          "amendment_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Amendment Id"
+          },
+          "previous_effective_fingerprint": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Previous Effective Fingerprint"
+          },
+          "increase": {
+            "$ref": "#/components/schemas/BudgetCapIncrease-Output"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason"
+          },
+          "approved_by": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Approved By"
+          },
+          "created_at": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "amendment_id",
+          "previous_effective_fingerprint",
+          "increase",
+          "reason",
+          "approved_by",
+          "created_at"
+        ],
+        "title": "BudgetAmendment",
+        "description": "One monotonic link in the amendment chain (R3.2: caps only go up)."
+      },
+      "BudgetCapIncrease-Input": {
+        "properties": {
+          "max_requests": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Requests",
+            "default": 0
+          },
+          "max_input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Input Tokens",
+            "default": 0
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Output Tokens",
+            "default": 0
+          },
+          "max_total_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Total Tokens",
+            "default": 0
+          },
+          "max_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              }
+            ],
+            "title": "Max Cost Usd",
+            "default": "0"
+          },
+          "max_wall_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Max Wall Seconds",
+            "default": 0.0
+          },
+          "max_successful_tool_calls": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Successful Tool Calls",
+            "default": 0
+          },
+          "max_tool_calls_by_kind": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Max Tool Calls By Kind"
+          },
+          "max_rows_scanned": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Rows Scanned",
+            "default": 0
+          },
+          "max_result_cells": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Result Cells",
+            "default": 0
+          },
+          "max_rounds": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Rounds",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BudgetCapIncrease",
+        "description": "Strictly additive deltas; a zero increase across the board is invalid."
+      },
+      "BudgetCapIncrease-Output": {
+        "properties": {
+          "max_requests": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Requests",
+            "default": 0
+          },
+          "max_input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Input Tokens",
+            "default": 0
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Output Tokens",
+            "default": 0
+          },
+          "max_total_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Total Tokens",
+            "default": 0
+          },
+          "max_cost_usd": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Max Cost Usd",
+            "default": "0"
+          },
+          "max_wall_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Max Wall Seconds",
+            "default": 0.0
+          },
+          "max_successful_tool_calls": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Successful Tool Calls",
+            "default": 0
+          },
+          "max_tool_calls_by_kind": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Max Tool Calls By Kind"
+          },
+          "max_rows_scanned": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Rows Scanned",
+            "default": 0
+          },
+          "max_result_cells": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Result Cells",
+            "default": 0
+          },
+          "max_rounds": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Rounds",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BudgetCapIncrease",
+        "description": "Strictly additive deltas; a zero increase across the board is invalid."
       },
       "CandidateDecisionView": {
         "properties": {
@@ -17435,6 +18654,900 @@
         ],
         "title": "EntityNoteView"
       },
+      "ExplorationBudgetExtended": {
+        "properties": {
+          "exploration": {
+            "$ref": "#/components/schemas/ExplorationView"
+          },
+          "amendment": {
+            "$ref": "#/components/schemas/BudgetAmendment"
+          },
+          "effective_policy_fingerprint": {
+            "type": "string",
+            "title": "Effective Policy Fingerprint"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "exploration",
+          "amendment",
+          "effective_policy_fingerprint"
+        ],
+        "title": "ExplorationBudgetExtended"
+      },
+      "ExplorationBudgetPolicy": {
+        "properties": {
+          "llm": {
+            "$ref": "#/components/schemas/SessionBudgetPolicyModel"
+          },
+          "max_successful_tool_calls": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max Successful Tool Calls"
+          },
+          "max_tool_calls_by_kind": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "minProperties": 1,
+            "title": "Max Tool Calls By Kind"
+          },
+          "max_rows_scanned": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Rows Scanned"
+          },
+          "max_result_cells": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Result Cells"
+          },
+          "idle_timeout_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Idle Timeout Seconds"
+          },
+          "max_rounds": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max Rounds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "llm",
+          "max_successful_tool_calls",
+          "max_tool_calls_by_kind",
+          "idle_timeout_seconds",
+          "max_rounds"
+        ],
+        "title": "ExplorationBudgetPolicy",
+        "description": "Multi-dimensional hard limits for one exploration run (plan §4.2)."
+      },
+      "ExplorationBudgetView": {
+        "properties": {
+          "base": {
+            "$ref": "#/components/schemas/ExplorationBudgetPolicy"
+          },
+          "max_llm_requests": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Llm Requests"
+          },
+          "remaining_llm_requests": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Llm Requests"
+          },
+          "max_successful_tool_calls": {
+            "type": "integer",
+            "title": "Max Successful Tool Calls"
+          },
+          "remaining_successful_tool_calls": {
+            "type": "integer",
+            "title": "Remaining Successful Tool Calls"
+          },
+          "max_rows_scanned": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Rows Scanned"
+          },
+          "rows_scanned": {
+            "type": "integer",
+            "title": "Rows Scanned"
+          },
+          "max_result_cells": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Result Cells"
+          },
+          "result_cells": {
+            "type": "integer",
+            "title": "Result Cells"
+          },
+          "max_rounds": {
+            "type": "integer",
+            "title": "Max Rounds"
+          },
+          "remaining_rounds": {
+            "type": "integer",
+            "title": "Remaining Rounds"
+          },
+          "max_cost_usd": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Cost Usd"
+          },
+          "cost_usd": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Cost Usd"
+          },
+          "remaining_cost_usd": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Cost Usd"
+          },
+          "llm_requests_used": {
+            "type": "integer",
+            "title": "Llm Requests Used"
+          },
+          "successful_tool_calls_used": {
+            "type": "integer",
+            "title": "Successful Tool Calls Used"
+          },
+          "rounds_used": {
+            "type": "integer",
+            "title": "Rounds Used"
+          },
+          "amendments": {
+            "items": {
+              "$ref": "#/components/schemas/BudgetAmendment"
+            },
+            "type": "array",
+            "title": "Amendments",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "base",
+          "max_llm_requests",
+          "remaining_llm_requests",
+          "max_successful_tool_calls",
+          "remaining_successful_tool_calls",
+          "max_rows_scanned",
+          "rows_scanned",
+          "max_result_cells",
+          "result_cells",
+          "max_rounds",
+          "remaining_rounds",
+          "max_cost_usd",
+          "cost_usd",
+          "remaining_cost_usd",
+          "llm_requests_used",
+          "successful_tool_calls_used",
+          "rounds_used"
+        ],
+        "title": "ExplorationBudgetView"
+      },
+      "ExplorationControlRequest": {
+        "properties": {},
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ExplorationControlRequest",
+        "description": "Empty on purpose: policy identities are always reconstructed server-side."
+      },
+      "ExplorationCostRange": {
+        "properties": {
+          "minimum_usd": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Minimum Usd"
+          },
+          "maximum_usd": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Maximum Usd"
+          },
+          "basis": {
+            "type": "string",
+            "const": "policy_hard_cap",
+            "title": "Basis",
+            "default": "policy_hard_cap"
+          },
+          "exact": {
+            "type": "boolean",
+            "const": false,
+            "title": "Exact",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "minimum_usd",
+          "maximum_usd"
+        ],
+        "title": "ExplorationCostRange"
+      },
+      "ExplorationEvidenceView": {
+        "properties": {
+          "receipt_id": {
+            "type": "string",
+            "title": "Receipt Id"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "fact_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Fact Ids",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "receipt_id",
+          "tool_name",
+          "summary"
+        ],
+        "title": "ExplorationEvidenceView"
+      },
+      "ExplorationExtendBudgetRequest": {
+        "properties": {
+          "increase": {
+            "$ref": "#/components/schemas/BudgetCapIncrease-Input"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "increase",
+          "reason"
+        ],
+        "title": "ExplorationExtendBudgetRequest",
+        "description": "Only additive caps and a human reason; no client-provided fingerprints."
+      },
+      "ExplorationHypothesisView": {
+        "properties": {
+          "hypothesis_id": {
+            "type": "string",
+            "title": "Hypothesis Id"
+          },
+          "statement": {
+            "type": "string",
+            "title": "Statement"
+          },
+          "why_selected": {
+            "type": "string",
+            "title": "Why Selected"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "priority": {
+            "type": "number",
+            "title": "Priority"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "hypothesis_id",
+          "statement",
+          "why_selected",
+          "status",
+          "priority"
+        ],
+        "title": "ExplorationHypothesisView"
+      },
+      "ExplorationInsightView": {
+        "properties": {
+          "insight_id": {
+            "type": "string",
+            "title": "Insight Id"
+          },
+          "hypothesis_id": {
+            "type": "string",
+            "title": "Hypothesis Id"
+          },
+          "statement": {
+            "type": "string",
+            "title": "Statement"
+          },
+          "family": {
+            "type": "string",
+            "title": "Family"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "new",
+              "reinforced",
+              "refuted",
+              "inconclusive"
+            ],
+            "title": "Status"
+          },
+          "trust_level": {
+            "type": "string",
+            "enum": [
+              "supported",
+              "contested",
+              "refuted",
+              "unsupported"
+            ],
+            "title": "Trust Level"
+          },
+          "evidence_lane": {
+            "type": "string",
+            "enum": [
+              "exploratory",
+              "confirmatory"
+            ],
+            "title": "Evidence Lane"
+          },
+          "proof": {
+            "items": {
+              "$ref": "#/components/schemas/InsightProof"
+            },
+            "type": "array",
+            "title": "Proof"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Limitations",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "insight_id",
+          "hypothesis_id",
+          "statement",
+          "family",
+          "status",
+          "trust_level",
+          "evidence_lane",
+          "proof"
+        ],
+        "title": "ExplorationInsightView"
+      },
+      "ExplorationJobView": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "execution_session_id": {
+            "type": "string",
+            "title": "Execution Session Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "job_id",
+          "execution_session_id",
+          "status"
+        ],
+        "title": "ExplorationJobView"
+      },
+      "ExplorationPolicy": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "open",
+              "goal_directed"
+            ],
+            "title": "Mode"
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "dataset_scope": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Dataset Scope"
+          },
+          "thinking_level": {
+            "type": "string",
+            "enum": [
+              "quick",
+              "standard",
+              "deep"
+            ],
+            "title": "Thinking Level"
+          },
+          "coverage_targets": {
+            "items": {
+              "$ref": "#/components/schemas/InsightFamily"
+            },
+            "type": "array",
+            "title": "Coverage Targets"
+          },
+          "budget": {
+            "$ref": "#/components/schemas/ExplorationBudgetPolicy"
+          },
+          "scoring_policy_version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Scoring Policy Version"
+          },
+          "statistical_policy_version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Statistical Policy Version"
+          },
+          "tool_capability_digest": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Tool Capability Digest"
+          },
+          "policy_fingerprint": {
+            "type": "string",
+            "title": "Policy Fingerprint",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "mode",
+          "dataset_scope",
+          "thinking_level",
+          "coverage_targets",
+          "budget",
+          "scoring_policy_version",
+          "statistical_policy_version",
+          "tool_capability_digest"
+        ],
+        "title": "ExplorationPolicy",
+        "description": "Immutable per-run policy; the fingerprint covers every field but itself."
+      },
+      "ExplorationPrepareRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "open",
+              "goal_directed"
+            ],
+            "title": "Mode",
+            "default": "open"
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "dataset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Dataset Ids"
+          },
+          "thinking_level": {
+            "type": "string",
+            "enum": [
+              "quick",
+              "standard",
+              "deep"
+            ],
+            "title": "Thinking Level",
+            "default": "standard"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dataset_ids"
+        ],
+        "title": "ExplorationPrepareRequest"
+      },
+      "ExplorationPrepared": {
+        "properties": {
+          "exploration_id": {
+            "type": "string",
+            "title": "Exploration Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ExplorationPolicy"
+          },
+          "data_state_witness": {
+            "type": "string",
+            "title": "Data State Witness"
+          },
+          "cost_range": {
+            "$ref": "#/components/schemas/ExplorationCostRange"
+          },
+          "action_hash": {
+            "type": "string",
+            "title": "Action Hash"
+          },
+          "approval_token": {
+            "type": "string",
+            "title": "Approval Token"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "release_certificate_digest": {
+            "type": "string",
+            "title": "Release Certificate Digest"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "exploration_id",
+          "session_id",
+          "project_id",
+          "policy",
+          "data_state_witness",
+          "cost_range",
+          "action_hash",
+          "approval_token",
+          "expires_at",
+          "release_certificate_digest"
+        ],
+        "title": "ExplorationPrepared"
+      },
+      "ExplorationReportView": {
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "artifact_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Ref"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "available"
+        ],
+        "title": "ExplorationReportView"
+      },
+      "ExplorationStartRequest": {
+        "properties": {
+          "action_hash": {
+            "type": "string",
+            "minLength": 8,
+            "title": "Action Hash"
+          },
+          "approval_token": {
+            "type": "string",
+            "minLength": 8,
+            "title": "Approval Token"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action_hash",
+          "approval_token"
+        ],
+        "title": "ExplorationStartRequest"
+      },
+      "ExplorationStarted": {
+        "properties": {
+          "exploration": {
+            "$ref": "#/components/schemas/ExplorationView"
+          },
+          "job": {
+            "$ref": "#/components/schemas/ExplorationJobView"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "exploration",
+          "job"
+        ],
+        "title": "ExplorationStarted"
+      },
+      "ExplorationView": {
+        "properties": {
+          "exploration_id": {
+            "type": "string",
+            "title": "Exploration Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "goal": {
+            "type": "string",
+            "title": "Goal"
+          },
+          "thinking_level": {
+            "type": "string",
+            "enum": [
+              "quick",
+              "standard",
+              "deep"
+            ],
+            "title": "Thinking Level"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "pause_requested",
+              "paused",
+              "stopped"
+            ],
+            "title": "Status"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "budget_exhausted",
+                  "cancelled",
+                  "failed",
+                  "state_witness_changed",
+                  "no_new_information"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "last_seq": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Last Seq"
+          },
+          "policy_fingerprint": {
+            "type": "string",
+            "title": "Policy Fingerprint"
+          },
+          "effective_policy_fingerprint": {
+            "type": "string",
+            "title": "Effective Policy Fingerprint"
+          },
+          "data_state_witness": {
+            "type": "string",
+            "title": "Data State Witness"
+          },
+          "amendment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Amendment Ids",
+            "default": []
+          },
+          "current_hypothesis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExplorationHypothesisView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/ExplorationEvidenceView"
+            },
+            "type": "array",
+            "title": "Current Evidence",
+            "default": []
+          },
+          "insights": {
+            "items": {
+              "$ref": "#/components/schemas/ExplorationInsightView"
+            },
+            "type": "array",
+            "title": "Insights",
+            "default": []
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Limitations",
+            "default": []
+          },
+          "coverage_targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Coverage Targets",
+            "default": []
+          },
+          "coverage_completed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Coverage Completed",
+            "default": []
+          },
+          "coverage_unexplored": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Coverage Unexplored",
+            "default": []
+          },
+          "report": {
+            "$ref": "#/components/schemas/ExplorationReportView"
+          },
+          "budget": {
+            "$ref": "#/components/schemas/ExplorationBudgetView"
+          },
+          "job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExplorationJobView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events_url": {
+            "type": "string",
+            "title": "Events Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "exploration_id",
+          "session_id",
+          "project_id",
+          "goal",
+          "thinking_level",
+          "status",
+          "last_seq",
+          "policy_fingerprint",
+          "effective_policy_fingerprint",
+          "data_state_witness",
+          "report",
+          "budget",
+          "events_url"
+        ],
+        "title": "ExplorationView"
+      },
       "FieldMeaningView": {
         "properties": {
           "dataset": {
@@ -18406,6 +20519,64 @@
         },
         "type": "object",
         "title": "HealthStatusView"
+      },
+      "InsightFamily": {
+        "type": "string",
+        "enum": [
+          "Descriptive",
+          "Diagnostic",
+          "Predictive",
+          "Prescriptive",
+          "Evaluative",
+          "Exploratory"
+        ],
+        "title": "InsightFamily",
+        "description": "Six-family taxonomy; values stay literally identical to InsightEval's\n``data_type`` (snapshot-tested against the Eval-0 checkers, doc §10.1)."
+      },
+      "InsightProof": {
+        "properties": {
+          "receipt_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Receipt Id"
+          },
+          "fact_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Fact Ids"
+          },
+          "comparison": {
+            "type": "string",
+            "enum": [
+              "supports",
+              "contradicts"
+            ],
+            "title": "Comparison"
+          },
+          "evidence_independence_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Independence Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "receipt_id",
+          "fact_ids",
+          "comparison"
+        ],
+        "title": "InsightProof",
+        "description": "Fact-level, machine-checkable edge from an insight to one receipt."
       },
       "InvestigationDecisionPrepareRequest": {
         "properties": {
@@ -22460,6 +24631,125 @@
         "title": "SemanticView",
         "description": "The project semantic layer viewed from one run."
       },
+      "SessionBudgetPolicyModel": {
+        "properties": {
+          "max_requests": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Requests"
+          },
+          "max_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Input Tokens"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
+          },
+          "max_total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Total Tokens"
+          },
+          "max_cost_usd": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Cost Usd"
+          },
+          "max_wall_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Wall Seconds"
+          },
+          "protected_requests": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Protected Requests",
+            "default": 0
+          },
+          "protected_input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Protected Input Tokens",
+            "default": 0
+          },
+          "protected_output_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Protected Output Tokens",
+            "default": 0
+          },
+          "protected_total_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Protected Total Tokens",
+            "default": 0
+          },
+          "protected_cost_usd": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Protected Cost Usd",
+            "default": "0"
+          },
+          "unknown_usage_policy": {
+            "type": "string",
+            "enum": [
+              "consume_reservation",
+              "reject"
+            ],
+            "title": "Unknown Usage Policy",
+            "default": "consume_reservation"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SessionBudgetPolicyModel",
+        "description": "Pydantic mirror of core.budget.SessionBudgetPolicy (field-for-field)."
+      },
       "SessionDebugSummary": {
         "properties": {
           "events": {
@@ -24631,6 +26921,16 @@
           "pdf_export_hint": {
             "type": "string",
             "title": "Pdf Export Hint",
+            "default": ""
+          },
+          "exploration_available": {
+            "type": "boolean",
+            "title": "Exploration Available",
+            "default": false
+          },
+          "exploration_hint": {
+            "type": "string",
+            "title": "Exploration Hint",
             "default": ""
           }
         },

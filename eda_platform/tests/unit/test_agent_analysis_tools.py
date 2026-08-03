@@ -452,7 +452,9 @@ def test_run_stat_test_receipt_records_family_id_and_effect_ci() -> None:
     assert receipt.artifact_ids == (primary.id,)
     assert receipt_artifact.parents == [primary.id]
     assert receipt.statistics is not None
-    assert receipt.statistics.hypothesis_id == receipt.method.parameters["test_family_id"]
+    assert receipt.statistics.statistical_family_id == (
+        receipt.method.parameters["test_family_id"]
+    )
     assert receipt.statistics.test_name == "independent_t_test"
     assert receipt.statistics.p_value is not None
     assert receipt.statistics.ci_low is not None

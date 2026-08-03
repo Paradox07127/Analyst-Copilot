@@ -30,6 +30,7 @@ from eda_platform.api.routers.cleaning import router as cleaning_router
 from eda_platform.api.routers.compare import router as compare_router
 from eda_platform.api.routers.datasets import router as datasets_router
 from eda_platform.api.routers.decision_reports import router as decision_reports_router
+from eda_platform.api.routers.explorations import router as explorations_router
 from eda_platform.api.routers.findings import router as findings_router
 from eda_platform.api.routers.forks import router as forks_router
 from eda_platform.api.routers.insights import router as insights_router
@@ -57,6 +58,11 @@ from eda_platform.application.services.compare_service import CompareService
 from eda_platform.application.services.data_operation_service import DataOperationService
 from eda_platform.application.services.dataset_service import DatasetService
 from eda_platform.application.services.decision_report_service import DecisionReportService
+from eda_platform.application.services.exploration_service import (
+    TRUSTED_EXPLORATION_RUNTIME_IDENTITY,
+    ExplorationService,
+    load_configured_release_certificate,
+)
 from eda_platform.application.services.finding_service import FindingService
 from eda_platform.application.services.insight_service import InsightService
 from eda_platform.application.services.investigation_service import InvestigationService
@@ -89,6 +95,9 @@ from eda_platform.core.config import (
     DeploymentConfig,
     deployment_config,
     resolve_workspace_path,
+)
+from eda_platform.core.exploration_release_gate import (
+    TRUSTED_E4A_RELEASE_PUBLIC_KEYS,
 )
 from eda_platform.core.ids import UNFILED_PROJECT_ID
 from eda_platform.core.query import TrustedFileQueryEngine
@@ -146,6 +155,17 @@ def create_app(
     app.state.artifact_service = ArtifactService(store)
     app.state.insight_service = InsightService(store)
     approval_service = ApprovalService(store)
+    app.state.exploration_service = ExplorationService(
+        store,
+        approval_service,
+        job_service,
+        release_certificate=load_configured_release_certificate(
+            trusted_release_public_keys=TRUSTED_E4A_RELEASE_PUBLIC_KEYS,
+            trusted_runtime_identity=TRUSTED_EXPLORATION_RUNTIME_IDENTITY,
+        ),
+        trusted_release_public_keys=TRUSTED_E4A_RELEASE_PUBLIC_KEYS,
+        trusted_runtime_identity=TRUSTED_EXPLORATION_RUNTIME_IDENTITY,
+    )
     app.state.cleaning_service = CleaningService(
         store, dataset_service, approval_service, job_service
     )
@@ -220,6 +240,7 @@ def create_app(
     # Registered last so its paths append to the OpenAPI document instead of
     # reordering every route below them; second path segments are all static,
     # so routing itself does not depend on the order.
+    _include_api_router(app, explorations_router)
     _include_api_router(app, investigations_router)
     _configure_middleware(app, store, deployment)
     # Recover or relaunch durable jobs before run deletion recovery. A delete

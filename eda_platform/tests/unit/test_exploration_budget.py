@@ -85,6 +85,35 @@ def test_failed_calls_do_not_consume_the_success_budget() -> None:
         ledger.check_batch(_probe())
 
 
+def test_failed_calls_still_consume_measurable_scan_resources() -> None:
+    ledger = ToolCallLedger(_policy(max_rows_scanned=100, max_result_cells=20))
+    ledger.check_batch(_probe(rows_scanned=60, result_cells=10))
+    ledger.record_failure_usage(
+        "run_open_analysis", rows_scanned=60, result_cells=10
+    )
+    assert ledger.snapshot() == {
+        "successful_tool_calls": 0,
+        "calls_by_kind": {},
+        "rows_scanned": 60,
+        "result_cells": 10,
+    }
+
+    with pytest.raises(ToolBudgetExceeded) as projected:
+        ledger.check_batch(_probe(rows_scanned=50))
+    assert projected.value.dimension == "rows_scanned"
+    assert ledger.remaining()["successful_tool_calls"] == 10
+
+
+def test_failed_call_resource_settlement_is_fail_closed_on_underprojection() -> None:
+    ledger = ToolCallLedger(_policy(max_rows_scanned=100))
+    ledger.check_batch(_probe(rows_scanned=20))
+    with pytest.raises(ToolBudgetExceeded) as settled:
+        ledger.record_failure_usage("run_open_analysis", rows_scanned=120)
+    assert settled.value.stage == "settlement"
+    assert settled.value.latched is True
+    assert ledger.snapshot()["rows_scanned"] == 120
+
+
 def test_per_kind_cap_latches_only_that_kind() -> None:
     ledger = ToolCallLedger(
         _policy(max_tool_calls_by_kind={"run_open_analysis": 1, "profile_slice": 2})

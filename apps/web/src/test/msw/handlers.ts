@@ -2937,6 +2937,8 @@ export const defaultHandlers = [
     HttpResponse.json({
       pdf_export_available: true,
       pdf_export_hint: "",
+      exploration_available: false,
+      exploration_hint: "Exploration release is not installed.",
     } satisfies SystemCapabilitiesView),
   ),
 

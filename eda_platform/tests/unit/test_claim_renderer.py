@@ -195,7 +195,6 @@ def test_sections_are_fixed_and_claims_land_in_their_lanes() -> None:
             "# Exploration findings",
             "## Confirmed findings",
             "## Exploratory observations",
-            "## Statistical caveats",
             "## Evidence trail",
             "## Not rendered",
         )
@@ -223,12 +222,6 @@ def test_rejected_bundles_are_counted_but_never_rendered() -> None:
     assert "- withheld bundles (rejected or abstained): 1" in rendered.markdown
     assert rendered.rendered_bundle_ids == ("clb_confirm", "clb_explore")
     assert rendered.withheld_bundle_ids == ("clb_zz_rejected",)
-
-
-def test_clean_confirmatory_evidence_needs_no_statistical_qualifier() -> None:
-    markdown = render_claim_report([CONFIRM], run_metadata=METADATA).markdown
-    caveats = markdown[markdown.index("## Statistical caveats") :]
-    assert "(none)" in caveats
 
 
 def test_evidence_trail_lists_sorted_receipt_ids_per_bundle() -> None:

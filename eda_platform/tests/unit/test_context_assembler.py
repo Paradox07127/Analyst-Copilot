@@ -55,6 +55,10 @@ def _state(**overrides: Any) -> ExplorationLoopState:
         "last_seq": 0,
     }
     fields.update(overrides)
+    if fields.get("tool_calls_committed") and "tool_calls_by_kind" not in overrides:
+        fields["tool_calls_by_kind"] = {
+            "legacy_unknown": fields["tool_calls_committed"]
+        }
     return ExplorationLoopState(**fields)
 
 

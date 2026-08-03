@@ -150,6 +150,14 @@ export const routes: RouteObject[] = [
             lazy: () => import("../features/questions/QuestionsPage"),
           },
           {
+            path: "explorations",
+            lazy: () => import("../features/exploration/ExplorationPage"),
+          },
+          {
+            path: "explorations/:explorationId",
+            lazy: () => import("../features/exploration/ExplorationPage"),
+          },
+          {
             path: "findings",
             lazy: () => import("../features/findings/FindingsPage"),
           },

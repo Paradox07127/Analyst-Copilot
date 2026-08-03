@@ -18,10 +18,12 @@ from eda_platform.core.event_journal import (
     EventJournalCorruptionError,
     EventTransitionError,
 )
+from eda_platform.core.exploration_budget import ToolCallLedger
 from eda_platform.core.exploration_journal import (
     ExplorationPolicyIntegrityError,
     ExplorationResumeIncompatibleError,
     JsonlExplorationJournal,
+    RecoveredToolCommit,
     amended_policy_fingerprint,
     compute_policy_fingerprint,
     rebuild_exploration_state,
@@ -223,6 +225,42 @@ def test_full_round_lifecycle_and_prefix_rebuild(tmp_path: Path) -> None:
     assert final.require_ledger_digest() == "ledger-1"
 
 
+def test_round_settlement_durably_records_terminal_decision_for_crash_recovery(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    journal.claim_attempt()
+    journal.append_new("round_started", round_index=0)
+    journal.append_new(
+        "reduction_committed", frontier_digest="frontier-1", ledger_digest="ledger-1"
+    )
+
+    settled = journal.append_new(
+        "round_settled",
+        round_index=0,
+        progress=True,
+        terminal_reason="completed",
+        terminal_has_reduction=True,
+    )
+
+    assert settled.current_round_index is None
+    assert settled.pending_terminal_reason == "completed"
+    assert settled.pending_terminal_has_reduction is True
+    with pytest.raises(EventTransitionError, match="terminal decision"):
+        journal.append_new("round_started", round_index=1)
+    with pytest.raises(EventTransitionError, match="does not match"):
+        journal.append_new(
+            "exploration_stopped",
+            stop_reason="budget_exhausted",
+            final_report_ref=None,
+        )
+    stopped = journal.append_new(
+        "exploration_stopped", stop_reason="completed", final_report_ref="report-1"
+    )
+    assert stopped.pending_terminal_reason is None
+    assert stopped.pending_terminal_has_reduction is False
+
+
 def test_unrestored_fields_raise_instead_of_defaulting(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     state = journal.rebuild()
@@ -312,6 +350,90 @@ def test_failed_tool_calls_do_not_consume_the_success_budget(tmp_path: Path) -> 
     assert state.failure_history == ["query timeout"]
 
 
+def test_tool_kind_and_resource_usage_are_journal_durable_and_restore_ledger(
+    tmp_path: Path,
+) -> None:
+    policy = _policy()
+    journal = _journal(tmp_path, policy=policy)
+    journal.append_new("round_started", round_index=0)
+    journal.append_new(
+        "tool_call_started",
+        logical_step_id="step-usage",
+        input_fingerprint="probe-fp",
+        tool_kind="run_open_analysis",
+        projected_rows_scanned=100,
+        projected_result_cells=20,
+    )
+    journal.append_new(
+        "receipt_prepared",
+        logical_step_id="step-usage",
+        receipt_id="receipt-usage",
+    )
+    state = journal.append_new(
+        "receipt_committed",
+        logical_step_id="step-usage",
+        receipt_id="receipt-usage",
+        rows_scanned=80,
+        result_cells=12,
+    )
+
+    assert state.tool_calls_by_kind == {"run_open_analysis": 1}
+    assert state.rows_scanned == 80
+    assert state.result_cells == 12
+    assert state.completed_probe_fingerprints == ["probe-fp"]
+    restored = ToolCallLedger.restore_from_journal_state(policy.budget, state)
+    assert restored.snapshot() == {
+        "successful_tool_calls": 1,
+        "calls_by_kind": {"run_open_analysis": 1},
+        "rows_scanned": 80,
+        "result_cells": 12,
+    }
+
+
+def test_crashed_tool_charges_projection_or_adopts_durable_body(tmp_path: Path) -> None:
+    charged = _journal(tmp_path / "charged")
+    charged.append_new("round_started", round_index=0)
+    charged.append_new(
+        "tool_call_started",
+        logical_step_id="step-crash",
+        input_fingerprint="probe-crash",
+        tool_kind="run_open_analysis",
+        projected_rows_scanned=120,
+        projected_result_cells=30,
+    )
+    charged_state = JsonlExplorationJournal(charged.path).claim_recovery()
+    assert charged_state.rows_scanned == 120
+    assert charged_state.result_cells == 30
+    assert charged_state.tool_calls_committed == 0
+
+    adopted = _journal(tmp_path / "adopted")
+    adopted.append_new("round_started", round_index=0)
+    adopted.append_new(
+        "tool_call_started",
+        logical_step_id="step-adopt",
+        input_fingerprint="probe-adopt",
+        tool_kind="run_open_analysis",
+        projected_rows_scanned=120,
+        projected_result_cells=30,
+    )
+    adopted_state = JsonlExplorationJournal(adopted.path).claim_recovery(
+        completed_tool_result=lambda step_id: (
+            RecoveredToolCommit(
+                "receipt-adopt",
+                result_digest="tool-result-digest",
+                rows_scanned=70,
+                result_cells=10,
+            )
+            if step_id == "step-adopt"
+            else None
+        )
+    )
+    assert adopted_state.step_receipt_refs == {"step-adopt": "receipt-adopt"}
+    assert adopted_state.rows_scanned == 70
+    assert adopted_state.result_cells == 10
+    assert adopted_state.completed_probe_fingerprints == ["probe-adopt"]
+
+
 # ---------------------------------------------------------- crash / recovery
 
 
@@ -368,6 +490,52 @@ def test_crash_before_llm_return_marks_uncertain_and_consumes_reservation(
     assert state.rounds_settled == 1
 
 
+def test_crash_after_response_body_adopts_bound_step_before_marking_uncertain(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    journal.append_new("round_started", round_index=0)
+    journal.append_new(
+        "llm_call_started",
+        call_id="call-0",
+        step_id="step-llm-0",
+    )
+
+    recovered = JsonlExplorationJournal(journal.path)
+    state = recovered.claim_recovery(
+        completed_response_digest=lambda step_id: (
+            "response-digest-0" if step_id == "step-llm-0" else None
+        )
+    )
+
+    assert state.pending_call_id is None
+    assert state.pending_call_step_id is None
+    assert state.llm_calls_settled == 1
+    assert state.llm_calls_uncertain == 0
+    assert "step-llm-0" in state.completed_step_ids
+    assert [event.event_type for event in recovered.events()][-2:] == [
+        "attempt_started",
+        "llm_call_completed",
+    ]
+
+
+def test_bound_pending_call_rejects_completion_for_another_step(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.append_new("round_started", round_index=0)
+    journal.append_new(
+        "llm_call_started",
+        call_id="call-0",
+        step_id="step-llm-0",
+    )
+    with pytest.raises(EventTransitionError, match="pending call"):
+        journal.append_new(
+            "llm_call_completed",
+            call_id="call-0",
+            step_id="step-other",
+            response_digest="response-other",
+        )
+
+
 def test_crash_after_llm_return_replays_without_resending(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
@@ -401,7 +569,11 @@ def test_crash_before_receipt_commit_allows_logical_rerun_exactly_once(
 
     recovered = JsonlExplorationJournal(journal.path)
     state = recovered.claim_recovery()
-    assert state.pending_logical_step_id == "step-corr"  # re-run is allowed
+    assert state.pending_logical_step_id is None
+    assert state.failure_history[-1].startswith("tool outcome unknown after crash")
+    recovered.append_new(
+        "tool_call_started", logical_step_id="step-corr", input_fingerprint="fp-1"
+    )
     recovered.append_new(
         "receipt_prepared", logical_step_id="step-corr", receipt_id="rcpt-1"
     )
@@ -568,6 +740,29 @@ def test_natural_endings_require_quiescence_but_aborts_do_not(tmp_path: Path) ->
     )
     assert state.status == "stopped"
     assert state.require_stop_reason() == "state_witness_changed"
+    assert state.llm_calls_uncertain == 1
+    assert state.uncertain_call_ids == ["call-0"]
+    assert state.remaining_llm_call_budget == 3
+
+
+def test_gate_and_reduction_cannot_commit_around_pending_work(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.append_new("round_started", round_index=0)
+    journal.append_new(
+        "tool_call_started",
+        logical_step_id="pending-tool",
+        input_fingerprint="pending-fp",
+    )
+    with pytest.raises(EventTransitionError, match="pending"):
+        journal.append_new(
+            "gate_verdict", claim_bundle_id="claim-1", verdict="passed"
+        )
+    with pytest.raises(EventTransitionError, match="pending"):
+        journal.append_new(
+            "reduction_committed",
+            frontier_digest="frontier-1",
+            ledger_digest="ledger-1",
+        )
 
 
 def test_forged_seq_and_epoch_rollback_are_rejected(tmp_path: Path) -> None:

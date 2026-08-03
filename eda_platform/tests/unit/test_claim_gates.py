@@ -618,6 +618,37 @@ def test_statistical_gate_blocks_incomplete_confirmatory_evidence() -> None:
     assert report.health_score < 1.0  # registered violations still dent health
 
 
+def test_confirmatory_claims_need_an_actual_inferential_result() -> None:
+    """Citing a statistics receipt is not the same as citing a statistic.
+
+    Every completeness and multiplicity check keys off `p_value`, so a receipt
+    that omits it used to skip all of them while still satisfying the
+    "confirmatory cites statistics" check.
+    """
+    hollow = _receipt(
+        tool_call_id="call_stat_hollow",
+        facts=(_fact("f_hollow", 1, "count"),),
+        tool_name="run_stat_test",
+        method_family="independent_t_test",
+        statistics=ReceiptStatistics(
+            hypothesis_id="fam_orders_amount",
+            test_name="independent_t_test",
+            sequence_index=1,
+        ),
+    )
+    claim = _claim(
+        claim_text="Group means differ significantly.",
+        evidence_fact_ids=(_ref(hollow, "f_hollow"),),
+        statistics_receipt_ids=(hollow.receipt_id,),
+    )
+    report = _run(
+        _bundle(claim, evidence_lane="confirmatory"),
+        committed_receipts={**COMMITTED, hollow.receipt_id: hollow},
+    )
+    assert not report.passed
+    assert "confirmatory_without_test_statistic" in _codes(report, "statistical")
+
+
 def test_confirmatory_claims_without_statistics_are_blocked() -> None:
     report = _run(_bundle(evidence_lane="confirmatory"))
     assert not report.passed

@@ -58,6 +58,13 @@ from eda_platform.application.services.decision_report_service import (
     DecisionStoryDraftNotFoundError,
     DecisionStoryNotDraftableError,
 )
+from eda_platform.application.services.exploration_service import (
+    ExplorationConflictError,
+    ExplorationNotFoundError,
+    ExplorationReleaseUnavailableError,
+    ExplorationSourceChangedError,
+    ExplorationValidationError,
+)
 from eda_platform.application.services.insight_service import ChartNotFoundError
 from eda_platform.application.services.investigation_service import (
     InvestigationNotDecidableError,
@@ -197,6 +204,36 @@ def error_response(
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(ExplorationReleaseUnavailableError)
+    def _exploration_release_unavailable(
+        request: Request, exc: ExplorationReleaseUnavailableError
+    ) -> JSONResponse:
+        return error_response(503, "exploration_release_unavailable", str(exc))
+
+    @app.exception_handler(ExplorationNotFoundError)
+    def _exploration_not_found(
+        request: Request, exc: ExplorationNotFoundError
+    ) -> JSONResponse:
+        return error_response(404, "exploration_not_found", str(exc))
+
+    @app.exception_handler(ExplorationSourceChangedError)
+    def _exploration_source_changed(
+        request: Request, exc: ExplorationSourceChangedError
+    ) -> JSONResponse:
+        return error_response(409, "exploration_source_changed", str(exc))
+
+    @app.exception_handler(ExplorationConflictError)
+    def _exploration_conflict(
+        request: Request, exc: ExplorationConflictError
+    ) -> JSONResponse:
+        return error_response(409, "exploration_conflict", str(exc))
+
+    @app.exception_handler(ExplorationValidationError)
+    def _exploration_invalid(
+        request: Request, exc: ExplorationValidationError
+    ) -> JSONResponse:
+        return error_response(422, "exploration_invalid", str(exc))
+
     @app.exception_handler(ProjectNotFoundError)
     def _project_not_found(request: Request, exc: ProjectNotFoundError) -> JSONResponse:
         return error_response(404, "project_not_found", str(exc))

@@ -114,6 +114,24 @@ class LedgerLLMClient:
     def last_usage(self) -> LLMResultMetadata | None:
         return self._inner.last_usage()
 
+    def preflight_structured(
+        self, *, task: str, schema: type[BaseModel], payload: dict[str, Any]
+    ) -> None:
+        self._preflight(task=task, payload=payload, schema=schema)
+
+    def preflight_tool_call(
+        self,
+        *,
+        task: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> None:
+        self._preflight(
+            task=task,
+            payload={"messages": messages, "tools": tools},
+            schema=None,
+        )
+
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
         return self._call("structured", task=task, payload=payload, schema=schema)
 
@@ -136,6 +154,37 @@ class LedgerLLMClient:
             payload={"messages": messages, "tools": tools},
             schema=None,
         )
+
+    def _preflight(self, *, task: str, payload: dict, schema: type | None) -> None:
+        """Check exact reservation capacity without consuming a request slot."""
+        if self._budget is None:
+            return
+        input_tokens = _conservative_input_token_estimate(task, payload, schema)
+        output_tokens = _configured_output_token_cap(self.settings)
+        output_bound_required = any(
+            limit is not None
+            for limit in (
+                self._budget.policy.max_output_tokens,
+                self._budget.policy.max_total_tokens,
+                self._budget.policy.max_cost_usd,
+            )
+        )
+        preflight_id = f"preflight:{self._session_id}:{uuid4().hex}:{task}"
+        if output_bound_required and output_tokens <= 0:
+            raise BudgetUsageUncertain(
+                preflight_id,
+                stage="reservation",
+                missing=("output_tokens",),
+            )
+        cost = _worst_case_cost(self.settings, input_tokens, output_tokens)
+        reservation = self._budget.reserve(
+            preflight_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            protected=task in _PROTECTED_TASKS,
+        )
+        self._budget.release(reservation.call_id)
 
     def _call(self, kind: str, *, task: str, payload: dict, schema: type | None) -> Any:
         with self._call_lock:
@@ -510,6 +559,7 @@ def restore_run_budget_state(
     events: list[TraceEvent],
     *,
     run_started_at: datetime | None = None,
+    accepted_policy_fingerprints: frozenset[str] | None = None,
 ) -> SessionBudgetState:
     """Rebuild consumed budget and completed call IDs from persisted events.
 
@@ -564,13 +614,18 @@ def restore_run_budget_state(
             stage="restore",
             missing=("budget_reserved",),
         )
+    expected_policy_fingerprint = _budget_policy_fingerprint(policy)
+    accepted_fingerprints = accepted_policy_fingerprints or frozenset(
+        {expected_policy_fingerprint}
+    )
+    if expected_policy_fingerprint not in accepted_fingerprints:
+        raise ValueError("accepted policy fingerprints must include the effective policy.")
     for call_id, reserved in reserved_events.items():
         assert call_id is not None
-        expected_policy_fingerprint = _budget_policy_fingerprint(policy)
         persisted_policy_fingerprint = reserved.summary.get("policy_fingerprint")
         if (
             persisted_policy_fingerprint is not None
-            and persisted_policy_fingerprint != expected_policy_fingerprint
+            and persisted_policy_fingerprint not in accepted_fingerprints
         ):
             raise BudgetUsageUncertain(
                 call_id,
@@ -582,7 +637,7 @@ def restore_run_budget_state(
             terminal is not None
             and terminal.summary.get("policy_fingerprint") is not None
             and terminal.summary.get("policy_fingerprint")
-            != expected_policy_fingerprint
+            not in accepted_fingerprints
         ):
             raise BudgetUsageUncertain(
                 call_id,
@@ -624,6 +679,11 @@ def restore_run_budget_state(
             cost_usd=_summary_cost(terminal.summary),
         )
     return state
+
+
+def budget_policy_fingerprint(policy: SessionBudgetPolicy) -> str:
+    """Public stable identity used to restore a trusted amendment history."""
+    return _budget_policy_fingerprint(policy)
 
 
 def _unique_call_events(

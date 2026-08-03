@@ -82,6 +82,10 @@ class TimeSeriesDiagnostics:
     parse_loss_count: int
     duplicate_timestamp_count: int
     trend_direction: Literal["increasing", "decreasing", "flat"]
+    spike_detected: bool
+    spike_period: str | None
+    spike_value: float | None
+    spike_score: float | None
     seasonal_strength: float | None
     ljung_box_p: float | None
     ljung_box_lag: int | None
@@ -161,6 +165,7 @@ def analyze_series(
         )
 
     values_now = series.to_numpy(dtype="float64")
+    spike_detected, spike_period, spike_value, spike_score = _localized_spike(series)
     decomposed = None
     log_transformed = False
     if resolved_period is None:
@@ -228,6 +233,10 @@ def analyze_series(
         parse_loss_count=parse_loss_count,
         duplicate_timestamp_count=duplicate_timestamp_count,
         trend_direction=trend_direction,
+        spike_detected=spike_detected,
+        spike_period=spike_period,
+        spike_value=spike_value,
+        spike_score=spike_score,
         seasonal_strength=seasonal_strength,
         ljung_box_p=ljung_box_p,
         ljung_box_lag=ljung_box_lag,
@@ -351,6 +360,47 @@ def _trend_direction(values: np.ndarray) -> Literal["increasing", "decreasing", 
     return "increasing" if change > 0 else "decreasing"
 
 
+def _localized_spike(
+    series: pd.Series, *, threshold: float = 3.5
+) -> tuple[bool, str | None, float | None, float | None]:
+    """Return the strongest date-localized robust deviation in a regular series."""
+    if series.empty:
+        return False, None, None, None
+    values = series.astype("float64")
+    median = float(values.median())
+    deviations = cast(pd.Series, (values - median).abs())
+    mad = float(deviations.median())
+    q1 = float(values.quantile(0.25))
+    q3 = float(values.quantile(0.75))
+    iqr = q3 - q1
+    if mad > 0:
+        scores = cast(pd.Series, 0.6745 * (values - median) / mad)
+    elif iqr > 0:
+        # IQR / 1.349 estimates sigma for a normal distribution and keeps the
+        # fallback on the same 3.5-ish robust-z scale.
+        scores = cast(pd.Series, (values - median) / (iqr / 1.349))
+    elif values.nunique() > 1:
+        direction = cast(
+            pd.Series,
+            (values - median).map(lambda value: 1.0 if value > 0 else -1.0),
+        )
+        scores = cast(
+            pd.Series,
+            direction.where(values != median, 0.0) * (threshold + 1.0),
+        )
+    else:
+        scores = pd.Series(0.0, index=values.index, dtype="float64")
+    position = int(np.argmax(np.abs(scores.to_numpy(dtype="float64"))))
+    score = float(scores.iloc[position])
+    timestamp = cast(pd.Timestamp, values.index[position])
+    return (
+        abs(score) > threshold,
+        timestamp.isoformat(),
+        float(values.iloc[position]),
+        round(score, 6),
+    )
+
+
 def _seasonal_strength(decomposed: Any) -> float | None:
     """fpp3's variance-ratio strength: 1 - Var(remainder)/Var(seasonal+remainder)."""
     seasonal = np.asarray(decomposed.seasonal, dtype="float64")
@@ -454,6 +504,10 @@ def _diagnostics_table(
             ("decomposition_method", result.decomposition_method),
             ("log_transformed", result.log_transformed),
             ("trend_direction", result.trend_direction),
+            ("spike_detected", result.spike_detected),
+            ("spike_period", result.spike_period),
+            ("spike_value", result.spike_value),
+            ("spike_score", result.spike_score),
             ("seasonal_strength", result.seasonal_strength),
             ("ljung_box_p", result.ljung_box_p),
             ("ljung_box_lag", result.ljung_box_lag),

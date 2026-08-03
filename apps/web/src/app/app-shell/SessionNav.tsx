@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router";
-import { useDatasets, useEdaHandoff, useSessionDetail } from "../../api/hooks";
+import { useCapabilities, useDatasets, useEdaHandoff, useSessionDetail } from "../../api/hooks";
 import { readBaseline } from "../../features/compare/baseline-storage";
 import {
   sessionBasePath,
@@ -41,6 +41,7 @@ function buildNavGroups(
   projectId: string,
   sessionId: string,
   firstDatasetId?: string,
+  explorationAvailable = false,
 ): NavGroup[] {
   const at = (section: string) => sessionSectionPath(projectId, sessionId, section);
   const pinned = readBaseline(projectId);
@@ -86,6 +87,9 @@ function buildNavGroups(
     {
       title: "Investigate with the agent",
       pages: [
+        ...(explorationAvailable
+          ? [{ label: "Explore", icon: "sparkle" as const, to: at("explorations") }]
+          : []),
         { label: "Questions", icon: "quiz", to: at("questions") },
         { label: "Deep analysis", icon: "analytics", to: at("deep-analysis") },
         { label: "Findings", icon: "factCheck", to: at("findings") },
@@ -236,6 +240,8 @@ function SessionNavGroups({
   sessionId: string;
 }) {
   const datasets = useDatasets(sessionId);
+  const capabilities = useCapabilities();
+  const explorationAvailable = capabilities.data?.exploration_available === true;
   const readiness = usePipelineReadiness(
     sessionId,
     Boolean(datasets.data?.length),
@@ -244,6 +250,7 @@ function SessionNavGroups({
     projectId,
     sessionId,
     datasets.data?.[0]?.dataset_id,
+    explorationAvailable,
   );
   const { pathname } = useLocation();
   const panelId = useId();

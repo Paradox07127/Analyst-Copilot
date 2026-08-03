@@ -38,6 +38,10 @@ from eda_platform.core.env import (
     load_llm_settings_from_env_file,
     load_provider_api_keys_from_env_file,
 )
+from eda_platform.core.exploration_tiers import (
+    ANALYSIS_DEPTH_TO_EXPLORATION_TIER,
+    exploration_tier_for_analysis_depth,
+)
 from eda_platform.core.llm import (
     LLMConfigurationStatus,
     LLMProvider,
@@ -76,11 +80,12 @@ DEFAULT_PAYLOAD_POLICY = "schema+aggregates"
 PAYLOAD_POLICIES = ("schema_only", "schema+aggregates", "schema+aggregates+sample")
 STRUCTURED_MODES = ("auto", "json_schema", "json_object")
 
-# Analysis-loop depth (settings Thinking level): 0 Standard, 1 Deep,
-# 2/3 Ultra. Selecting >=2 is itself the authorization for the macro loop's
-# follow-up rounds, so it is a session setting rather than a per-request flag.
-DEFAULT_ANALYSIS_DEPTH = 0
-MIN_ANALYSIS_DEPTH, MAX_ANALYSIS_DEPTH = 0, 3
+# The exploration meaning of this legacy integer has one authority in
+# core.exploration_tiers: 0 quick, 1 standard, 2/3 deep. Existing investigation
+# thresholds remain below until that older workflow is retired.
+DEFAULT_ANALYSIS_DEPTH = min(ANALYSIS_DEPTH_TO_EXPLORATION_TIER)
+MIN_ANALYSIS_DEPTH = min(ANALYSIS_DEPTH_TO_EXPLORATION_TIER)
+MAX_ANALYSIS_DEPTH = max(ANALYSIS_DEPTH_TO_EXPLORATION_TIER)
 DEEP_INVESTIGATION_DEPTH = 1
 MACRO_LOOP_DEPTH = 2
 
@@ -704,13 +709,11 @@ def _status(settings: LLMSettings) -> LLMConfigurationStatus:
 
 
 def _parse_analysis_depth(value: int) -> int:
-    """Reject an out-of-range depth instead of clamping: silently downgrading a
-    requested Ultra to Standard would leave the caller believing the macro loop
-    is authorized when it is not."""
-    if not MIN_ANALYSIS_DEPTH <= value <= MAX_ANALYSIS_DEPTH:
-        raise SettingsValidationError(
-            f"analysis_depth must be between {MIN_ANALYSIS_DEPTH} and {MAX_ANALYSIS_DEPTH}."
-        )
+    """Reject instead of silently changing the centrally mapped product tier."""
+    try:
+        exploration_tier_for_analysis_depth(value)
+    except ValueError as exc:
+        raise SettingsValidationError(str(exc)) from exc
     return int(value)
 
 
