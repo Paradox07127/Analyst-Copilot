@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, Protocol, TypeVar
 from urllib import error, request
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from eda_platform.core.cancellation import CancellationToken
 from eda_platform.core.ids import stable_hash
@@ -35,6 +36,10 @@ from eda_platform.core.request_dialect import (
 
 T = TypeVar("T", bound=BaseModel)
 
+# Backoff before each transport retry in `_send_json`. Two entries = at most
+# three attempts; see the retry comment there for why it stays this small.
+_TRANSPORT_RETRY_BACKOFF_SECONDS = (1.0, 2.0)
+
 
 class ToolCallingUnsupportedError(RuntimeError):
     """The endpoint answered that it will not accept a tools payload.
@@ -56,6 +61,14 @@ _TOOL_REJECTION_MARKERS = (
     "function calling",
     "functions",
 )
+
+
+class MalformedProviderResponseError(RuntimeError):
+    """The provider answered, but the answer cannot be used.
+
+    Distinct from an unknown outcome: the request was definitively served, so a
+    bounded retry with the error fed back is safe and must not end the run.
+    """
 
 
 class _RejectedRequest(Exception):
@@ -338,7 +351,7 @@ class OpenAICompatibleLLMClient:
         response = self._post_json("/chat/completions", body)
         self._record_usage(response)
         content = _message_content(response)
-        return schema.model_validate_json(content)
+        return _validated_structured(schema, content, from_json=True)
 
     def text(self, *, task: str, payload: dict) -> str:
         body = {
@@ -446,35 +459,47 @@ class OpenAICompatibleLLMClient:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self._last_request_bytes = len(data)
         req = request.Request(url, data=data, headers=headers, method="POST")
-        try:
-            with request.urlopen(req, timeout=self.settings.timeout_seconds) as response:
-                self._last_request_id = _response_request_id(getattr(response, "headers", None))
-                raw = response.read()
-                self._last_response_bytes = len(raw)
-                return json.loads(raw.decode("utf-8"))
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise _RejectedRequest(code=exc.code, detail=detail, cause=exc) from exc
-        except TimeoutError as exc:
+        # A transport fault usually means the request never reached the model,
+        # so one lost packet must not end a whole exploration run. The retry
+        # count is deliberately small: a *read* timeout can also fire after the
+        # provider already served (and billed) the request, so every retry
+        # risks one duplicate generation. HTTP responses are served answers and
+        # are never retried here.
+        attempts = len(_TRANSPORT_RETRY_BACKOFF_SECONDS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                with request.urlopen(req, timeout=self.settings.timeout_seconds) as response:
+                    self._last_request_id = _response_request_id(
+                        getattr(response, "headers", None)
+                    )
+                    raw = response.read()
+                    self._last_response_bytes = len(raw)
+                    return json.loads(raw.decode("utf-8"))
+            except error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise _RejectedRequest(code=exc.code, detail=detail, cause=exc) from exc
+            except (TimeoutError, error.URLError) as exc:
+                if attempt == attempts:
+                    raise self._transport_error(exc, attempts=attempts) from exc
+                time.sleep(_TRANSPORT_RETRY_BACKOFF_SECONDS[attempt - 1])
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _transport_error(self, exc: BaseException, *, attempts: int) -> RuntimeError:
+        reason = getattr(exc, "reason", exc)
+        tried = (
+            "" if attempts == 1 else f" after {attempts} attempts (a retried read "
+            "timeout may have been served more than once)"
+        )
+        if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError):
             # socket.timeout is TimeoutError (not a URLError subclass), so it
             # would otherwise leak its bare "read operation timed out" message.
-            raise RuntimeError(
+            return RuntimeError(
                 f"LLM provider did not respond within "
                 f"{self.settings.timeout_seconds:.0f}s "
-                f"(a single call to model '{self.settings.model}' timed out). "
+                f"(a single call to model '{self.settings.model}' timed out){tried}. "
                 f"Raise EDA_LLM_TIMEOUT_SECONDS for a slower model."
-            ) from exc
-        except error.URLError as exc:
-            # A wrapped socket timeout can also arrive here (reason is the
-            # underlying OSError); surface the tuning knob in that case too.
-            if isinstance(exc.reason, TimeoutError):
-                raise RuntimeError(
-                    f"LLM provider did not respond within "
-                    f"{self.settings.timeout_seconds:.0f}s "
-                    f"(a single call to model '{self.settings.model}' timed out). "
-                    f"Raise EDA_LLM_TIMEOUT_SECONDS for a slower model."
-                ) from exc
-            raise RuntimeError(f"LLM provider request failed: {exc.reason}") from exc
+            )
+        return RuntimeError(f"LLM provider request failed{tried}: {reason}")
 
     def _record_usage(self, response: dict) -> None:
         usage_raw = response.get("usage") if isinstance(response, dict) else None
@@ -559,7 +584,7 @@ class AnthropicLLMClient:
         }
         response = self._post_json("/v1/messages", body)
         self._record_usage(response)
-        return schema.model_validate(_anthropic_tool_input(response))
+        return _validated_structured(schema, _anthropic_tool_input(response))
 
     def text(self, *, task: str, payload: dict) -> str:
         body = {
@@ -687,7 +712,7 @@ def _anthropic_tool_input(response: dict) -> dict:
             result = block.get("input")
             if isinstance(result, dict):
                 return result
-    raise RuntimeError("Anthropic response did not contain a tool_use result.")
+    raise MalformedProviderResponseError("Anthropic response did not contain a tool_use result.")
 
 
 def _anthropic_text(response: dict) -> str:
@@ -706,25 +731,25 @@ def _openai_tool_response(response: dict) -> LLMToolResponse:
     """Parse a Chat Completions response without trusting tool arguments."""
     choices = response.get("choices") if isinstance(response, dict) else None
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise RuntimeError("LLM response did not contain choices.")
+        raise MalformedProviderResponseError("LLM response did not contain choices.")
     choice = choices[0]
     message = choice.get("message")
     if not isinstance(message, dict):
-        raise RuntimeError("LLM response message is malformed.")
+        raise MalformedProviderResponseError("LLM response message is malformed.")
     content = _content_text(message.get("content"))
     calls: list[LLMToolCall] = []
     raw_calls = message.get("tool_calls")
     if raw_calls is not None and not isinstance(raw_calls, list):
-        raise RuntimeError("LLM response tool_calls is malformed.")
+        raise MalformedProviderResponseError("LLM response tool_calls is malformed.")
     for index, raw in enumerate(raw_calls or []):
         if not isinstance(raw, dict):
-            raise RuntimeError("LLM response tool call is malformed.")
+            raise MalformedProviderResponseError("LLM response tool call is malformed.")
         function = raw.get("function")
         if not isinstance(function, dict):
-            raise RuntimeError("LLM response tool call function is malformed.")
+            raise MalformedProviderResponseError("LLM response tool call function is malformed.")
         name = function.get("name")
         if not isinstance(name, str) or not name:
-            raise RuntimeError("LLM response tool call has no function name.")
+            raise MalformedProviderResponseError("LLM response tool call has no function name.")
         arguments = _tool_arguments(function.get("arguments"))
         call_id = raw.get("id")
         calls.append(
@@ -749,7 +774,7 @@ def _openai_tool_response(response: dict) -> LLMToolResponse:
 def _anthropic_tool_response(response: dict) -> LLMToolResponse:
     blocks = response.get("content") if isinstance(response, dict) else None
     if not isinstance(blocks, list):
-        raise RuntimeError("Anthropic response did not contain content blocks.")
+        raise MalformedProviderResponseError("Anthropic response did not contain content blocks.")
     texts: list[str] = []
     calls: list[LLMToolCall] = []
     for index, block in enumerate(blocks):
@@ -762,7 +787,9 @@ def _anthropic_tool_response(response: dict) -> LLMToolResponse:
             name = block.get("name")
             arguments = block.get("input")
             if not isinstance(name, str) or not name or not isinstance(arguments, dict):
-                raise RuntimeError("Anthropic response tool_use block is malformed.")
+                raise MalformedProviderResponseError(
+                    "Anthropic response tool_use block is malformed."
+                )
             calls.append(
                 LLMToolCall(
                     call_id=str(block.get("id") or f"tool_{index + 1}"),
@@ -771,7 +798,9 @@ def _anthropic_tool_response(response: dict) -> LLMToolResponse:
                 )
             )
     if not texts and not calls:
-        raise RuntimeError("Anthropic response contained neither text nor tool calls.")
+        raise MalformedProviderResponseError(
+            "Anthropic response contained neither text nor tool calls."
+        )
     return LLMToolResponse(
         content="".join(texts),
         tool_calls=calls,
@@ -856,17 +885,40 @@ def _content_text(value: Any) -> str:
     return ""
 
 
+def _validated_structured[M: BaseModel](
+    schema: type[M], value: Any, *, from_json: bool = False
+) -> M:
+    """Validate a structured answer, keeping a schema breach recoverable.
+
+    A pydantic ValidationError escaping here reads as an unknown provider
+    outcome and ends the run, but the provider did answer -- the answer just
+    breaks the contract, which the caller can feed back and retry.
+    """
+    try:
+        if from_json:
+            return schema.model_validate_json(value)
+        return schema.model_validate(value)
+    except ValidationError as exc:
+        raise MalformedProviderResponseError(
+            f"structured response violates {schema.__name__}: {exc}"
+        ) from exc
+
+
 def _tool_arguments(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     if not isinstance(value, str):
-        raise RuntimeError("LLM tool arguments must be a JSON object.")
+        raise MalformedProviderResponseError("LLM tool arguments must be a JSON object.")
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("LLM tool arguments are not valid JSON.") from exc
+        raise MalformedProviderResponseError(
+            "LLM tool arguments are not valid JSON."
+        ) from exc
     if not isinstance(parsed, dict):
-        raise RuntimeError("LLM tool arguments must decode to a JSON object.")
+        raise MalformedProviderResponseError(
+            "LLM tool arguments must decode to a JSON object."
+        )
     return parsed
 
 

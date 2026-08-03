@@ -17,13 +17,14 @@ from eda_platform.schemas.exploration_budget import (
 EXPLORATION_PROFILE_VERSION = "e4a-experimental-v1"
 EXPLORATION_STATISTICAL_POLICY_VERSION = "claim-gates-v1"
 
+# Every entry must be able to emit an EvidenceReceipt: the probe executor
+# refuses a successful tool call without one, so a receipt-less capability here
+# kills any run whose model calls it. inspect_data_catalog / list_artifacts /
+# read_artifact / run_sql / list_saved_skills / run_saved_skill were removed on
+# 2026-08-03 for exactly that reason (a real gpt-5.6-terra trial called
+# inspect_data_catalog and died). Guarded by
+# test_every_certified_exploration_tool_can_produce_an_evidence_receipt.
 EXPLORATION_READ_ONLY_TOOL_NAMES = (
-    "inspect_data_catalog",
-    "list_artifacts",
-    "read_artifact",
-    "run_sql",
-    "list_saved_skills",
-    "run_saved_skill",
     "assess_join_keys",
     "screen_anomalies",
     "run_domain_metrics",
@@ -64,13 +65,18 @@ def build_read_only_exploration_toolset[ToolValue](
 def exploration_budget_profile(tier: ExplorationTier) -> ExplorationBudgetPolicy:
     """Return a fresh policy object so nested per-tool caps cannot alias callers."""
     if tier == "quick":
+        # Sized from the 2026-08-03 deepseek-v4-flash calibration: reasoning
+        # models spend up to ~2.5k completion tokens per call (reasoning is
+        # 60%+ of it), probe prompts grow to ~7.5k. 12 requests cover the
+        # 3-round x (1 generate + 2-3 probe calls) shape that 3 mandatory
+        # probes at batch size 1 actually need; 8 could never finish round 3.
         return _budget(
-            requests=8,
-            input_tokens=48_000,
-            output_tokens=12_000,
-            total_tokens=60_000,
+            requests=12,
+            input_tokens=96_000,
+            output_tokens=36_000,
+            total_tokens=132_000,
             cost="1.50",
-            wall_seconds=180,
+            wall_seconds=300,
             protected_requests=1,
             protected_tokens=8_000,
             tool_calls=10,
@@ -84,9 +90,9 @@ def exploration_budget_profile(tier: ExplorationTier) -> ExplorationBudgetPolicy
     if tier == "standard":
         return _budget(
             requests=18,
-            input_tokens=120_000,
-            output_tokens=30_000,
-            total_tokens=150_000,
+            input_tokens=144_000,
+            output_tokens=54_000,
+            total_tokens=198_000,
             cost="5.00",
             wall_seconds=600,
             protected_requests=2,
@@ -103,8 +109,8 @@ def exploration_budget_profile(tier: ExplorationTier) -> ExplorationBudgetPolicy
         return _budget(
             requests=36,
             input_tokens=300_000,
-            output_tokens=75_000,
-            total_tokens=375_000,
+            output_tokens=108_000,
+            total_tokens=408_000,
             cost="15.00",
             wall_seconds=1_800,
             protected_requests=3,

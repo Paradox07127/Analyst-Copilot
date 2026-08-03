@@ -377,6 +377,8 @@ def run_exploration_worker(
             bool(coverage_targets)
             and coverage_targets.issubset(state.coverage_completed)
         ),
+        dataset_columns=dataset_columns,
+        supported_method_families=supported_methods,
     )
     _checkpoint(cancel_check)
     if result.result.status not in {"paused", "stopped"}:
@@ -560,7 +562,11 @@ def _remaining_cost_fraction(
     context: PhaseContext,
     maximum_cost: Decimal | None,
 ) -> float:
-    if maximum_cost is None or maximum_cost <= 0:
+    # None means "no cost cap" (schema-legal): that is zero budget pressure,
+    # not zero remaining budget. Mapping it to 0.0 rejected every candidate.
+    if maximum_cost is None:
+        return 1.0
+    if maximum_cost <= 0:
         return 0.0
     marker = "[exploration_soft_countdown] remaining="
     prefix, separator, tail = context.soft_countdown_context.partition(marker)

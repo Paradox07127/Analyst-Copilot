@@ -44,7 +44,7 @@ from eda_platform.core.exploration_budget import (
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.kernel import SessionCancelled
-from eda_platform.core.llm import LLMToolCall, LLMToolResponse
+from eda_platform.core.llm import LLMToolCall, LLMToolResponse, MalformedProviderResponseError
 from eda_platform.core.llm_ledger import logical_llm_call
 
 type ProbeExecutionStatus = Literal[
@@ -63,6 +63,15 @@ _FAILURE_HISTORY_NOTE = (
     "Recent failed probes (do not repeat the same path; repair it, choose a different "
     "direction, or conclude):"
 )
+# Standing guidance appended to every caller-supplied system prompt.
+_PROBE_TOOL_GUIDANCE = (
+    "Prefer tools that can adjudicate the hypothesis predicate — stat tests, "
+    "time-series analysis, missingness diagnosis, correlation and anomaly "
+    "screening — over repeated descriptive profiling. Before filtering, "
+    "sanity-check filter values against column values seen in prior results. "
+    "A slice that matched zero rows means the plan is wrong: revise the filter "
+    "or conclude, instead of retrying variations of it."
+)
 _EMPTY_RESPONSE_RETRY = (
     "The previous response was empty. The only valid exits are to return non-empty text "
     "or call one or more tools from the current inventory. Try once more."
@@ -72,6 +81,18 @@ _CONTENT_FILTER_FINISH_REASONS = frozenset(
 )
 _TERMINAL_TOOL_ERRORS = (BudgetExceeded, SessionCancelled, CancellationError)
 DEFAULT_MAX_TOOL_CALLS = 12
+# Per run, not per turn: two empty turns several steps apart are two model
+# hiccups, and latching on the first threw away probes that had already
+# committed receipts.
+_EMPTY_RESPONSE_RETRY_BUDGET = 3
+# The probe could not be carried to an answer because of how the model or the
+# provider behaved -- not because the control plane is broken. Receipts this
+# probe already committed remain valid, so a caller may keep the round going.
+# Integrity codes (digest mismatch, unavailable durable body, uncertain
+# provider outcome) are deliberately absent.
+PROBE_LOCAL_ERROR_CODES = frozenset(
+    {"finish_reason_length", "content_filtered", "empty_response"}
+)
 
 
 class NativeToolProvider(Protocol):
@@ -624,7 +645,7 @@ class ProbeExecutor:
             raise ValueError("phase must be non-empty.")
         execution_run_id = run_id or "proberun_" + uuid.uuid4().hex
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": system_prompt + "\n" + _PROBE_TOOL_GUIDANCE},
             {"role": "user", "content": user_message},
         ]
         artifacts: list[Any] = []
@@ -639,7 +660,7 @@ class ProbeExecutor:
             for item in failure_history
         ]
         failures = failures[-_FAILURE_HISTORY_LIMIT:]
-        empty_response_retried = False
+        empty_response_retries = 0
 
         for step in range(1, self._max_steps + 1):
             self._checkpoint()
@@ -733,7 +754,10 @@ class ProbeExecutor:
                         error=_safe_error(exc),
                     )
                     raise
-                except ProviderCallRejectedError as exc:
+                except (
+                    ProviderCallRejectedError,
+                    MalformedProviderResponseError,
+                ) as exc:
                     error = _safe_error(exc)
                     self._journal.llm_terminal(
                         call_id=call_id,
@@ -832,7 +856,7 @@ class ProbeExecutor:
                         seen=seen,
                         answer=answer,
                     )
-                if empty_response_retried:
+                if empty_response_retries >= _EMPTY_RESPONSE_RETRY_BUDGET:
                     return self._result(
                         status="failed",
                         artifacts=artifacts,
@@ -841,12 +865,12 @@ class ProbeExecutor:
                         failures=failures,
                         seen=seen,
                         error=(
-                            "The provider returned no text and no tool calls after the "
-                            "single empty-response retry."
+                            "The provider returned no text and no tool calls after "
+                            f"{_EMPTY_RESPONSE_RETRY_BUDGET} empty-response retries."
                         ),
                         error_code="empty_response",
                     )
-                empty_response_retried = True
+                empty_response_retries += 1
                 messages.append({"role": "user", "content": _EMPTY_RESPONSE_RETRY})
                 continue
 
@@ -964,13 +988,43 @@ class ProbeExecutor:
                     )
                     continue
 
-                actual = self._usage_meter.success(
-                    call=item.call,
-                    tool=item.tool,
-                    arguments=item.arguments,
-                    result=result,
-                    projected=item.projection,
-                )
+                try:
+                    actual = self._usage_meter.success(
+                        call=item.call,
+                        tool=item.tool,
+                        arguments=item.arguments,
+                        result=result,
+                        projected=item.projection,
+                    )
+                except _TERMINAL_TOOL_ERRORS as exc:
+                    try:
+                        self._settle_failed_tool(
+                            item,
+                            logical_step_id=logical_step_id,
+                            error=exc,
+                        )
+                    except BudgetExceeded:
+                        # Same rationale as the execute() failure path above:
+                        # record_failure_usage commits counts before
+                        # enforcing, and must not hide the terminal error.
+                        pass
+                    raise
+                except Exception as exc:
+                    # The tool ran, but its usage could not be recorded or
+                    # verified -- treat it like an execution failure rather
+                    # than trust an un-settled result.
+                    self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
+                    error = _safe_error(exc)
+                    failures = _add_failure(failures, item.fingerprint, error)
+                    messages.append(
+                        _tool_message(
+                            item.call,
+                            {"ok": False, "error": error},
+                            limit=self._max_observation_chars,
+                        )
+                    )
+                    continue
+
                 _require_matching_kind(item.projection, actual)
                 receipt_id = _receipt_id(result.receipt_artifact)
                 durable = DurableToolResult(result=result, usage=actual)
@@ -1106,16 +1160,55 @@ class ProbeExecutor:
                     )
                 )
                 continue
+            if action_index > self._max_tool_calls:
+                # make_tool_sequence_index cannot encode this position. Catching
+                # it only at execution time meant the calls before it had
+                # already run and been journaled.
+                error = (
+                    f"Probe rejected without execution: batch position {action_index} "
+                    f"is past the {self._max_tool_calls}-call limit for one step. "
+                    "Send fewer tool calls per response."
+                )
+                failures = _add_failure(failures, fingerprint, error)
+                observations.append(
+                    _tool_message(
+                        call,
+                        {
+                            "ok": False,
+                            "error": error,
+                            "max_tool_calls_per_step": self._max_tool_calls,
+                        },
+                        limit=self._max_observation_chars,
+                    )
+                )
+                continue
             tentative.add(fingerprint)
             prepared_parts.append((call, tool, arguments, fingerprint, action_index))
 
         prepared: list[_PreparedCall] = []
         for call, tool, arguments, fingerprint, action_index in prepared_parts:
-            projection = self._usage_meter.project(
-                call=call,
-                tool=tool,
-                arguments=arguments,
-            )
+            try:
+                projection = self._usage_meter.project(
+                    call=call,
+                    tool=tool,
+                    arguments=arguments,
+                )
+            except _TERMINAL_TOOL_ERRORS:
+                raise
+            except Exception as exc:
+                # No tool_call_started event exists yet for this call, so
+                # there is nothing to settle as failed -- it never was
+                # admitted. Only the model needs to hear about it.
+                error = _safe_error(exc)
+                failures = _add_failure(failures, fingerprint, error)
+                observations.append(
+                    _tool_message(
+                        call,
+                        {"ok": False, "error": error},
+                        limit=self._max_observation_chars,
+                    )
+                )
+                continue
             prepared.append(
                 _PreparedCall(
                     call=call,
@@ -1135,13 +1228,20 @@ class ProbeExecutor:
         logical_step_id: str,
         error: BaseException,
     ) -> None:
-        usage = self._usage_meter.failure(
-            call=item.call,
-            tool=item.tool,
-            arguments=item.arguments,
-            error=error,
-            projected=item.projection,
-        )
+        try:
+            usage = self._usage_meter.failure(
+                call=item.call,
+                tool=item.tool,
+                arguments=item.arguments,
+                error=error,
+                projected=item.projection,
+            )
+        except _TERMINAL_TOOL_ERRORS:
+            raise
+        except Exception:
+            # The meter's own accounting must not hide the tool error being
+            # settled; fall back to the no-observed-usage path.
+            usage = None
         if usage is None:
             # ``None`` is reserved for adapters that can prove no rows/cells
             # were touched (for example, a schema rejection before execution).

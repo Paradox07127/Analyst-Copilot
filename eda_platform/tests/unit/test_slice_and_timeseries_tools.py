@@ -535,3 +535,32 @@ def test_analyze_time_series_captures_kpss_interpolation_warning() -> None:
     assert verify_receipt_digest(receipt)
     assert _fact(receipt, "kpss_p").value is not None
     assert any("lookup table" in w for w in receipt.method.warnings)
+
+
+def test_analyze_time_series_registers_a_statistical_attempt() -> None:
+    """Ljung-Box is a statistical test: it must land on the multiplicity
+    ledger like run_stat_test, or the E4a issuer rejects the evidence root."""
+    context = _ts_context(_ts_frame())
+    tool = _tool(context, "analyze_time_series")
+    tool.execute(
+        AnalyzeTimeSeriesArguments(
+            dataset_id="ds_daily",
+            time_column="day",
+            value_column="sales",
+            freq="D",
+            period=7,
+        )
+    )
+    _artifact, receipt = _last_receipt(context)
+    assert receipt.statistics is not None
+    assert receipt.statistics.statistical_family_id is not None
+    assert receipt.statistics.sequence_index == 1
+    registry = context.stat_registry
+    assert registry is not None
+    attempts = list(registry.attempts())
+    assert len(attempts) == 1
+    attempt = attempts[0]
+    assert attempt.family_id == receipt.statistics.statistical_family_id
+    assert attempt.requested_test_type == "ljung_box"
+    assert attempt.status == "completed"
+    assert attempt.receipt_id == receipt.receipt_id

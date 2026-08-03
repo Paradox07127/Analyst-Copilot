@@ -40,6 +40,7 @@ from eda_platform.schemas.receipts import (
     ReceiptFact,
     ReceiptMethod,
     ReceiptScope,
+    ReceiptStatistics,
     verify_receipt_digest,
 )
 from eda_platform.tools.loader import LoadedDataset
@@ -224,6 +225,75 @@ def test_absolute_threshold_uses_a_direct_fact_in_the_metrics_own_units(
     expected: Literal["supports", "contradicts"],
 ) -> None:
     assert _direct_metric_outcome(operator, threshold) == expected
+
+
+def _differs_outcome(
+    *,
+    p_value: float,
+    effect_size: float | None,
+    threshold: float | None,
+) -> Literal["supports", "contradicts"] | None:
+    receipt = build_receipt(
+        tool_call_id=f"call-differs-{p_value}-{effect_size}-{threshold}",
+        tool_name="run_stat_test",
+        tool_version="1",
+        arguments={"metric": "revenue"},
+        raw_output={"p_value": p_value, "effect_size": effect_size},
+        artifact_ids=(),
+        result_count=1,
+        scope=ReceiptScope(
+            dataset_ids=("ds_sales",),
+            columns=("segment", "revenue"),
+            scope_resolution="explicit",
+        ),
+        facts=(
+            ReceiptFact(
+                fact_id="p_value", name="p_value", value=p_value, value_type="number"
+            ),
+        ),
+        method=ReceiptMethod(family="run_stat_test"),
+        statistics=ReceiptStatistics(
+            test_name="synthetic_t_test",
+            p_value=p_value,
+            effect_size=effect_size,
+        ),
+        data_state_witness="witness-differs",
+        created_at="2026-08-02T00:00:00+00:00",
+    )
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _binding("differs", threshold=threshold, method_family="run_stat_test"),
+    )
+    assert verify_receipt_digest(adjudicated)
+    assert adjudicated.statistics is not None
+    return adjudicated.statistics.hypothesis_outcome
+
+
+@pytest.mark.parametrize(
+    ("p_value", "effect_size", "threshold", "expected"),
+    (
+        # A non-significant test is a direct negation of "differs".
+        (0.4, None, None, "contradicts"),
+        # Significant but below the materiality threshold: not material.
+        (0.01, 0.1, 0.5, "contradicts"),
+        # Significant, materiality required, but no effect size to check it.
+        (0.01, None, 0.5, None),
+        # Significant, no materiality required: unchanged supports.
+        (0.01, None, None, "supports"),
+        # Significant and material: unchanged supports.
+        (0.01, 0.8, 0.5, "supports"),
+    ),
+)
+def test_differs_adjudication_can_reach_contradicts(
+    p_value: float,
+    effect_size: float | None,
+    threshold: float | None,
+    expected: Literal["supports", "contradicts"] | None,
+) -> None:
+    assert (
+        _differs_outcome(p_value=p_value, effect_size=effect_size, threshold=threshold)
+        == expected
+    )
 
 
 def _real_tool_receipt(

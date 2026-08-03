@@ -24,6 +24,10 @@ from eda_platform.agents.data_tool_result_contracts import (
     verify_data_tool_result_contract,
 )
 from eda_platform.agents.data_tools import data_tool_argument_schema
+from eda_platform.agents.exploration.branching import (
+    bundle_hypotheses_from_events,
+    derive_branch_constraints,
+)
 from eda_platform.agents.exploration.candidates import CandidateSeed
 from eda_platform.agents.exploration.executor import (
     canonical_probe_fingerprint,
@@ -53,7 +57,11 @@ from eda_platform.agents.tool_context import (
     ToolExecutionContext,
     make_logical_step_id,
 )
-from eda_platform.core.claim_gates import claim_bundle_digest, run_claim_gates
+from eda_platform.core.claim_gates import (
+    GateReport,
+    claim_bundle_digest,
+    run_claim_gates,
+)
 from eda_platform.core.exploration_budget import apply_budget_increase
 from eda_platform.core.exploration_journal import (
     JsonlExplorationJournal,
@@ -72,6 +80,7 @@ from eda_platform.core.exploration_report import render_exploration_report
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.llm import LLMToolCall, LLMToolResponse
 from eda_platform.core.llm_ledger import (
+    BUDGET_SETTLED_EVENT,
     LLM_USAGE_EVENT,
     budget_policy_fingerprint,
     restore_run_budget_state,
@@ -84,8 +93,10 @@ from eda_platform.drivers.exploration import (
     JsonSupervisorRecoveryStore,
     JsonToolResultStore,
 )
-from eda_platform.schemas.claims import Claim, ClaimBundle
+from eda_platform.schemas.claims import Claim, ClaimBundle, ClaimScope
 from eda_platform.schemas.exploration import (
+    BranchAbandonedEvent,
+    BranchConstraint,
     BudgetAmendedEvent,
     ExplorationLoopEvent,
     ExplorationLoopState,
@@ -104,6 +115,7 @@ from eda_platform.schemas.exploration import (
 )
 from eda_platform.schemas.exploration_shadow import ShadowExplorationProjection
 from eda_platform.schemas.hypotheses import HypothesisPredicate
+from eda_platform.schemas.insights import InsightRecord
 from eda_platform.schemas.receipts import EvidenceReceipt, verify_receipt_digest
 from eda_platform.schemas.sessions import TraceEvent
 
@@ -128,6 +140,11 @@ _TARGET_METRICS = (
     "missingness_mechanism_recall",
     "spike_day_recall",
 )
+# Checker v2 adds a semantic (non-predicate-identity) matching pass; older
+# checker versions must keep recomputing byte-identically, so every v2
+# behavior keys off this exact version string.
+E4A_CHECKER_VERSION_V2 = "e4a-checker-v2"
+_TARGET_METRICS_V2 = (*_TARGET_METRICS, "trend_recall")
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,10 +164,16 @@ class E4aExpectedStructure(BaseModel):
         "region_difference_recall",
         "missingness_mechanism_recall",
         "spike_day_recall",
+        "trend_recall",
     ]
     tool_names: tuple[str, ...] = Field(min_length=1)
     required_columns: tuple[str, ...] = Field(min_length=1)
     predicate: HypothesisPredicate
+    # Checker-v2 semantic pass only: predicate operators accepted besides
+    # exact predicate equality (empty = any operator), and fact values that
+    # must hold verbatim on the supporting receipt.
+    alternate_operators: tuple[str, ...] = ()
+    required_fact_values: tuple[tuple[str, str], ...] = ()
 
 
 class E4aGroundTruthFixture(BaseModel):
@@ -367,7 +390,7 @@ def _verify_and_project_root(
         raise ValueError("shadow projection does not match the journal terminal state")
 
     workflow = JsonExplorationWorkflowStateStore(root / "workflow-state.json").load()
-    _verify_committed_receipts(workflow, terminal)
+    _verify_committed_receipts(workflow, terminal, events)
     candidates, candidates_by_round = _verify_scheduler_and_reductions(
         root, events, workflow
     )
@@ -390,6 +413,11 @@ def _verify_and_project_root(
         terminal,
         canonical_bundles=canonical_bundles,
         stat_attempt_counts=stat_attempt_counts,
+    )
+    _verify_branch_abandonments(
+        events,
+        workflow,
+        candidates_by_round=candidates_by_round,
     )
     if tuple(sorted(workflow.insights.values(), key=lambda item: item.insight_id)) != (
         projection.insight_records
@@ -704,6 +732,13 @@ def _verify_stat_registry(
             if invocation is None
             else invocation.canonical_arguments.get("test_type")
         )
+        if (
+            requested_test_type is None
+            and invocation is not None
+            and receipt.tool_name == "analyze_time_series"
+        ):
+            # The tool has no test_type argument; its registered test is fixed.
+            requested_test_type = "ljung_box"
         expected_family_id = None
         if invocation is not None:
             dataset_id = invocation.canonical_arguments.get("dataset_id")
@@ -714,6 +749,7 @@ def _verify_stat_registry(
                     "value_column",
                     "category_column",
                     "pair_column",
+                    "time_column",
                 )
                 if isinstance(
                     value := invocation.canonical_arguments.get(key), str
@@ -786,11 +822,16 @@ def _verify_workflow(
 
 
 def _verify_committed_receipts(
-    workflow: ExplorationWorkflowState, terminal: ExplorationLoopState
+    workflow: ExplorationWorkflowState,
+    terminal: ExplorationLoopState,
+    events: Sequence[ExplorationLoopEvent],
 ) -> None:
     committed_receipts = workflow.committed_receipts
     journal_receipts = set(terminal.step_receipt_refs.values())
-    if set(committed_receipts) != journal_receipts:
+    if not set(committed_receipts).issubset(journal_receipts):
+        raise ValueError("workflow receipts do not exactly match journal commits")
+    journal_only = journal_receipts - set(committed_receipts)
+    if journal_only and journal_only != _trailing_unsettled_receipts(events):
         raise ValueError("workflow receipts do not exactly match journal commits")
     for receipt_id, receipt in committed_receipts.items():
         if (
@@ -799,6 +840,79 @@ def _verify_committed_receipts(
             or receipt.data_state_witness != terminal.data_state_witness
         ):
             raise ValueError("workflow contains an invalid committed receipt")
+
+
+def _trailing_unsettled_receipts(
+    events: Sequence[ExplorationLoopEvent],
+) -> set[str]:
+    """Receipts committed strictly after the last round_settled event.
+
+    An interrupted run (e.g. budget_exhausted mid-round) journals these commits
+    but never reaches the reduce that folds them into workflow state; they are
+    the only journal-side surplus issuance tolerates."""
+    trailing: set[str] = set()
+    for event in events:
+        if isinstance(event, RoundSettledEvent):
+            trailing.clear()
+        elif isinstance(event, ReceiptCommittedEvent):
+            trailing.add(event.receipt_id)
+    return trailing
+
+
+def _verify_branch_abandonments(
+    events: Sequence[ExplorationLoopEvent],
+    workflow: ExplorationWorkflowState,
+    *,
+    candidates_by_round: Mapping[int, Mapping[str, CandidateSeed]],
+) -> None:
+    """Recompute every branch_abandoned constraint set at its event position.
+
+    The reducer already enforces the structural branch rules during replay;
+    this pass pins the semantic content: constraints must equal the shared
+    deterministic derivation over receipts, gate reports and candidates known
+    at that point (plan E6 gate 2)."""
+    if not any(isinstance(event, BranchAbandonedEvent) for event in events):
+        return
+    candidates: dict[str, CandidateSeed] = {}
+    receipts_so_far: dict[str, EvidenceReceipt] = {}
+    reports_so_far: dict[str, GateReport] = {}
+    prior: list[BranchConstraint] = []
+    prefix: list[ExplorationLoopEvent] = []
+    for event in events:
+        prefix.append(event)
+        if isinstance(event, RoundStartedEvent):
+            for hypothesis_id, seed in candidates_by_round.get(
+                event.round_index, {}
+            ).items():
+                candidates[hypothesis_id] = seed
+        elif isinstance(event, ReceiptCommittedEvent):
+            receipt = workflow.committed_receipts.get(event.receipt_id)
+            if receipt is None:
+                raise ValueError("journal receipt is missing from workflow state")
+            receipts_so_far[event.receipt_id] = receipt
+        elif isinstance(event, GateVerdictEvent):
+            report = workflow.gate_reports.get(event.claim_bundle_id)
+            if report is None:
+                raise ValueError("journal gate verdict lacks its stored report")
+            if report.passed != (event.verdict == "passed"):
+                raise ValueError("stored gate report disagrees with the journal verdict")
+            reports_so_far[event.claim_bundle_id] = report
+        elif isinstance(event, BranchAbandonedEvent):
+            expected = derive_branch_constraints(
+                candidates=candidates,
+                committed_receipts=receipts_so_far,
+                gate_reports=reports_so_far,
+                bundle_hypotheses=bundle_hypotheses_from_events(
+                    prefix, receipts_so_far
+                ),
+                prior=tuple(prior),
+            )
+            if tuple(event.constraints) != expected:
+                raise ValueError(
+                    "branch abandonment constraints do not match deterministic "
+                    "recomputation"
+                )
+            prior.extend(event.constraints)
 
 
 def _rebuild_canonical_bundles(
@@ -893,10 +1007,13 @@ def _rebuild_canonical_bundles(
                 contradicting: list[str] = []
                 for item in current_ids:
                     statistics = workflow.committed_receipts[item].statistics
-                    if statistics is not None and statistics.hypothesis_outcome == "contradicts":
-                        contradicting.append(item)
-                    else:
+                    outcome = None if statistics is None else statistics.hypothesis_outcome
+                    # Mirrors workflow ClaimGateReducerPort.reduce verbatim: an
+                    # unadjudicated receipt joins neither prior side.
+                    if outcome == "supports":
                         supporting.append(item)
+                    elif outcome == "contradicts":
+                        contradicting.append(item)
                 prior_supporting[hypothesis_id] = tuple(
                     dict.fromkeys((*prior_supporting.get(hypothesis_id, ()), *supporting))
                 )
@@ -936,6 +1053,11 @@ def _canonical_claim_bundle(
             ),
             uncertainty=("; ".join(receipt.method.warnings) or None),
             limitations=tuple(receipt.method.warnings),
+            scope=(
+                _canonical_absence_scope(receipt)
+                if fact.support_type == "absence"
+                else None
+            ),
         )
         for receipt in receipts
         for fact in receipt.facts
@@ -970,6 +1092,16 @@ def _canonical_claim_bundle(
     )
 
 
+def _canonical_absence_scope(receipt: EvidenceReceipt) -> ClaimScope:
+    """Mirrors workflow ``_absence_scope``: the declared scope is the scanned one."""
+    return ClaimScope(
+        dataset_ids=receipt.scope.dataset_ids,
+        columns=receipt.scope.columns,
+        filters=receipt.scope.filters,
+        time_range=receipt.scope.time_range,
+    )
+
+
 def _canonical_fact_text(value: object, value_type: str) -> str:
     if value is None:
         return "null"
@@ -990,6 +1122,23 @@ def _has_canonical_confirmatory_statistics(receipt: EvidenceReceipt) -> bool:
         and statistics.ci_low is not None
         and statistics.ci_high is not None
         and statistics.sample_size is not None
+    )
+
+
+def _candidate_identity(candidate: CandidateSeed) -> tuple[object, ...]:
+    """Semantic identity of a candidate across rounds.
+
+    ``sequence_index``, ``status``, ``origin``, ``mandatory`` and ``priority``
+    are excluded: a mandatory probe replayed into a later round is the same
+    hypothesis carrying a new batch position and control-plane state, not a
+    conflicting body.
+    """
+    return (
+        candidate.proposal,
+        candidate.hypothesis_id,
+        candidate.hypothesis_fingerprint,
+        candidate.canonical_group_key,
+        candidate.coverage_key,
     )
 
 
@@ -1036,9 +1185,11 @@ def _verify_scheduler_and_reductions(
         candidates_by_round[active_round] = round_candidates
         for hypothesis_id, candidate in round_candidates.items():
             prior = candidates.get(hypothesis_id)
-            if prior is not None and prior != candidate:
+            if prior is not None and _candidate_identity(prior) != _candidate_identity(
+                candidate
+            ):
                 raise ValueError("one hypothesis id maps to conflicting candidate bodies")
-            candidates[hypothesis_id] = candidate
+            candidates.setdefault(hypothesis_id, candidate)
         round_decisions = workflow.decisions[
             decision_cursor : decision_cursor + len(round_candidates)
         ]
@@ -1116,29 +1267,63 @@ def _verify_llm_correspondence(
 
 
 def _llm_usage(events: Sequence[TraceEvent]) -> tuple[str, str, int, int, float]:
+    """Aggregate provider spend across the run's ledger.
+
+    A call with ``usage_known`` false (provider never confirmed its own usage)
+    does not block issuance: it is billed the same conservative reservation
+    that ``restore_run_budget_state``'s ``mark_uncertain`` path already
+    consumed (llm_ledger.py:665-673), read here from that call's
+    ``budget_settled`` event so the two totals cannot diverge. A call whose
+    usage is known must still carry fully measured, provider-reported usage.
+    """
     usage_events = [event for event in events if event.event_type == LLM_USAGE_EVENT]
     if not usage_events:
         raise ValueError("evidence root contains no measured provider usage")
     call_ids = [getattr(event, "call_id", None) for event in usage_events]
     if any(not call_id for call_id in call_ids) or len(set(call_ids)) != len(call_ids):
         raise ValueError("LLM ledger call ids must be present and unique")
+    settled_by_call = {
+        event.call_id: event.summary
+        for event in events
+        if event.event_type == BUDGET_SETTLED_EVENT and event.call_id
+    }
     pairs: set[tuple[str, str]] = set()
     total_tokens = 0
     cost = 0.0
     for event in usage_events:
         summary = event.summary
-        if (
-            summary.get("usage_known") is not True
-            or summary.get("provider_usage_reported") is not True
-        ):
-            raise ValueError("every provider call must carry measured usage")
-        provider = summary.get("provider")
-        model = summary.get("model")
-        if not isinstance(provider, str) or not provider or not isinstance(model, str) or not model:
-            raise ValueError("every provider call must identify provider and model")
-        pairs.add((provider.casefold(), model))
-        tokens = summary.get("total_tokens")
-        event_cost = summary.get("estimated_cost_usd")
+        usage_known = summary.get("usage_known") is True
+        if usage_known:
+            if summary.get("provider_usage_reported") is not True:
+                raise ValueError("every provider call must carry measured usage")
+            provider = summary.get("provider")
+            model = summary.get("model")
+            if (
+                not isinstance(provider, str)
+                or not provider
+                or not isinstance(model, str)
+                or not model
+            ):
+                raise ValueError("every provider call must identify provider and model")
+            pairs.add((provider.casefold(), model))
+            tokens = summary.get("total_tokens")
+            event_cost = summary.get("estimated_cost_usd")
+        else:
+            # call_id non-emptiness is enforced above for every usage event.
+            settled = settled_by_call.get(event.call_id or "")
+            if settled is None:
+                raise ValueError("uncertain provider call has no settled budget reservation")
+            provider = summary.get("provider")
+            model = summary.get("model")
+            if (
+                isinstance(provider, str)
+                and provider
+                and isinstance(model, str)
+                and model
+            ):
+                pairs.add((provider.casefold(), model))
+            tokens = settled.get("total_tokens")
+            event_cost = settled.get("estimated_cost_usd")
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
             raise ValueError("provider total_tokens must be measured and non-negative")
         if (
@@ -1149,6 +1334,8 @@ def _llm_usage(events: Sequence[TraceEvent]) -> tuple[str, str, int, int, float]
             raise ValueError("provider cost must be measured and non-negative")
         total_tokens += tokens
         cost += float(event_cost)
+    if not pairs:
+        raise ValueError("evidence root has no LLM call with an identified provider/model")
     if len(pairs) != 1:
         raise ValueError("one evidence root must use exactly one provider/model pair")
     provider, model = next(iter(pairs))
@@ -1304,6 +1491,28 @@ def _proof_metrics(
     }
 
 
+def _search_dynamics_scores(
+    *,
+    matched_insight_rounds: Sequence[int],
+    expected_count: int,
+    rounds_started: int,
+) -> dict[str, float]:
+    """Search-dynamics metrics (plan §10.3.1): AUC-over-steps and first improvement step."""
+    if rounds_started <= 0:
+        auc = 0.0
+    else:
+        auc = sum(
+            sum(1 for created in matched_insight_rounds if created <= r) / expected_count
+            for r in range(rounds_started)
+        ) / rounds_started
+    return {
+        "auc_over_steps": round(auc, 6),
+        "first_improvement_step": (
+            float(min(matched_insight_rounds)) if matched_insight_rounds else -1.0
+        ),
+    }
+
+
 def _recompute_checker(
     *,
     workflow: ExplorationWorkflowState,
@@ -1314,6 +1523,7 @@ def _recompute_checker(
     fixture: E4aGroundTruthFixture,
     checker_version: str,
 ) -> E4aCheckerResult:
+    semantic = checker_version == E4A_CHECKER_VERSION_V2
     insights = tuple(
         sorted(
             (item for item in workflow.insights.values() if item.status in {"new", "reinforced"}),
@@ -1322,48 +1532,57 @@ def _recompute_checker(
     )
     receipts = workflow.committed_receipts
     proof_metrics = _proof_metrics(workflow, terminal)
+    # Pass 1: exact predicate identity, one structure per insight and one
+    # insight per structure (unchanged checker-v1 semantics).
     matched_by_insight: dict[str, str] = {}
-    matched_structures: set[str] = set()
     for insight in insights:
         for expected in fixture.expected_structures:
-            if expected.structure_id in matched_structures:
+            if expected.structure_id in matched_by_insight.values():
                 continue
             candidate = candidates.get(insight.hypothesis_id)
             if candidate is None or candidate.proposal.predicate != expected.predicate:
                 continue
             for receipt_id in insight.supporting_receipt_ids:
-                receipt = receipts[receipt_id]
-                if receipt.tool_name not in expected.tool_names:
-                    continue
-                if not set(expected.required_columns).issubset(receipt.scope.columns):
-                    continue
-                if (
-                    receipt.statistics is None
-                    or receipt.statistics.hypothesis_outcome != "supports"
-                    or receipt.statistics.hypothesis_id != insight.hypothesis_id
-                ):
-                    continue
-                proof = next(
-                    (
-                        edge
-                        for edge in insight.proof
-                        if edge.receipt_id == receipt_id and edge.comparison == "supports"
-                    ),
-                    None,
-                )
-                fact_ids = {fact.fact_id for fact in receipt.facts} | {
-                    derivation.derived_fact_id for derivation in receipt.derivations
-                }
-                if proof is None or not set(proof.fact_ids).issubset(fact_ids):
-                    continue
-                matched_by_insight[insight.insight_id] = expected.structure_id
-                matched_structures.add(expected.structure_id)
-                break
+                if _structure_supporting_receipt(insight, receipts[receipt_id], expected):
+                    matched_by_insight[insight.insight_id] = expected.structure_id
+                    break
             if insight.insight_id in matched_by_insight:
                 break
+    matched_pairs: set[tuple[str, str]] = {
+        (structure_id, insight_id)
+        for insight_id, structure_id in matched_by_insight.items()
+    }
+    # Pass 2 (v2 only): semantic matching for insights pass 1 left unmatched,
+    # against every structure — replication of a matched structure is credit.
+    if semantic:
+        for insight in insights:
+            if insight.insight_id in matched_by_insight:
+                continue
+            candidate = candidates.get(insight.hypothesis_id)
+            if candidate is None:
+                continue
+            operator = candidate.proposal.predicate.operator
+            for expected in fixture.expected_structures:
+                if (
+                    expected.alternate_operators
+                    and operator not in expected.alternate_operators
+                ):
+                    continue
+                for receipt_id in insight.supporting_receipt_ids:
+                    receipt = receipts.get(receipt_id)
+                    if (
+                        receipt is None
+                        or not _structure_supporting_receipt(insight, receipt, expected)
+                        or not _required_fact_values_hold(receipt, expected)
+                    ):
+                        continue
+                    matched_pairs.add((expected.structure_id, insight.insight_id))
+                    break
+    matched_structures = {structure_id for structure_id, _insight_id in matched_pairs}
+    matched_insight_ids = {insight_id for _structure_id, insight_id in matched_pairs}
     expected_count = len(fixture.expected_structures)
     reported_count = len(insights)
-    precision = len(matched_by_insight) / reported_count if reported_count else 0.0
+    precision = len(matched_insight_ids) / reported_count if reported_count else 0.0
     recall = len(matched_structures) / expected_count
     no_information_rounds = 0
     for event in reversed(events):
@@ -1387,7 +1606,36 @@ def _recompute_checker(
         "proof_reachability_rate": proof_metrics["proof_reachability_rate"],
         "journal_provenance_rate": proof_metrics["journal_provenance_rate"],
     }
-    for metric in _TARGET_METRICS:
+    insight_rounds = {item.insight_id: item.created_round for item in insights}
+    if semantic:
+        # Structure-level dynamics: a structure counts from the earliest round
+        # any insight (either pass) matched it.
+        dynamics_rounds = tuple(
+            min(
+                insight_rounds[insight_id]
+                for structure_id, insight_id in matched_pairs
+                if structure_id == matched_structure_id
+            )
+            for matched_structure_id in matched_structures
+        )
+        scores["mandatory_probe_recall"] = round(
+            len(set(matched_by_insight.values())) / expected_count, 6
+        )
+        scores.update(
+            _checker_v2_scores(workflow, insights, candidates, matched_pairs)
+        )
+    else:
+        dynamics_rounds = tuple(
+            insight_rounds[insight_id] for insight_id in matched_by_insight
+        )
+    scores.update(
+        _search_dynamics_scores(
+            matched_insight_rounds=dynamics_rounds,
+            expected_count=expected_count,
+            rounds_started=terminal.rounds_started,
+        )
+    )
+    for metric in _TARGET_METRICS_V2 if semantic else _TARGET_METRICS:
         expected_ids = {
             item.structure_id
             for item in fixture.expected_structures
@@ -1399,10 +1647,114 @@ def _recompute_checker(
         evaluated_insight_ids=tuple(item.insight_id for item in insights),
         matched_structure_ids=tuple(sorted(matched_structures)),
         unmatched_insight_ids=tuple(
-            item.insight_id for item in insights if item.insight_id not in matched_by_insight
+            item.insight_id for item in insights if item.insight_id not in matched_insight_ids
         ),
         scores=scores,
     )
+
+
+def _structure_supporting_receipt(
+    insight: InsightRecord,
+    receipt: EvidenceReceipt,
+    structure: E4aExpectedStructure,
+) -> bool:
+    """Receipt-level match conditions shared by both checker passes."""
+    if receipt.tool_name not in structure.tool_names:
+        return False
+    if not set(structure.required_columns).issubset(receipt.scope.columns):
+        return False
+    if (
+        receipt.statistics is None
+        or receipt.statistics.hypothesis_outcome != "supports"
+        or receipt.statistics.hypothesis_id != insight.hypothesis_id
+    ):
+        return False
+    proof = next(
+        (
+            edge
+            for edge in insight.proof
+            if edge.receipt_id == receipt.receipt_id and edge.comparison == "supports"
+        ),
+        None,
+    )
+    fact_ids = {fact.fact_id for fact in receipt.facts} | {
+        derivation.derived_fact_id for derivation in receipt.derivations
+    }
+    return proof is not None and set(proof.fact_ids).issubset(fact_ids)
+
+
+def _required_fact_values_hold(
+    receipt: EvidenceReceipt, structure: E4aExpectedStructure
+) -> bool:
+    return all(
+        any(
+            fact.fact_id == fact_id and str(fact.value) == value
+            for fact in receipt.facts
+        )
+        for fact_id, value in structure.required_fact_values
+    )
+
+
+def _checker_v2_scores(
+    workflow: ExplorationWorkflowState,
+    insights: Sequence[InsightRecord],
+    candidates: Mapping[str, CandidateSeed],
+    matched_pairs: set[tuple[str, str]],
+) -> dict[str, float]:
+    """Origin-attribution metrics; agent-origin means any non-mandatory seed."""
+    origin_by_insight = {
+        item.insight_id: candidates[item.hypothesis_id].origin
+        for item in insights
+        if item.hypothesis_id in candidates
+    }
+
+    def _is_agent(insight_id: str) -> bool:
+        origin = origin_by_insight.get(insight_id)
+        return origin is not None and origin != "mandatory"
+
+    structure_insights: dict[str, set[str]] = {}
+    for structure_id, insight_id in matched_pairs:
+        structure_insights.setdefault(structure_id, set()).add(insight_id)
+    matched_insight_ids = {insight_id for _structure_id, insight_id in matched_pairs}
+    agent_matched_rounds = [
+        item.created_round
+        for item in insights
+        if item.insight_id in matched_insight_ids and _is_agent(item.insight_id)
+    ]
+    return {
+        "agent_discovery_count": float(
+            sum(
+                1
+                for insight_ids in structure_insights.values()
+                if any(_is_agent(insight_id) for insight_id in insight_ids)
+            )
+        ),
+        "independent_replication_count": float(
+            sum(
+                1
+                for insight_ids in structure_insights.values()
+                if any(
+                    origin_by_insight.get(insight_id) == "mandatory"
+                    for insight_id in insight_ids
+                )
+                and any(_is_agent(insight_id) for insight_id in insight_ids)
+            )
+        ),
+        "agent_novel_supported_count": float(
+            sum(
+                1
+                for item in insights
+                if _is_agent(item.insight_id)
+                and item.insight_id not in matched_insight_ids
+            )
+        ),
+        "refuted_insight_count": float(
+            sum(1 for item in workflow.insights.values() if item.status == "refuted")
+        ),
+        "agent_first_discovery_round": (
+            float(min(agent_matched_rounds)) if agent_matched_rounds else -1.0
+        ),
+    }
 
 
 def _require_unique_trials(

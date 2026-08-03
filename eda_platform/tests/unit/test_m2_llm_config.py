@@ -533,6 +533,10 @@ def test_create_llm_client_routes_anthropic_to_native() -> None:
 def test_socket_timeout_becomes_actionable_runtime_error(monkeypatch) -> None:
     # A per-call socket read timeout must surface as a clear, actionable error
     # naming EDA_LLM_TIMEOUT_SECONDS — not leak "The read operation timed out".
+    # Backoff is zeroed so the bounded transport retry does not add real sleeps.
+    monkeypatch.setattr(
+        "eda_platform.core.llm._TRANSPORT_RETRY_BACKOFF_SECONDS", (0.0, 0.0)
+    )
     settings = LLMSettings(
         provider=LLMProvider.DEEPSEEK,
         api_key="sk-test",

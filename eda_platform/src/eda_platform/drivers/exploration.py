@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +37,7 @@ from eda_platform.agents.exploration.scheduler import (
     SchedulingDecision,
 )
 from eda_platform.agents.exploration.supervisor import (
+    BranchConstraintPort,
     BudgetPort,
     CandidateBatch,
     CandidateGeneratorPort,
@@ -60,6 +61,7 @@ from eda_platform.agents.exploration.supervisor import (
     SynthesisUnavailable,
     ValidatorPort,
     WitnessPort,
+    reduction_outcome_digest,
 )
 from eda_platform.agents.exploration.workflow import (
     ExplorationProvider,
@@ -95,6 +97,7 @@ from eda_platform.core.llm_ledger import (
 from eda_platform.schemas.artifacts import Artifact
 from eda_platform.schemas.claims import ClaimBundle
 from eda_platform.schemas.exploration import (
+    BranchConstraint,
     BudgetAmendedEvent,
     ExplorationGracefulStopReason,
     ExplorationLoopState,
@@ -382,6 +385,7 @@ class ShadowExecutionComponents:
     finalizer: FinalizerPort
     budget: BudgetPort
     projection_data: Callable[[], ShadowProjectionData]
+    branch_deriver: BranchConstraintPort | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,7 +416,14 @@ class DeterministicShadowFinalizer:
     ) -> FinalizationOutcome:
         del reduction
         journal_state = self.journal.rebuild()
-        if journal_state is None or journal_state.pending_terminal_reason is None:
+        # A stop that latched mid-round (budget death) has no settled-round
+        # terminal reason; the supervisor's latched reason on the context is
+        # the durable substitute — budget exhaustion is itself replayable
+        # from the journaled budget events.
+        stop_reason = journal_state.pending_terminal_reason if journal_state else None
+        if stop_reason is None:
+            stop_reason = getattr(context, "terminal_reason", None)
+        if journal_state is None or stop_reason is None:
             raise ValueError("deterministic finalization requires a durable stop decision.")
         rendered = render_exploration_report(
             self.state,
@@ -423,7 +434,7 @@ class DeterministicShadowFinalizer:
             },
             coverage_targets=self.coverage_targets,
             budget_summary=self.budget_summary(),
-            stop_reason=journal_state.pending_terminal_reason,
+            stop_reason=stop_reason,
         )
         path = validate_shadow_run_path(
             self.workspace,
@@ -559,6 +570,8 @@ def run_composed_shadow_exploration(
         [ExplorationWorkflowState], bool
     ] = lambda _state: False,
     admission_score_threshold: float | None = None,
+    dataset_columns: Mapping[str, Iterable[str]] | None = None,
+    supported_method_families: Iterable[str] = (),
 ) -> ShadowExplorationRunResult:
     """Official E4a composition root: real ports, durable ledgers, shadow-only sinks."""
     workspace_path = require_absolute_workspace(Path(workspace))
@@ -583,7 +596,7 @@ def run_composed_shadow_exploration(
         )
 
     journal = JsonlExplorationJournal(run_root / "journal.jsonl")
-    recovery = JsonSupervisorRecoveryStore(run_root / "phase-responses")
+    recovery = JsonSupervisorRecoveryStore(run_root / "phase-responses", journal=journal)
     llm_response_store = JsonLlmResponseStore(run_root / "llm-responses")
     tool_result_store = JsonToolResultStore(run_root / "tool-results")
     workflow_state_store = JsonExplorationWorkflowStateStore(
@@ -656,6 +669,7 @@ def run_composed_shadow_exploration(
                     "workflow-state admitted bundle lacks its exact passed gate report."
                 )
         active_round: int | None = None
+        decision_cursor = 0
         response_digests = _completed_response_digests(journal)
         for event in journal.events():
             if isinstance(event, RoundStartedEvent):
@@ -675,16 +689,18 @@ def run_composed_shadow_exploration(
                 or candidate_batch_digest(batch) != expected_batch_digest
             ):
                 raise ValueError("scheduler candidate batch fails its journal digest.")
-            candidate_ids = {
-                candidate.hypothesis_id
-                for candidate in batch.candidates
-                if isinstance(candidate, CandidateSeed)
-            }
-            round_decisions = tuple(
-                decision
-                for decision in initial_workflow_state.decisions
-                if decision.hypothesis_id in candidate_ids
+            # A hypothesis can legitimately recur across rounds (a mandatory
+            # probe is replayed until explored), so the round's decisions are
+            # its positional slice, exactly as the issuer reads them back.
+            round_size = sum(
+                isinstance(candidate, CandidateSeed) for candidate in batch.candidates
             )
+            round_decisions = initial_workflow_state.decisions[
+                decision_cursor : decision_cursor + round_size
+            ]
+            decision_cursor += round_size
+            if len(round_decisions) != round_size:
+                raise ValueError("workflow-state is missing a scheduler round's decisions.")
             expected_frontier_digest = (
                 "frontier_" + scheduling_decision_digest(round_decisions)
             )
@@ -719,6 +735,8 @@ def run_composed_shadow_exploration(
             persist_state=workflow_state_store.remember,
             stat_attempt_counts=stat_attempt_counts,
             goal=policy.goal,
+            dataset_columns=dataset_columns,
+            supported_method_families=supported_method_families,
         )
 
         def report_budget_summary() -> Mapping[str, object]:
@@ -782,6 +800,7 @@ def run_composed_shadow_exploration(
             finalizer=finalizer,
             budget=budget_runtime.budget_port,
             projection_data=projection_data,
+            branch_deriver=workflow.branch_deriver,
         )
 
     threshold = (
@@ -789,13 +808,20 @@ def run_composed_shadow_exploration(
         if admission_score_threshold is None
         else admission_score_threshold
     )
+    branching = policy.budget.branching
     return run_shadow_exploration(
         workspace=workspace_path,
         exploration_id=exploration_id,
         policy=policy,
         code_fingerprint=code_fingerprint,
         data_state_witness=data_state_witness,
-        config=SupervisorConfig(admission_score_threshold=threshold),
+        config=SupervisorConfig(
+            admission_score_threshold=threshold,
+            branch_trigger_stagnant_rounds=(
+                None if branching is None else branching.trigger_stagnant_rounds
+            ),
+            max_branches=0 if branching is None else branching.max_branches,
+        ),
         witness=witness,
         journal=journal,
         recovery=recovery,
@@ -817,8 +843,27 @@ class JsonlSupervisorJournalAdapter:
             raise RuntimeError("initialize the exploration journal before supervision.")
         return _supervisor_projection(self.journal, state)
 
-    def start_round(self, round_index: int) -> SupervisorJournalState:
-        self.journal.append_new("round_started", round_index=round_index)
+    def start_round(
+        self, round_index: int, *, branch_id: str | None = None
+    ) -> SupervisorJournalState:
+        self.journal.append_new(
+            "round_started", round_index=round_index, branch_id=branch_id
+        )
+        return self.snapshot()
+
+    def abandon_branch(
+        self,
+        *,
+        branch_id: str,
+        round_index: int,
+        constraints: tuple[BranchConstraint, ...],
+    ) -> SupervisorJournalState:
+        self.journal.append_new(
+            "branch_abandoned",
+            branch_id=branch_id,
+            round_index=round_index,
+            constraints=constraints,
+        )
         return self.snapshot()
 
     def commit_reduction(
@@ -838,6 +883,8 @@ class JsonlSupervisorJournalAdapter:
         *,
         progress: bool,
         terminal_reason: ExplorationGracefulStopReason | None,
+        frontier_empty: bool = False,
+        adjudicated_transitions: int = 0,
     ) -> SupervisorJournalState:
         state = self.journal.rebuild()
         if state is None:
@@ -846,10 +893,12 @@ class JsonlSupervisorJournalAdapter:
             "round_settled",
             round_index=round_index,
             progress=progress,
+            frontier_empty=frontier_empty,
             terminal_reason=terminal_reason,
             terminal_has_reduction=bool(
                 terminal_reason and state.current_round_reduction_committed
             ),
+            adjudicated_transitions=adjudicated_transitions,
         )
         return self.snapshot()
 
@@ -925,10 +974,28 @@ class _ShadowRecoveryGuard(CompletedStepRecoveryPort):
 
 
 class JsonSupervisorRecoveryStore(CompletedStepRecoveryPort):
-    """Immutable, atomic JSON bodies for supervisor paid/reduction steps."""
+    """Immutable, atomic JSON bodies for supervisor paid/reduction steps.
 
-    def __init__(self, root: Path | str) -> None:
+    A ``ReductionOutcome`` is remembered *before* the journal's
+    ``reduction_committed`` event (see ``_reduce``/``_reduce_without_probes``
+    in supervisor.py). A crash in that window replays GENERATE and computes a
+    fresh outcome whose ``admitted_bundle_count`` differs, because the diff
+    baseline already reflects bundles the first attempt persisted. Refusing
+    that overwrite would fail the whole round on every crash-recovery, so
+    immutability is only enforced once ``journal`` shows the stored outcome
+    was actually committed; every other recovery body is remembered only
+    after its step is already durably completed and stays unconditionally
+    immutable.
+    """
+
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        journal: JsonlExplorationJournal | None = None,
+    ) -> None:
         self.root = Path(root)
+        self._journal = journal
 
     def load_required(self, logical_step_id: str) -> object:
         path = self._path(logical_step_id)
@@ -956,11 +1023,31 @@ class JsonSupervisorRecoveryStore(CompletedStepRecoveryPort):
         if path.exists():
             current = self.load_required(logical_step_id)
             if current != result:
-                raise ValueError(
-                    f"recovery body {logical_step_id!r} is immutable and cannot be replaced."
-                )
+                if self._journal_accepted(current):
+                    raise ValueError(
+                        f"recovery body {logical_step_id!r} is immutable and cannot be replaced."
+                    )
+                _write_json_atomic(path, encoded)
+                return
             return
         _write_json_atomic(path, encoded)
+
+    def _journal_accepted(self, current: object) -> bool:
+        """Has the journal already committed ``current`` as the round's reduction?
+
+        Only ``ReductionOutcome`` bodies can be remembered before their
+        journal commit, so every other type is unconditionally immutable.
+        """
+        if self._journal is None or not isinstance(current, ReductionOutcome):
+            return True
+        state = self._journal.rebuild()
+        if state is None or not state.current_round_reduction_committed:
+            return False
+        return (
+            state.frontier_digest == current.frontier.digest
+            and state.ledger_digest == current.ledger_digest
+            and state.reduction_digest == reduction_outcome_digest(current)
+        )
 
     def digest_if_present(self, logical_step_id: str) -> str | None:
         try:
@@ -1121,6 +1208,7 @@ def run_shadow_exploration(
     witness: WitnessPort,
     budget: BudgetPort | None = None,
     control: ControlPort | None = None,
+    branch_deriver: BranchConstraintPort | None = None,
     projection_data: Callable[[], ShadowProjectionData] | None = None,
     journal: JsonlExplorationJournal | None = None,
     recovery: JsonSupervisorRecoveryStore | None = None,
@@ -1145,7 +1233,7 @@ def run_shadow_exploration(
     if validated_journal_path != journal_path:
         raise ValueError("E4a journal must live inside its exploration-eval run directory.")
     actual_recovery = recovery or JsonSupervisorRecoveryStore(
-        run_root / "phase-responses"
+        run_root / "phase-responses", journal=actual_journal
     )
     actual_llm_response_store = llm_response_store or JsonLlmResponseStore(
         run_root / "llm-responses"
@@ -1223,6 +1311,7 @@ def run_shadow_exploration(
             actual_finalizer = components.finalizer
             actual_budget = components.budget
             actual_projection_data = components.projection_data
+            actual_branch_deriver = components.branch_deriver
         else:
             required = (generator, scheduler, executor, validator, reducer, finalizer)
             if any(item is None for item in required):
@@ -1237,6 +1326,7 @@ def run_shadow_exploration(
             actual_finalizer = cast(FinalizerPort, finalizer)
             actual_budget = budget or JournalBudgetPort()
             actual_projection_data = projection_data or (lambda: ShadowProjectionData())
+            actual_branch_deriver = branch_deriver
         guarded_finalizer = _ShadowFinalizerGuard(actual_finalizer, validate_report_ref)
         adapter = JsonlSupervisorJournalAdapter(actual_journal)
         supervisor = ExplorationSupervisor(
@@ -1252,6 +1342,7 @@ def run_shadow_exploration(
             reducer=actual_reducer,
             finalizer=guarded_finalizer,
             recovery=guarded_recovery,
+            branch_deriver=actual_branch_deriver,
         )
         result = supervisor.run()
         final_state = actual_journal.rebuild()
@@ -1316,6 +1407,8 @@ def _supervisor_projection(
         remaining_llm_call_budget=state.remaining_llm_call_budget,
         remaining_tool_call_budget=state.remaining_tool_call_budget,
         consecutive_no_progress=state.consecutive_no_progress,
+        consecutive_empty_frontier=state.consecutive_empty_frontier,
+        consecutive_no_adjudication=state.consecutive_no_adjudication,
         completed_step_ids=frozenset(state.completed_step_ids),
         completed_probe_fingerprints=frozenset(state.completed_probe_fingerprints),
         uncertain_call_ids=frozenset(state.uncertain_call_ids),
@@ -1329,6 +1422,9 @@ def _supervisor_projection(
         frontier_digest=state.frontier_digest,
         ledger_digest=state.ledger_digest,
         reduction_digest=state.reduction_digest,
+        active_branch_id=state.active_branch_id,
+        current_line_abandoned=state.current_line_abandoned,
+        branches_started=len(state.started_branch_ids),
     )
 
 
@@ -1356,6 +1452,7 @@ def _encode_supervisor_result(result: object) -> dict[str, Any]:
             "ledger_digest": result.ledger_digest,
             "goal_satisfied": result.goal_satisfied,
             "coverage_target_met": result.coverage_target_met,
+            "admitted_bundle_count": result.admitted_bundle_count,
         }
     if isinstance(result, FinalizationOutcome):
         return {"kind": "finalization_outcome", "report_ref": result.report_ref}
@@ -1386,6 +1483,7 @@ def _decode_supervisor_result(raw: object) -> object:
             ledger_digest=str(raw.get("ledger_digest", "")),
             goal_satisfied=bool(raw.get("goal_satisfied", False)),
             coverage_target_met=bool(raw.get("coverage_target_met", False)),
+            admitted_bundle_count=int(raw.get("admitted_bundle_count", 0)),
         )
     if kind == "finalization_outcome":
         report_ref = raw.get("report_ref")

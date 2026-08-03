@@ -2116,16 +2116,35 @@ def _analyze_time_series(
     args: AnalyzeTimeSeriesArguments,
 ) -> AgentToolResult:
     dataset = _single_dataset(context, args.dataset_id)
-    result = analyze_series(
-        dataset.frame,
-        dataset_id=args.dataset_id,
-        dataset_name=dataset.record.name,
-        time_column=args.time_column,
-        value_column=args.value_column,
-        freq=args.freq,
-        period=args.period,
-        agg=args.agg,
+    execution = _resolve_execution(context)
+    # Ljung-Box is a statistical test: it must land on the multiplicity ledger
+    # like run_stat_test, or the E4a issuer rejects the evidence root.
+    registry = cast(StatTestRegistry, context.stat_registry)
+    family_id = derive_family_id(
+        dataset_id=args.dataset_id, columns=(args.time_column, args.value_column)
     )
+    attempt = registry.begin_attempt(
+        family_id=family_id,
+        requested_test_type="ljung_box",
+        arguments_digest=canonical_tool_arguments_digest(
+            AnalyzeTimeSeriesArguments, args
+        ),
+        logical_step_id=execution.logical_step_id,
+    )
+    try:
+        result = analyze_series(
+            dataset.frame,
+            dataset_id=args.dataset_id,
+            dataset_name=dataset.record.name,
+            time_column=args.time_column,
+            value_column=args.value_column,
+            freq=args.freq,
+            period=args.period,
+            agg=args.agg,
+        )
+    except Exception as exc:
+        registry.record_failure(attempt.attempt_id, error=str(exc)[:500])
+        raise
     assert result.table is not None  # analyze_series always builds it
     payload = result.table.model_dump(mode="json")
     primary = Artifact(
@@ -2185,11 +2204,14 @@ def _analyze_time_series(
             warnings=tuple(result.warnings),
         ),
         statistics=ReceiptStatistics(
+            statistical_family_id=family_id,
             test_name="ljung_box",
             p_value=result.ljung_box_p,
             sample_size=result.n_periods,
+            sequence_index=attempt.sequence_index,
         ),
     )
+    registry.record_completion(attempt.attempt_id, receipt_id=receipt.receipt_id)
     durable_result = AgentToolResult(
         content={
             "artifact_id": primary.id,

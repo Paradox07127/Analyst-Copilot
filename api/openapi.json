@@ -18654,6 +18654,28 @@
         ],
         "title": "EntityNoteView"
       },
+      "ExplorationBranchPolicy": {
+        "properties": {
+          "trigger_stagnant_rounds": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Trigger Stagnant Rounds"
+          },
+          "max_branches": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Max Branches"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "trigger_stagnant_rounds",
+          "max_branches"
+        ],
+        "title": "ExplorationBranchPolicy",
+        "description": "Stagnation-triggered branching caps (E6). Absent means branching is off."
+      },
       "ExplorationBudgetExtended": {
         "properties": {
           "exploration": {
@@ -18727,6 +18749,16 @@
             "type": "integer",
             "minimum": 1.0,
             "title": "Max Rounds"
+          },
+          "branching": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExplorationBranchPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,

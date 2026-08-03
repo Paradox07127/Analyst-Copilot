@@ -352,6 +352,7 @@ def test_scheduler_records_every_feature_check_and_choice_deterministically() ->
         "policy_and_capability",
         "novelty",
         "not_already_answered",
+        "not_previously_abandoned",
         "falsifiable",
         "within_remaining_budget",
         "coverage_and_quota",
@@ -579,3 +580,47 @@ def test_scheduler_rejects_non_finite_weights_thresholds_and_context(bad: float)
             highest_frontier_priority=0.1,
             priority_threshold=bad,
         )
+
+
+def test_a_mandatory_probe_survives_the_historical_duplicate_check() -> None:
+    proposal = _proposal()
+    mandatory = candidate_seed(proposal, sequence_index=10_001, mandatory=True)
+    agent = candidate_seed(proposal, sequence_index=10_002)
+    context = _context(
+        historical_hypothesis_fingerprints=frozenset({mandatory.hypothesis_fingerprint}),
+        unexplored_coverage_keys=frozenset({mandatory.coverage_key}),
+    )
+    signals = {
+        seed.hypothesis_id: CandidateSignals(business_value=1.0)
+        for seed in (mandatory, agent)
+    }
+
+    mandatory_result = schedule_candidates(
+        (mandatory,), signals=signals, context=context, policy=_policy()
+    )
+    agent_result = schedule_candidates(
+        (agent,), signals=signals, context=context, policy=_policy()
+    )
+
+    assert mandatory_result.decisions[0].status == "admitted"
+    assert agent_result.decisions[0].status == "rejected_duplicate"
+
+
+def test_two_copies_of_a_mandatory_probe_in_one_batch_still_deduplicate() -> None:
+    proposal = _proposal()
+    first = candidate_seed(proposal, sequence_index=1, mandatory=True)
+    second = candidate_seed(proposal, sequence_index=2, mandatory=True)
+    context = _context(unexplored_coverage_keys=frozenset({first.coverage_key}))
+    signals = {
+        seed.hypothesis_id: CandidateSignals(business_value=1.0)
+        for seed in (first, second)
+    }
+
+    result = schedule_candidates(
+        (first, second), signals=signals, context=context, policy=_policy()
+    )
+
+    assert [decision.status for decision in result.decisions] == [
+        "admitted",
+        "rejected_duplicate",
+    ]

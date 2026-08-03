@@ -63,17 +63,16 @@ class ToyOutput(BaseModel):
     answer: str
 
 
-def test_luna_tool_turn_pins_reasoning_effort_none() -> None:
-    body = _tool_turn_body(LLMProvider.OPENAI, "gpt-5.6-luna")
-
-    assert body["reasoning_effort"] == "none"
-    assert body["tool_choice"] == "auto"  # the rest of the dialect is unchanged
+def test_gpt_56_tool_turns_pin_reasoning_effort_none() -> None:
+    for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
+        body = _tool_turn_body(LLMProvider.OPENAI, model)
+        assert body["reasoning_effort"] == "none", model
+        assert body["tool_choice"] == "auto", model  # rest of the dialect unchanged
 
 
 def test_reasoning_capable_models_keep_their_default_effort_with_tools() -> None:
     for provider, model in (
-        (LLMProvider.OPENAI, "gpt-5.6-sol"),
-        (LLMProvider.OPENAI, "gpt-5.6-terra"),
+        (LLMProvider.OPENAI, "gpt-4.1"),
         (LLMProvider.DEEPSEEK, "deepseek-v4-pro"),
     ):
         body = _tool_turn_body(provider, model)
@@ -95,11 +94,12 @@ def test_luna_requests_without_tools_do_not_carry_the_pin() -> None:
     assert "reasoning_effort" not in client.captured
 
 
-def test_catalog_pins_luna_only_and_keeps_it_verified() -> None:
-    luna = agent_model_profile(LLMProvider.OPENAI, "gpt-5.6-luna")
-    assert luna is not None and luna.tools_reasoning_effort == "none"
+def test_catalog_pins_the_gpt_56_family_and_keeps_it_verified() -> None:
+    for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
+        profile = agent_model_profile(LLMProvider.OPENAI, model)
+        assert profile is not None and profile.tools_reasoning_effort == "none", model
 
-    for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-4.1-mini", "gpt-4.1"):
+    for model in ("gpt-4.1-mini", "gpt-4.1"):
         profile = agent_model_profile(LLMProvider.OPENAI, model)
         assert profile is not None and profile.tools_reasoning_effort == "", model
 

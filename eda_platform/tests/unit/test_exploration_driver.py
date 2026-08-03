@@ -19,6 +19,7 @@ from eda_platform.agents.exploration.supervisor import (
     ScoredFrontier,
     SupervisorConfig,
     ValidationOutcome,
+    reduction_outcome_digest,
 )
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
 from eda_platform.core.exploration_profiles import build_exploration_policy
@@ -125,6 +126,90 @@ def test_durable_response_stores_round_trip_and_are_immutable(tmp_path: Path) ->
         responses.remember("llm-step", LLMToolResponse(content="changed"))
 
 
+def test_uncommitted_reduction_body_can_be_replaced_by_a_recomputation(
+    tmp_path: Path,
+) -> None:
+    """A crash between supervisor._reduce's remember() and commit_reduction()
+    must not fail the resumed round: replay recomputes a different
+    ReductionOutcome (admitted_bundle_count diffs against the baseline the
+    first attempt already persisted), and that recomputation must be allowed
+    to replace the stale, uncommitted body instead of raising."""
+    journal = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-crash",
+        policy=_policy(),
+        code_fingerprint="code-v1",
+        data_state_witness="witness-v1",
+    )
+    journal.claim_recovery()
+    journal.append_new("round_started", round_index=0, branch_id=None)
+    recovery = JsonSupervisorRecoveryStore(tmp_path / "phase", journal=journal)
+
+    seed = candidate_seed(_proposal(), sequence_index=1, mandatory=True)
+    frontier = ScoredFrontier(
+        (FrontierItem(seed.hypothesis_id, 0.9, seed),), "frontier-1"
+    )
+    first_attempt = ReductionOutcome(
+        transitions=("new",),
+        frontier=frontier,
+        ledger_digest="ledger-1",
+        admitted_bundle_count=2,
+    )
+    recovery.remember("reduce-step", first_attempt)
+
+    second_attempt = ReductionOutcome(
+        transitions=("new",),
+        frontier=frontier,
+        ledger_digest="ledger-1",
+        admitted_bundle_count=0,
+    )
+    recovery.remember("reduce-step", second_attempt)
+
+    assert recovery.load_required("reduce-step") == second_attempt
+
+
+def test_committed_reduction_body_stays_immutable(tmp_path: Path) -> None:
+    """Control group: once the journal has actually committed a reduction
+    outcome, a different body must still be rejected."""
+    journal = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-committed",
+        policy=_policy(),
+        code_fingerprint="code-v1",
+        data_state_witness="witness-v1",
+    )
+    journal.claim_recovery()
+    journal.append_new("round_started", round_index=0, branch_id=None)
+    recovery = JsonSupervisorRecoveryStore(tmp_path / "phase", journal=journal)
+
+    seed = candidate_seed(_proposal(), sequence_index=1, mandatory=True)
+    frontier = ScoredFrontier(
+        (FrontierItem(seed.hypothesis_id, 0.9, seed),), "frontier-1"
+    )
+    committed = ReductionOutcome(
+        transitions=("new",),
+        frontier=frontier,
+        ledger_digest="ledger-1",
+        admitted_bundle_count=2,
+    )
+    recovery.remember("reduce-step", committed)
+    journal.append_new(
+        "reduction_committed",
+        frontier_digest=frontier.digest,
+        ledger_digest=committed.ledger_digest,
+        reduction_digest=reduction_outcome_digest(committed),
+    )
+
+    different = ReductionOutcome(
+        transitions=("new",),
+        frontier=frontier,
+        ledger_digest="ledger-1",
+        admitted_bundle_count=0,
+    )
+    with pytest.raises(ValueError, match="immutable"):
+        recovery.remember("reduce-step", different)
+
+
 def test_durable_response_store_refuses_a_symlinked_body(tmp_path: Path) -> None:
     if not hasattr(os, "O_NOFOLLOW"):
         pytest.skip("requires POSIX O_NOFOLLOW")
@@ -213,6 +298,87 @@ def test_jsonl_supervisor_adapter_projects_round_local_receipts_and_terminal_int
     assert settled.current_round_receipt_ids == frozenset()
 
 
+def test_deterministic_render_survives_a_mid_round_budget_latch(
+    tmp_path: Path,
+) -> None:
+    """Seed-6 regression: budget death inside an unsettled round left
+    pending_terminal_reason unset, the renderer raised, and the certified
+    report ref silently became None. The supervisor's latched reason on the
+    phase context must be an accepted substitute."""
+    from eda_platform.agents.exploration.supervisor import SupervisorPhase
+    from eda_platform.agents.exploration.workflow import ExplorationWorkflowState
+    from eda_platform.drivers.exploration import (
+        DeterministicShadowFinalizer,
+        shadow_run_root,
+    )
+
+    def _reduction_outcome() -> ReductionOutcome:
+        seed = candidate_seed(_proposal(), sequence_index=1)
+        return ReductionOutcome(
+            transitions=(),
+            frontier=ScoredFrontier(
+                (FrontierItem(seed.hypothesis_id, 0.9, seed),), "frontier-1"
+            ),
+            ledger_digest="ledger-1",
+            goal_satisfied=False,
+        )
+
+    workspace = tmp_path / "workspace"
+    exploration_id = "xpl-budget-latch"
+    run_root = shadow_run_root(workspace, exploration_id)
+    run_root.mkdir(parents=True)
+    journal = JsonlExplorationJournal(run_root / "journal.jsonl")
+    journal.initialize(
+        exploration_id=exploration_id,
+        policy=_policy(),
+        code_fingerprint="code-v1",
+        data_state_witness="witness-v1",
+    )
+    journal.claim_recovery()
+    adapter = JsonlSupervisorJournalAdapter(journal)
+    adapter.start_round(0)  # started, never settled: no terminal reason
+    assert adapter.snapshot().pending_terminal_reason is None
+
+    finalizer = DeterministicShadowFinalizer(
+        workspace=workspace,
+        exploration_id=exploration_id,
+        state=ExplorationWorkflowState(),
+        journal=journal,
+        coverage_targets=(),
+        budget_summary=lambda: {"llm_requests_used": 1},
+    )
+    context = PhaseContext(
+        exploration_id=exploration_id,
+        round_index=0,
+        phase=SupervisorPhase.SYNTHESIZE,
+        data_state_witness="witness-v1",
+        soft_countdown_context="",
+        completed_step_ids=frozenset(),
+        terminal_reason="budget_exhausted",
+    )
+
+    outcome = finalizer.render_deterministic(context, _reduction_outcome())
+
+    assert outcome.report_ref is not None
+    report = (workspace / outcome.report_ref).read_text(encoding="utf-8")
+    assert "budget_exhausted" in report
+
+    # Without either a settled terminal reason or a latched one, rendering
+    # must still refuse: a report may not precede a durable stop decision.
+    bare_context = context.for_phase(SupervisorPhase.SYNTHESIZE)
+    assert bare_context.terminal_reason == "budget_exhausted"
+    undecided = PhaseContext(
+        exploration_id=exploration_id,
+        round_index=0,
+        phase=SupervisorPhase.SYNTHESIZE,
+        data_state_witness="witness-v1",
+        soft_countdown_context="",
+        completed_step_ids=frozenset(),
+    )
+    with pytest.raises(ValueError, match="durable stop decision"):
+        finalizer.render_deterministic(undecided, _reduction_outcome())
+
+
 class _Generator:
     def __init__(
         self,
@@ -287,6 +453,19 @@ class _Validator:
 class _Reducer:
     def __init__(self) -> None:
         self.calls = 0
+
+    def reduce_without_probes(
+        self,
+        context: PhaseContext,
+        frontier: ScoredFrontier,
+        *,
+        logical_step_id: str,
+    ) -> ReductionOutcome:
+        return ReductionOutcome(
+            transitions=(),
+            frontier=frontier,
+            ledger_digest="ledger-empty",
+        )
 
     def reduce(
         self,

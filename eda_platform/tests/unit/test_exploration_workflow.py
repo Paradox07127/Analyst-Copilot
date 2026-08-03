@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import pandas as pd
 import pytest
@@ -14,8 +14,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import BaseModel, ConfigDict
 
 from eda_platform.agents.data_tools import DataToolContext, build_data_tools
-from eda_platform.agents.exploration.candidates import candidate_seed
-from eda_platform.agents.exploration.executor import durable_tool_result_digest
+from eda_platform.agents.exploration.candidates import (
+    CandidateSeed,
+    DatasetExplorationProfile,
+    candidate_seed,
+    mandatory_probe_seeds,
+)
+from eda_platform.agents.exploration.executor import (
+    ProbeExecutionResult,
+    durable_tool_result_digest,
+)
 from eda_platform.agents.exploration.scheduler import (
     AdmissionContext,
     CandidateSignals,
@@ -23,16 +31,26 @@ from eda_platform.agents.exploration.scheduler import (
     SchedulerPolicy,
 )
 from eda_platform.agents.exploration.supervisor import (
+    CandidateBatch,
+    FrontierItem,
     PhaseContext,
+    ProbeSelection,
     ReductionOutcome,
     SupervisorBudgetExhausted,
+    SupervisorCancelled,
     SupervisorInvariantError,
     SupervisorPhase,
     reduction_outcome_digest,
 )
 from eda_platform.agents.exploration.workflow import (
+    DeterministicSchedulerPort,
+    ExecutedProbeBatch,
+    ExplorationWorkflowState,
     JournaledCandidateGenerator,
+    SupervisorProbeExecutorPort,
+    artifact_receipt_decoder,
     final_reduction_state_digest,
+    scheduling_decision_digest,
 )
 from eda_platform.agents.receipts import build_receipt
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
@@ -40,7 +58,10 @@ from eda_platform.agents.tool_context import current_execution_context
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.claim_gates import run_claim_gates
 from eda_platform.core.exploration_budget import ToolCallProjection
-from eda_platform.core.exploration_journal import JsonlExplorationJournal
+from eda_platform.core.exploration_journal import (
+    JsonlExplorationJournal,
+    sealed_policy,
+)
 from eda_platform.core.exploration_profiles import build_exploration_policy
 from eda_platform.core.exploration_release_gate import (
     E4aEvidenceBindings,
@@ -51,6 +72,7 @@ from eda_platform.core.exploration_release_gate import (
     verify_e4a_trial_evidence,
 )
 from eda_platform.core.ids import make_artifact_id, stable_hash
+from eda_platform.core.kernel import SessionCancelled
 from eda_platform.core.llm import (
     LLMResultMetadata,
     LLMSettings,
@@ -76,6 +98,11 @@ from eda_platform.drivers.exploration_evidence_issuer import (
     E4aExpectedStructure,
     E4aGroundTruthFixture,
     E4aPlannedTrial,
+    _artifact_digests,
+    _candidate_identity,
+    _search_dynamics_scores,
+    _verify_branch_abandonments,
+    _verify_trial_plan,
     issue_e4a_release_from_evidence_roots,
     verify_e4a_evidence_root,
 )
@@ -83,11 +110,16 @@ from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.claims import ClaimBundle
 from eda_platform.schemas.datasets import DatasetRecord
 from eda_platform.schemas.exploration import (
+    BranchAbandonedEvent,
     InsightFamily,
     LlmCallStartedEvent,
     RoundSettledEvent,
+    RoundStartedEvent,
 )
-from eda_platform.schemas.exploration_budget import BudgetCapIncrease
+from eda_platform.schemas.exploration_budget import (
+    BudgetCapIncrease,
+    ExplorationBranchPolicy,
+)
 from eda_platform.schemas.hypotheses import (
     HypothesisPredicate,
     HypothesisProposal,
@@ -159,7 +191,7 @@ class _Provider:
     ) -> LLMToolResponse:
         assert self.enabled
         assert task == "exploration_probe_loop"
-        assert messages and [tool["name"] for tool in tools] == ["inspect_data_catalog"]
+        assert messages and [tool["name"] for tool in tools] == ["profile_slice"]
         self.tool_calls += 1
         self._record_usage()
         if self.tool_calls == 1:
@@ -167,7 +199,7 @@ class _Provider:
                 tool_calls=[
                     LLMToolCall(
                         call_id="provider-call-1",
-                        name="inspect_data_catalog",
+                        name="profile_slice",
                         arguments={},
                     )
                 ],
@@ -189,7 +221,7 @@ class _Provider:
 
 
 class _UsageMeter:
-    def __init__(self, kind: str = "inspect_data_catalog") -> None:
+    def __init__(self, kind: str = "profile_slice") -> None:
         self.kind = kind
 
     def project(self, **_kwargs: Any) -> ToolCallProjection:
@@ -262,7 +294,7 @@ def _proposal() -> HypothesisProposal:
         expected_evidence="A deterministic regional observation.",
         falsification_conditions=("No regional difference is observed.",),
         family=InsightFamily.DIAGNOSTIC,
-        method_family="inspect_data_catalog",
+        method_family="profile_slice",
         dataset_ids=("ds-1",),
         columns=("region", "revenue"),
         probe_kind="region_difference",
@@ -276,7 +308,7 @@ def _tool() -> AgentTool:
         assert execution is not None
         receipt = build_receipt(
             tool_call_id=execution.provider_call_id,
-            tool_name="inspect_data_catalog",
+            tool_name="profile_slice",
             tool_version="1",
             arguments={},
             raw_output={"regional_difference": 42},
@@ -333,7 +365,7 @@ def _tool() -> AgentTool:
         )
 
     return AgentTool(
-        name="inspect_data_catalog",
+        name="profile_slice",
         description="Inspect the immutable data catalog.",
         args_schema=_NoArgs,
         execute=execute,
@@ -374,7 +406,7 @@ def test_composed_shadow_workflow_runs_and_recovers_without_reissuing(
         return AdmissionContext(
             dataset_columns={"ds-1": frozenset({"region", "revenue"})},
             allowed_dataset_ids=frozenset({"ds-1"}),
-            supported_method_families=frozenset({"inspect_data_catalog"}),
+            supported_method_families=frozenset({"profile_slice"}),
             historical_hypothesis_fingerprints=frozenset(),
             answered_hypothesis_fingerprints=frozenset(),
             executed_query_fingerprints=frozenset(),
@@ -427,7 +459,7 @@ def test_composed_shadow_workflow_runs_and_recovers_without_reissuing(
     report = (tmp_path / first.result.report_ref).read_text(encoding="utf-8")
     assert amended_state.effective_policy_fingerprint in report
     assert f"- policy_fingerprint: {policy.policy_fingerprint}" not in report
-    assert "regional difference" in report
+    assert "**Does revenue differ by region?**" in report
     assert "## Supported insights" in report
     assert "## Refuted hypotheses" in report
     assert "## Inconclusive questions" in report
@@ -1024,6 +1056,8 @@ def _build_evidence_issuer_root(
             "region_difference_recall": 1.0,
             "missingness_mechanism_recall": 0.0,
             "spike_day_recall": 0.0,
+            "auc_over_steps": 1.0,
+            "first_improvement_step": 0.0,
         },
     )
     (root / "e4a-checker-result.json").write_text(
@@ -1109,18 +1143,12 @@ def _synchronize_receipt_contract_forgery(root: Path, mutation: str) -> None:
     workflow_path = root / "workflow-state.json"
     workflow_raw = json.loads(workflow_path.read_text(encoding="utf-8"))
     receipt_raw = workflow_raw["committed_receipts"][0]
-    original_claim_text: str | None = None
     fabricated_claim_text: str | None = None
     forged_primary_id: str | None = None
     if mutation == "fact_value":
         fact = receipt_raw["facts"][0]
         fact["name"] = "fabricated_revenue"
         fact["value"] = 999999
-        original_claim_text = "p_value: " + str(
-            json.loads(workflow_path.read_text(encoding="utf-8"))["committed_receipts"][0][
-                "facts"
-            ][0]["value"]
-        )
         fabricated_claim_text = "fabricated_revenue: 999999"
     elif mutation == "statistics":
         receipt_raw["statistics"]["test_statistic"] = 999999
@@ -1188,14 +1216,8 @@ def _synchronize_receipt_contract_forgery(root: Path, mutation: str) -> None:
     snapshot["step_result_digests"][logical_step_id] = result_digest
     snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
     _rewrite_final_reduction_ledger(root)
-
-    if original_claim_text is not None and fabricated_claim_text is not None:
-        report_path = root / "report.md"
-        report = report_path.read_text(encoding="utf-8")
-        assert original_claim_text in report
-        report_path.write_text(
-            report.replace(original_claim_text, fabricated_claim_text), encoding="utf-8"
-        )
+    # Claim texts are audit-plane only since the statement-led report format;
+    # report.md does not render them, so the forged report needs no patching.
 
 
 def test_evidence_root_rederives_usage_provider_checker_and_manifest(
@@ -1224,6 +1246,70 @@ def test_evidence_root_rederives_usage_provider_checker_and_manifest(
         Ed25519PrivateKey.from_private_bytes(_ROOT_EVIDENCE_PRIVATE).public_key().public_bytes_raw()
     )
     assert verify_e4a_trial_evidence(trial, public_key)
+
+
+def test_checker_scores_include_search_dynamics(tmp_path: Path) -> None:
+    root, bindings = _build_evidence_issuer_root(tmp_path)
+    trial, _ = verify_e4a_evidence_root(
+        root,
+        issuer_bindings=bindings,
+        evidence_signing_key=_ROOT_EVIDENCE_PRIVATE,
+    )
+    assert trial.scores["auc_over_steps"] == 1.0
+    assert trial.scores["first_improvement_step"] == 0.0
+
+
+def test_manifest_digest_covers_numeric_changes(tmp_path: Path) -> None:
+    """verify_e4a_evidence_root never reruns analysis tools, so the "did this
+    number really come from this tool on this data" dimension is covered only
+    by manifest.root_digest pinning every artifact byte."""
+    root, bindings = _build_evidence_issuer_root(tmp_path)
+    _trial, manifest = verify_e4a_evidence_root(
+        root,
+        issuer_bindings=bindings,
+        evidence_signing_key=_ROOT_EVIDENCE_PRIVATE,
+    )
+    tool_path = next((root / "tool-results").glob("*.json"))
+    tool_raw = json.loads(tool_path.read_text(encoding="utf-8"))
+    tool_raw["result"]["artifacts"][0]["payload"]["p_value"] = 0.5
+    tool_path.write_text(json.dumps(tool_raw), encoding="utf-8")
+    mutated = manifest.model_copy(update={"artifact_sha256": _artifact_digests(root)})
+    assert mutated.root_digest != manifest.root_digest
+
+
+def test_trial_plan_rejects_unpinned_manifest_digest(tmp_path: Path) -> None:
+    root, bindings = _build_evidence_issuer_root(tmp_path)
+    trial, manifest = verify_e4a_evidence_root(
+        root,
+        issuer_bindings=bindings,
+        evidence_signing_key=_ROOT_EVIDENCE_PRIVATE,
+    )
+    assert trial.tier == "quick"
+    pinned = E4aPlannedTrial(
+        role="baseline",
+        trial_id=trial.trial_id,
+        tier="quick",
+        seed=trial.seed,
+        manifest_digest=manifest.root_digest,
+    )
+    _verify_trial_plan([(trial, manifest)], [], (pinned,))
+    unpinned = pinned.model_copy(update={"manifest_digest": "0" * 64})
+    with pytest.raises(ValueError, match="not pinned"):
+        _verify_trial_plan([(trial, manifest)], [], (unpinned,))
+
+
+def test_search_dynamics_scores_formula() -> None:
+    # R=3, expected=4, matches admitted at rounds 0 and 2:
+    # recall_at_r = 0.25, 0.25, 0.5 -> auc = round(1/3, 6)
+    assert _search_dynamics_scores(
+        matched_insight_rounds=(0, 2), expected_count=4, rounds_started=3
+    ) == {"auc_over_steps": 0.333333, "first_improvement_step": 0.0}
+    assert _search_dynamics_scores(
+        matched_insight_rounds=(), expected_count=4, rounds_started=3
+    ) == {"auc_over_steps": 0.0, "first_improvement_step": -1.0}
+    assert _search_dynamics_scores(
+        matched_insight_rounds=(), expected_count=4, rounds_started=0
+    ) == {"auc_over_steps": 0.0, "first_improvement_step": -1.0}
 
 
 @pytest.mark.parametrize(
@@ -1371,15 +1457,9 @@ def test_evidence_root_rejects_self_consistent_fabricated_bundle(tmp_path: Path)
     store.remember(workflow)
     # Simulate a hostile root that also rewrites the unsigned recovery body and
     # journal projection. Canonical reducer replay must still reject the claims.
+    # (Claim texts no longer appear in report.md, so no report patch is needed
+    # to keep the hostile root self-consistent.)
     _rewrite_final_reduction_ledger(root)
-
-    report_path = root / "report.md"
-    report_text = report_path.read_text(encoding="utf-8")
-    assert original_claim.claim_text in report_text
-    report_path.write_text(
-        report_text.replace(original_claim.claim_text, fabricated_text),
-        encoding="utf-8",
-    )
 
     with pytest.raises(ValueError, match="canonical deterministic replay"):
         verify_e4a_evidence_root(
@@ -1600,3 +1680,1045 @@ def test_evidence_root_rejects_cherry_picked_ledger_bundle_and_coverage(
             issuer_bindings=bindings,
             evidence_signing_key=_ROOT_EVIDENCE_PRIVATE,
         )
+
+
+# --------------------------------------------------------------- E6 branching
+
+
+class _BranchProvider(_Provider):
+    """Scripted per-round proposals; every odd probe call runs run_stat_test."""
+
+    def __init__(
+        self, proposals_by_round: dict[int, tuple[HypothesisProposal, ...]]
+    ) -> None:
+        super().__init__()
+        self.proposals_by_round = proposals_by_round
+        self.probe_calls = 0
+
+    def structured(
+        self,
+        *,
+        task: str,
+        schema: type[T],
+        payload: dict[str, Any],
+    ) -> T:
+        assert task == "exploration_generate_hypotheses"
+        self.structured_calls += 1
+        self._record_usage()
+        proposals = self.proposals_by_round.get(payload["round_index"], ())
+        batch = (
+            HypothesisProposalBatch(proposals=proposals)
+            if proposals
+            else HypothesisProposalBatch(
+                concluded=True, conclusion_reason="No further hypotheses this round."
+            )
+        )
+        return schema.model_validate(batch.model_dump(mode="json"))
+
+    def tool_call(
+        self,
+        *,
+        task: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> LLMToolResponse:
+        assert task == "exploration_probe_loop"
+        self.tool_calls += 1
+        self._record_usage()
+        self.probe_calls += 1
+        if self.probe_calls % 2 == 1:
+            # Distinct arguments (probe dedup) but the same dataset/columns,
+            # so both attempts land in one multiple-comparisons family.
+            test_type = (
+                "independent_t_test" if self.probe_calls == 1 else "mann_whitney_u"
+            )
+            return LLMToolResponse(
+                tool_calls=[
+                    LLMToolCall(
+                        call_id=f"provider-branch-call-{self.probe_calls}",
+                        name="run_stat_test",
+                        arguments={
+                            "dataset_id": "ds-1",
+                            "test_type": test_type,
+                            "group_column": "region",
+                            "value_column": "revenue",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return LLMToolResponse(content="Probe complete.", finish_reason="stop")
+
+
+def _branch_proposal(operator: str, probe_kind: str) -> HypothesisProposal:
+    return HypothesisProposal(
+        statement=f"Regional revenue {operator} probe.",
+        rationale="Branch-mode driver test.",
+        expected_evidence="A deterministic statistical observation.",
+        falsification_conditions=("The statistical test finds nothing.",),
+        family=InsightFamily.DIAGNOSTIC,
+        method_family="compare_groups",
+        dataset_ids=("ds-1",),
+        columns=("region", "revenue"),
+        probe_kind=probe_kind,
+        predicate=HypothesisPredicate(
+            metric="revenue",
+            operator=operator,  # type: ignore[arg-type]
+            left_operand="region",
+        ),
+    )
+
+
+def test_branch_mode_runs_end_to_end_and_issuer_recomputes_constraints(
+    tmp_path: Path,
+) -> None:
+    refuted_proposal = _branch_proposal("absent", "absence_probe")
+    branch_proposal = _branch_proposal("differs", "difference_probe")
+    dataset = LoadedDataset(
+        record=DatasetRecord(
+            dataset_id="ds-1",
+            name="branch.csv",
+            path=Path("/data/branch.csv"),
+            content_hash="branch-hash-v1",
+        ),
+        frame=pd.DataFrame(
+            {
+                "region": ["east"] * 30 + ["west"] * 30,
+                "revenue": [100.0 + index / 10 for index in range(30)]
+                + [10.0 + index / 10 for index in range(30)],
+            }
+        ),
+    )
+    data_context = DataToolContext(
+        datasets=[dataset],
+        catalog=build_catalog([dataset]),
+        project_id="shadow-project",
+        session_id="xpl-branch-mode",
+        store=None,
+        payload_policy="schema+aggregates",
+        stat_registry=StatTestRegistry(
+            tmp_path / "exploration-eval" / "xpl-branch-mode" / "stat_registry.jsonl"
+        ),
+    )
+    assert data_context.stat_registry is not None
+    stat_registry = data_context.stat_registry
+    tool = next(
+        item for item in build_data_tools(data_context) if item.name == "run_stat_test"
+    )
+    run_witness = data_state_witness_digest([("ds-1", None, dataset.record.content_hash)])
+    base_policy = build_exploration_policy(
+        tier="standard",
+        dataset_scope=("ds-1",),
+        tool_capability_digest=exploration_tool_capability_digest((tool,)),
+    )
+    policy = sealed_policy(
+        base_policy.model_copy(
+            update={
+                "budget": base_policy.budget.model_copy(
+                    update={
+                        "branching": ExplorationBranchPolicy(
+                            trigger_stagnant_rounds=2, max_branches=1
+                        )
+                    }
+                ),
+                "policy_fingerprint": "",
+            }
+        )
+    )
+    refuted_seed = candidate_seed(refuted_proposal, sequence_index=1)
+    branch_seed = candidate_seed(branch_proposal, sequence_index=1)
+
+    def admission(_context: Any) -> AdmissionContext:
+        return AdmissionContext(
+            dataset_columns={"ds-1": frozenset({"region", "revenue"})},
+            allowed_dataset_ids=frozenset({"ds-1"}),
+            supported_method_families=frozenset({"compare_groups"}),
+            historical_hypothesis_fingerprints=frozenset(),
+            answered_hypothesis_fingerprints=frozenset(),
+            executed_query_fingerprints=frozenset(),
+            remaining_cost=1,
+            family_quota_remaining={InsightFamily.DIAGNOSTIC: 1},
+            unexplored_coverage_keys=frozenset(
+                {refuted_seed.coverage_key, branch_seed.coverage_key}
+            ),
+        )
+
+    def signals(_context: Any, seeds: tuple[Any, ...]) -> dict[str, CandidateSignals]:
+        return {item.hypothesis_id: CandidateSignals(business_value=1) for item in seeds}
+
+    def stat_counts() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for attempt in stat_registry.attempts():
+            counts[attempt.family_id] = counts.get(attempt.family_id, 0) + 1
+        return counts
+
+    journal = JsonlExplorationJournal(
+        tmp_path / "exploration-eval" / "xpl-branch-mode" / "journal.jsonl"
+    )
+    journal.initialize(
+        exploration_id="xpl-branch-mode",
+        policy=policy,
+        code_fingerprint="code-branch-v1",
+        data_state_witness=run_witness,
+    )
+    result = run_composed_shadow_exploration(
+        workspace=tmp_path,
+        exploration_id="xpl-branch-mode",
+        policy=policy,
+        code_fingerprint="code-branch-v1",
+        data_state_witness=run_witness,
+        provider=_BranchProvider(
+            {0: (refuted_proposal,), 3: (branch_proposal,), 4: (refuted_proposal,)}
+        ),
+        tools=(tool,),
+        dataset_profiles=(),
+        scheduler_policy=_scheduler_policy(),
+        admission_context=admission,
+        signals=signals,
+        witness=CallableWitnessPort(lambda expected: expected == run_witness),
+        usage_meter=_UsageMeter("run_stat_test"),
+        stat_attempt_counts=stat_counts,
+    )
+    assert result.result.error is None, result.result.error
+    assert result.result.stop_reason == "no_new_information"
+
+    events = JsonlExplorationJournal(result.journal_path).events()
+    round_branches = [
+        event.branch_id for event in events if isinstance(event, RoundStartedEvent)
+    ]
+    assert round_branches[:3] == [None, None, None]
+    assert len(round_branches) > 3
+    assert all(branch_id == "br_1" for branch_id in round_branches[3:])
+    abandonments = [
+        event for event in events if isinstance(event, BranchAbandonedEvent)
+    ]
+    assert len(abandonments) == 1
+    assert abandonments[0].branch_id == "main"
+    assert abandonments[0].round_index == 2
+    constraint_keys = {
+        (item.reason, item.hypothesis_fingerprint)
+        for item in abandonments[0].constraints
+    }
+    assert ("refuted", refuted_seed.hypothesis_fingerprint) in constraint_keys
+
+    # Cross-branch multiplicity: the same test family ran once on the main
+    # line and once inside br_1; the shared registry must count both.
+    attempts = list(stat_registry.attempts())
+    assert len(attempts) == 2
+    assert len({item.family_id for item in attempts}) == 1
+
+    # The refuted hypothesis is blocked on re-proposal after abandonment: its
+    # round runs the generate call only, never a probe conversation.
+    llm_calls_by_round: dict[int, int] = {}
+    open_round: int | None = None
+    for event in events:
+        if isinstance(event, RoundStartedEvent):
+            open_round = event.round_index
+            llm_calls_by_round[open_round] = 0
+        elif isinstance(event, LlmCallStartedEvent) and open_round is not None:
+            llm_calls_by_round[open_round] += 1
+        elif isinstance(event, RoundSettledEvent):
+            open_round = None
+    assert llm_calls_by_round[0] > 1  # main-line probe ran
+    assert llm_calls_by_round[3] > 1  # branch probe ran
+    assert llm_calls_by_round[4] == 1  # re-proposed refuted hypothesis blocked
+    workflow = JsonExplorationWorkflowStateStore(
+        result.journal_path.parent / "workflow-state.json"
+    ).load()
+
+    # Issuer-side recomputation accepts the honest journal and rejects tampering.
+    candidates_by_round = {
+        0: {refuted_seed.hypothesis_id: refuted_seed},
+        3: {
+            candidate_seed(branch_proposal, sequence_index=30001).hypothesis_id: (
+                candidate_seed(branch_proposal, sequence_index=30001)
+            )
+        },
+        4: {
+            candidate_seed(refuted_proposal, sequence_index=40001).hypothesis_id: (
+                candidate_seed(refuted_proposal, sequence_index=40001)
+            )
+        },
+    }
+    _verify_branch_abandonments(
+        events, workflow, candidates_by_round=candidates_by_round
+    )
+    tampered_events = [
+        (
+            event.model_copy(update={"constraints": ()})
+            if isinstance(event, BranchAbandonedEvent)
+            else event
+        )
+        for event in events
+    ]
+    with pytest.raises(ValueError, match="branch abandonment constraints"):
+        _verify_branch_abandonments(
+            tampered_events, workflow, candidates_by_round=candidates_by_round
+        )
+
+
+# --- 2026-08-03 evidence-semantics repairs (R1/R5/P1a/P1c) --------------------
+
+_REDUCER_SEED = candidate_seed(_proposal(), sequence_index=1)
+
+
+def _reducer_receipt(
+    tool_call_id: str,
+    *,
+    outcome: str | None = None,
+    result_count: int = 1,
+    facts: tuple[ReceiptFact, ...] | None = None,
+    scope: ReceiptScope | None = None,
+    method_family: str = "profile_slice",
+    warnings: tuple[str, ...] = (),
+) -> EvidenceReceipt:
+    statistics = None
+    if outcome is not None:
+        statistics = ReceiptStatistics(
+            hypothesis_id=_REDUCER_SEED.hypothesis_id,
+            hypothesis_outcome=outcome,  # type: ignore[arg-type]
+            test_name="welch_anova",
+            test_statistic=12.5,
+            p_value=0.0001,
+            effect_size=0.4,
+            ci_low=0.1,
+            ci_high=0.9,
+            sample_size=1086,
+            sequence_index=1,
+        )
+    return build_receipt(
+        tool_call_id=tool_call_id,
+        tool_name=method_family,
+        tool_version="1",
+        arguments={"call": tool_call_id},
+        raw_output={"rows": []},
+        artifact_ids=(),
+        result_count=result_count,
+        scope=scope
+        or ReceiptScope(
+            dataset_ids=("ds-1",),
+            columns=("region", "revenue"),
+            scope_resolution="explicit",
+        ),
+        facts=(
+            facts
+            if facts is not None
+            else (
+                ReceiptFact(
+                    fact_id="rows_in_slice",
+                    name="rows_in_slice",
+                    value=362,
+                    value_type="count",
+                    support_type="direct",
+                ),
+            )
+        ),
+        method=ReceiptMethod(family=method_family, warnings=warnings),
+        statistics=statistics,
+        data_state_witness=WITNESS,
+        created_at="2026-08-02T00:00:00Z",
+    )
+
+
+_EMPTY_SLICE_RECEIPT = _reducer_receipt(
+    "call_empty_slice",
+    result_count=0,
+    facts=(
+        ReceiptFact(
+            fact_id="empty_slice",
+            name="empty_slice",
+            value=None,
+            value_type="null",
+            support_type="absence",
+        ),
+    ),
+    scope=ReceiptScope(
+        dataset_ids=("ds-1",),
+        columns=("region", "revenue"),
+        scope_resolution="explicit",
+        filters="region = 'East'",
+    ),
+    warnings=("The WHERE condition matched no rows.",),
+)
+
+
+def _reducer_port(
+    tmp_path: Path, receipts: tuple[EvidenceReceipt, ...]
+) -> tuple[JsonlExplorationJournal, Any, Any]:
+    from eda_platform.agents.exploration.workflow import (
+        ClaimGateReducerPort,
+        ExplorationWorkflowState,
+    )
+
+    journal = JsonlExplorationJournal(tmp_path / "exploration.journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl_reducer",
+        policy=build_exploration_policy(
+            tier="quick",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    journal.append_new("round_started", round_index=0)
+    state = ExplorationWorkflowState()
+    for receipt in receipts:
+        state.committed_receipts[receipt.receipt_id] = receipt
+    return (
+        journal,
+        state,
+        ClaimGateReducerPort(
+            journal=journal,
+            state=state,
+            stat_attempt_counts=lambda: {_REDUCER_SEED.hypothesis_id: 1},
+        ),
+    )
+
+
+def _reduce_once(
+    port: Any, receipts: tuple[EvidenceReceipt, ...]
+) -> ReductionOutcome:
+    from eda_platform.agents.exploration.supervisor import (
+        FrontierItem,
+        ProbeSelection,
+        ScoredFrontier,
+        ValidationOutcome,
+    )
+    from eda_platform.agents.exploration.workflow import ExecutedProbeBatch
+
+    items = (
+        FrontierItem(
+            hypothesis_id=_REDUCER_SEED.hypothesis_id,
+            priority=1.0,
+            payload=_REDUCER_SEED,
+        ),
+    )
+    frontier = ScoredFrontier(items=items, digest="frontier_reducer")
+    validated = ValidationOutcome(
+        ExecutedProbeBatch(
+            ProbeSelection(items),
+            (),
+            receipts,
+            tuple(
+                (receipt.receipt_id, _REDUCER_SEED.hypothesis_id)
+                for receipt in receipts
+            ),
+        )
+    )
+    context = PhaseContext(
+        exploration_id="xpl_reducer",
+        round_index=0,
+        phase=SupervisorPhase.REDUCE,
+        data_state_witness=WITNESS,
+        soft_countdown_context="",
+        completed_step_ids=frozenset(),
+    )
+    return port.reduce(context, validated, frontier, logical_step_id="step_reduce")
+
+
+def test_unadjudicated_receipts_no_longer_veto_a_decisive_one(tmp_path: Path) -> None:
+    """R1: reproduces the 2026-08-03 empty-frontier run — one typed `supports`
+    receipt alongside two untyped profile slices for the same hypothesis."""
+    decisive = _reducer_receipt(
+        "call_missingness", outcome="supports", method_family="missingness_diagnostic"
+    )
+    silent_a = _reducer_receipt("call_slice_a")
+    silent_b = _reducer_receipt("call_slice_b")
+    receipts = (decisive, silent_a, silent_b)
+    _journal, state, port = _reducer_port(tmp_path, receipts)
+
+    outcome = _reduce_once(port, receipts)
+
+    assert outcome.transitions == ("new",)
+    insight = next(iter(state.insights.values()))
+    assert insight.status == "new"
+    assert insight.trust_level == "supported"
+    assert insight.supporting_receipt_ids == (decisive.receipt_id,)
+    assert insight.contradicting_receipt_ids == ()
+    # The untyped slices stay in the gated bundle but never become evidence.
+    bundle = state.admitted_bundles[insight.claim_bundle_id]
+    assert set(bundle.referenced_receipt_ids()) == {
+        receipt.receipt_id for receipt in receipts
+    }
+
+
+def test_an_absence_fact_carries_the_scanned_scope_into_its_claim(
+    tmp_path: Path,
+) -> None:
+    """R5: an empty slice is a legitimate absence claim; the gate needs the
+    scope the receipt actually scanned, which only the reducer can supply."""
+    decisive = _reducer_receipt(
+        "call_welch", outcome="supports", method_family="welch_anova"
+    )
+    receipts = (_EMPTY_SLICE_RECEIPT, decisive)
+    _journal, state, port = _reducer_port(tmp_path, receipts)
+
+    outcome = _reduce_once(port, receipts)
+
+    report = next(iter(state.gate_reports.values()))
+    assert report.passed, [
+        violation.code
+        for verdict in report.verdicts
+        for violation in verdict.violations
+    ]
+    assert outcome.transitions == ("new",)
+    bundle = next(iter(state.admitted_bundles.values()))
+    absence = next(claim for claim in bundle.claims if claim.claim_type == "absence")
+    assert absence.scope is not None
+    assert absence.scope.dataset_ids == ("ds-1",)
+    assert absence.scope.columns == ("region", "revenue")
+    assert absence.scope.filters == "region = 'East'"
+
+
+def test_a_gate_passing_round_reports_its_admitted_bundle_count(
+    tmp_path: Path,
+) -> None:
+    """P1a: bundle admission is progress even when no insight moves."""
+    decisive = _reducer_receipt(
+        "call_welch_admitted", outcome="supports", method_family="welch_anova"
+    )
+    receipts = (decisive,)
+    _journal, _state, port = _reducer_port(tmp_path, receipts)
+
+    outcome = _reduce_once(port, receipts)
+
+    assert outcome.admitted_bundle_count == 1
+
+
+def test_replaying_a_reduction_does_not_append_a_second_gate_verdict(
+    tmp_path: Path,
+) -> None:
+    """P1c: a crash between the gate verdict and the reduction commit replays
+    the whole reduce phase; the journal must stay one verdict per bundle."""
+    decisive = _reducer_receipt(
+        "call_welch_replay", outcome="supports", method_family="welch_anova"
+    )
+    receipts = (decisive,)
+    journal, _state, port = _reducer_port(tmp_path, receipts)
+
+    _reduce_once(port, receipts)
+    _reduce_once(port, receipts)
+
+    verdicts = [
+        event for event in journal.events() if event.event_type == "gate_verdict"
+    ]
+    assert len(verdicts) == 1
+
+
+def _bound_receipt(
+    base: EvidenceReceipt, *, exploration_id: str, round_index: int, step_id: str
+) -> EvidenceReceipt:
+    payload = base.model_dump()
+    payload["execution"] = ReceiptExecution(
+        run_id=(
+            f"{exploration_id}:round:{round_index}:hypothesis:"
+            f"{_REDUCER_SEED.hypothesis_id}:execute_probes"
+        ),
+        provider_call_id=f"call_{step_id}",
+        logical_step_id=step_id,
+    ).model_dump()
+    payload.pop("content_digest")
+    payload["content_digest"] = receipt_content_digest(payload)
+    return EvidenceReceipt.model_validate(payload)
+
+
+def test_the_issuer_mirrors_the_reducers_new_side_classification(
+    tmp_path: Path,
+) -> None:
+    """The issuer rebuilds bundles from scratch; if its side classification or
+    its absence scope drifts from the reducer's, every root is rejected. The
+    scripted trials never produce untyped or absence receipts, so the mirror
+    is pinned here instead."""
+    from eda_platform.agents.exploration.workflow import (
+        ExplorationWorkflowState,
+        _claim_bundle,
+    )
+    from eda_platform.drivers.exploration_evidence_issuer import (
+        _canonical_claim_bundle,
+        _rebuild_canonical_bundles,
+    )
+
+    exploration_id = "xpl_mirror"
+    typed_first = _bound_receipt(
+        _reducer_receipt("call_typed_1", outcome="supports"),
+        exploration_id=exploration_id,
+        round_index=0,
+        step_id="step_1",
+    )
+    untyped = _bound_receipt(
+        _EMPTY_SLICE_RECEIPT,
+        exploration_id=exploration_id,
+        round_index=0,
+        step_id="step_2",
+    )
+    typed_second = _bound_receipt(
+        _reducer_receipt("call_typed_2", outcome="supports"),
+        exploration_id=exploration_id,
+        round_index=1,
+        step_id="step_3",
+    )
+    # Body-level mirror: the absence claim's derived scope must match verbatim.
+    assert _claim_bundle(
+        _REDUCER_SEED, (typed_first, untyped)
+    ) == _canonical_claim_bundle(_REDUCER_SEED, (typed_first, untyped))
+
+    journal = JsonlExplorationJournal(tmp_path / "exploration.journal.jsonl")
+    journal.initialize(
+        exploration_id=exploration_id,
+        policy=build_exploration_policy(
+            tier="quick",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    workflow = ExplorationWorkflowState()
+    rounds = ((0, (typed_first, untyped)), (1, (typed_second,)))
+    expected: dict[str, ClaimBundle] = {}
+    # Round 1 cumulates only what round 0 adjudicated: the untyped receipt must
+    # drop out of the prior sides, or the round-1 bundle id changes.
+    cumulative: list[EvidenceReceipt] = []
+    for round_index, receipts in rounds:
+        journal.append_new("round_started", round_index=round_index)
+        for receipt in receipts:
+            step = receipt.execution.logical_step_id  # type: ignore[union-attr]
+            workflow.committed_receipts[receipt.receipt_id] = receipt
+            journal.append_new(
+                "tool_call_started", logical_step_id=step, input_fingerprint=f"fp-{step}"
+            )
+            journal.append_new(
+                "receipt_prepared", logical_step_id=step, receipt_id=receipt.receipt_id
+            )
+            journal.append_new(
+                "receipt_committed", logical_step_id=step, receipt_id=receipt.receipt_id
+            )
+        cumulative.extend(
+            receipt
+            for receipt in receipts
+            if round_index == 0
+            or (
+                receipt.statistics is not None
+                and receipt.statistics.hypothesis_outcome is not None
+            )
+        )
+        if round_index == 1:
+            cumulative = [
+                receipt
+                for receipt in cumulative
+                if receipt.statistics is not None
+                and receipt.statistics.hypothesis_outcome is not None
+            ]
+        bundle = _claim_bundle(_REDUCER_SEED, tuple(cumulative))
+        expected[bundle.claim_bundle_id] = bundle
+        journal.append_new(
+            "gate_verdict", claim_bundle_id=bundle.claim_bundle_id, verdict="passed"
+        )
+        journal.append_new("round_settled", round_index=round_index, progress=True)
+
+    candidates_by_round = {
+        0: {_REDUCER_SEED.hypothesis_id: _REDUCER_SEED},
+        1: {_REDUCER_SEED.hypothesis_id: _REDUCER_SEED},
+    }
+    assert (
+        _rebuild_canonical_bundles(
+            journal.events(), workflow, candidates_by_round=candidates_by_round
+        )
+        == expected
+    )
+
+
+def _round_context(round_index: int) -> PhaseContext:
+    return PhaseContext(
+        exploration_id="xpl-generate",
+        round_index=round_index,
+        phase=SupervisorPhase.ADMIT_AND_SCORE,
+        data_state_witness=WITNESS,
+        soft_countdown_context="remaining={}",
+        completed_step_ids=frozenset(),
+    )
+
+
+def _repeat_admission_context(coverage_key: str) -> AdmissionContext:
+    return AdmissionContext(
+        dataset_columns={"ds-1": frozenset({"region", "revenue"})},
+        allowed_dataset_ids=frozenset({"ds-1"}),
+        supported_method_families=frozenset({"profile_slice"}),
+        historical_hypothesis_fingerprints=frozenset(),
+        answered_hypothesis_fingerprints=frozenset(),
+        executed_query_fingerprints=frozenset(),
+        remaining_cost=1.0,
+        family_quota_remaining={InsightFamily.DIAGNOSTIC: 1},
+        unexplored_coverage_keys=frozenset({coverage_key}),
+    )
+
+
+def test_a_repeated_hypothesis_keeps_its_own_per_round_decision() -> None:
+    first_seed = candidate_seed(_proposal(), sequence_index=1, mandatory=True)
+    replayed = candidate_seed(_proposal(), sequence_index=10_001, mandatory=True)
+    state = ExplorationWorkflowState()
+    port = DeterministicSchedulerPort(
+        policy=_scheduler_policy(),
+        admission_context=lambda _context: _repeat_admission_context(
+            first_seed.coverage_key
+        ),
+        signals=lambda _context, seeds: {
+            seed.hypothesis_id: CandidateSignals(business_value=1.0) for seed in seeds
+        },
+        state=state,
+    )
+
+    first = port.admit_and_score(_round_context(0), CandidateBatch((first_seed,)))
+    second = port.admit_and_score(_round_context(1), CandidateBatch((replayed,)))
+
+    # Both rounds scored the same hypothesis id, so both rounds own a decision;
+    # each round's frontier digest must replay from its positional slice.
+    assert len(state.decisions) == 2
+    assert first.digest == "frontier_" + scheduling_decision_digest(state.decisions[0:1])
+    assert second.digest == "frontier_" + scheduling_decision_digest(state.decisions[1:2])
+
+
+def test_generate_payload_carries_the_dataset_schema_and_method_vocabulary(
+    tmp_path: Path,
+) -> None:
+    class _CapturingProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.payloads: list[dict[str, Any]] = []
+
+        def structured(self, *, task: str, schema: type[T], payload: dict[str, Any]) -> T:
+            self.payloads.append(payload)
+            return super().structured(task=task, schema=schema, payload=payload)
+
+    journal = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-generate",
+        policy=build_exploration_policy(
+            tier="quick",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    journal.claim_recovery()
+    provider = _CapturingProvider()
+    generator = JournaledCandidateGenerator(
+        provider=provider,
+        journal=journal,
+        recovery=JsonSupervisorRecoveryStore(tmp_path / "responses"),
+        dataset_profiles=(),
+        dataset_columns={"ds-1": ("revenue", "region")},
+        supported_method_families=("profile_slice", "compare_groups"),
+    )
+
+    generator.generate(
+        _generate_context(), logical_step_id="xpl-generate:round:0:generate"
+    )
+
+    payload = provider.payloads[0]
+    assert payload["datasets"] == [
+        {"dataset_id": "ds-1", "columns": ["revenue", "region"]}
+    ]
+    assert payload["method_families"] == ["compare_groups", "profile_slice"]
+    assert "exact" in payload["instruction"]
+
+
+def test_the_issuer_reads_a_replayed_mandatory_probe_as_one_candidate() -> None:
+    first = candidate_seed(_proposal(), sequence_index=1, mandatory=True)
+    replayed = replace(
+        candidate_seed(_proposal(), sequence_index=10_001, mandatory=True),
+        status="admitted",
+        priority=0.9,
+    )
+
+    assert first != replayed
+    assert _candidate_identity(first) == _candidate_identity(replayed)
+
+
+def test_every_round_replays_the_mandatory_probes_coverage_still_misses(
+    tmp_path: Path,
+) -> None:
+    profiles = (
+        DatasetExplorationProfile(
+            dataset_id="ds-1",
+            region_dimensions=("region",),
+            metric_columns=("revenue",),
+            missing_value_columns=("satisfaction",),
+            missingness_group_dimensions=("channel",),
+            datetime_columns=("order_date",),
+            spike_metric_columns=("revenue",),
+        ),
+    )
+    all_seeds = mandatory_probe_seeds(profiles)
+    assert len(all_seeds) == 3
+    explored: set[str] = set()
+
+    journal = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-generate",
+        policy=build_exploration_policy(
+            tier="quick",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    journal.claim_recovery()
+    class _LaterRoundProvider(_Provider):
+        def structured(self, *, task: str, schema: type[T], payload: dict[str, Any]) -> T:
+            del task, payload
+            self.structured_calls += 1
+            self._record_usage()
+            return schema.model_validate(
+                {"concluded": True, "conclusion_reason": "Nothing further to add."}
+            )
+
+    generator = JournaledCandidateGenerator(
+        provider=_LaterRoundProvider(),
+        journal=journal,
+        recovery=JsonSupervisorRecoveryStore(tmp_path / "responses"),
+        dataset_profiles=profiles,
+        coverage_completed=lambda: frozenset(explored),
+    )
+
+    explored.add(all_seeds[0].coverage_key)
+    batch = generator.generate(
+        replace(_generate_context(), round_index=2),
+        logical_step_id="xpl-generate:round:2:generate",
+    )
+
+    replayed = [
+        item
+        for item in batch.candidates
+        if isinstance(item, CandidateSeed) and item.mandatory
+    ]
+    assert {item.coverage_key for item in replayed} == {
+        seed.coverage_key for seed in all_seeds[1:]
+    }
+
+
+def test_a_probe_that_uses_up_its_step_budget_is_not_an_invariant_violation(
+    tmp_path: Path,
+) -> None:
+    """`limit_reached` means the probe conversation ran out of its own steps,
+    not that the control plane is broken. Its committed receipts are valid and
+    the round must go on; treating it as fatal killed a real deepseek trial in
+    round 0 after 30 committed receipts (2026-08-03, seed 3)."""
+
+    class _LimitReachedExecutor:
+        def run(self, **_kwargs: Any) -> Any:
+            return ProbeExecutionResult(status="limit_reached", answer="out of steps")
+
+    journal = JsonlExplorationJournal(tmp_path / "xpl" / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-limit",
+        policy=build_exploration_policy(
+            tier="standard",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    port = SupervisorProbeExecutorPort(
+        executor=cast(Any, _LimitReachedExecutor()),
+        journal=journal,
+        state=ExplorationWorkflowState(),
+        receipt_decoder=artifact_receipt_decoder,
+    )
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    context = PhaseContext(
+        exploration_id="xpl-limit",
+        round_index=0,
+        phase=SupervisorPhase.EXECUTE_PROBES,
+        data_state_witness=WITNESS,
+        soft_countdown_context="[exploration_soft_countdown] remaining={}. Prefer x",
+        completed_step_ids=frozenset(),
+    )
+    outcome = port.execute(
+        context, ProbeSelection((FrontierItem("h", 1.0, payload=seed),))
+    )
+    batch = outcome.payload
+    assert isinstance(batch, ExecutedProbeBatch)
+    assert batch.receipts == ()
+
+
+def test_a_failed_probe_is_still_an_invariant_violation(tmp_path: Path) -> None:
+    """Control: `failed` covers integrity faults (recovered-digest mismatch and
+    friends), so it must keep ending the run."""
+
+    class _FailedExecutor:
+        def run(self, **_kwargs: Any) -> Any:
+            return ProbeExecutionResult(status="failed", error="digest mismatch")
+
+    journal = JsonlExplorationJournal(tmp_path / "xpl" / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-failed",
+        policy=build_exploration_policy(
+            tier="standard",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    port = SupervisorProbeExecutorPort(
+        executor=cast(Any, _FailedExecutor()),
+        journal=journal,
+        state=ExplorationWorkflowState(),
+        receipt_decoder=artifact_receipt_decoder,
+    )
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    context = PhaseContext(
+        exploration_id="xpl-failed",
+        round_index=0,
+        phase=SupervisorPhase.EXECUTE_PROBES,
+        data_state_witness=WITNESS,
+        soft_countdown_context="[exploration_soft_countdown] remaining={}. Prefer x",
+        completed_step_ids=frozenset(),
+    )
+    with pytest.raises(SupervisorInvariantError, match="failed"):
+        port.execute(context, ProbeSelection((FrontierItem("h", 1.0, payload=seed),)))
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["finish_reason_length", "content_filtered", "empty_response"],
+)
+def test_a_probe_that_the_model_cannot_finish_does_not_kill_the_round(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    """Truncation, a content filter and an empty turn are all model/provider
+    behaviour on one probe. The control plane is intact and the receipts this
+    probe already committed stay valid, so the round must go on."""
+
+    class _ProbeLocalFailureExecutor:
+        def run(self, **_kwargs: Any) -> Any:
+            return ProbeExecutionResult(
+                status="failed",
+                error="the model could not finish this probe",
+                error_code=error_code,
+            )
+
+    journal = JsonlExplorationJournal(tmp_path / "xpl" / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-local",
+        policy=build_exploration_policy(
+            tier="standard",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    port = SupervisorProbeExecutorPort(
+        executor=cast(Any, _ProbeLocalFailureExecutor()),
+        journal=journal,
+        state=ExplorationWorkflowState(),
+        receipt_decoder=artifact_receipt_decoder,
+    )
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    context = PhaseContext(
+        exploration_id="xpl-local",
+        round_index=0,
+        phase=SupervisorPhase.EXECUTE_PROBES,
+        data_state_witness=WITNESS,
+        soft_countdown_context="[exploration_soft_countdown] remaining={}. Prefer x",
+        completed_step_ids=frozenset(),
+    )
+
+    outcome = port.execute(
+        context, ProbeSelection((FrontierItem("h", 1.0, payload=seed),))
+    )
+
+    batch = outcome.payload
+    assert isinstance(batch, ExecutedProbeBatch)
+    assert batch.executions[0].error_code == error_code
+
+
+def test_an_integrity_failure_is_still_an_invariant_violation(tmp_path: Path) -> None:
+    """Control: recovery-time integrity checks say the control plane cannot be
+    trusted, so they must keep ending the run."""
+
+    class _IntegrityFailureExecutor:
+        def run(self, **_kwargs: Any) -> Any:
+            return ProbeExecutionResult(
+                status="failed",
+                error="completed LLM response digest does not match the journal.",
+                error_code="completed_response_digest_mismatch",
+            )
+
+    journal = JsonlExplorationJournal(tmp_path / "xpl" / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-integrity",
+        policy=build_exploration_policy(
+            tier="standard",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    port = SupervisorProbeExecutorPort(
+        executor=cast(Any, _IntegrityFailureExecutor()),
+        journal=journal,
+        state=ExplorationWorkflowState(),
+        receipt_decoder=artifact_receipt_decoder,
+    )
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    context = PhaseContext(
+        exploration_id="xpl-integrity",
+        round_index=0,
+        phase=SupervisorPhase.EXECUTE_PROBES,
+        data_state_witness=WITNESS,
+        soft_countdown_context="[exploration_soft_countdown] remaining={}. Prefer x",
+        completed_step_ids=frozenset(),
+    )
+
+    with pytest.raises(SupervisorInvariantError, match="digest"):
+        port.execute(context, ProbeSelection((FrontierItem("h", 1.0, payload=seed),)))
+
+
+def test_cancellation_inside_a_probe_reaches_the_supervisor_as_cancellation(
+    tmp_path: Path,
+) -> None:
+    """A cancelled probe used to escape as a generic exception and settle the
+    run as `failed`, which reads as a platform defect in the trace."""
+
+    class _CancellingExecutor:
+        def run(self, **_kwargs: Any) -> Any:
+            raise SessionCancelled("cancelled by user")
+
+    journal = JsonlExplorationJournal(tmp_path / "xpl" / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-cancel",
+        policy=build_exploration_policy(
+            tier="standard",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    port = SupervisorProbeExecutorPort(
+        executor=cast(Any, _CancellingExecutor()),
+        journal=journal,
+        state=ExplorationWorkflowState(),
+        receipt_decoder=artifact_receipt_decoder,
+    )
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    context = PhaseContext(
+        exploration_id="xpl-cancel",
+        round_index=0,
+        phase=SupervisorPhase.EXECUTE_PROBES,
+        data_state_witness=WITNESS,
+        soft_countdown_context="[exploration_soft_countdown] remaining={}. Prefer x",
+        completed_step_ids=frozenset(),
+    )
+
+    with pytest.raises(SupervisorCancelled):
+        port.execute(context, ProbeSelection((FrontierItem("h", 1.0, payload=seed),)))

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from eda_platform.core.provider_registry import LLMProvider, provider_spec
 
-CAPABILITY_CATALOG_VERSION = "agent-models-2026-08-01"
+CAPABILITY_CATALOG_VERSION = "agent-models-2026-08-03"
 
 
 @dataclass(frozen=True)
@@ -64,17 +64,14 @@ def _profiles(
 
 
 AGENT_MODEL_REGISTRY: dict[LLMProvider, tuple[AgentModelProfile, ...]] = {
+    # The whole gpt-5.6 family 400s on function tools at its default reasoning
+    # effort on /v1/chat/completions: "Function tools with reasoning_effort are
+    # not supported ... set reasoning_effort to 'none'". Observed on luna
+    # 2026-08-01 and terra 2026-08-03; sol is pinned by inference from the same
+    # family/endpoint, not observation. Lifting it requires /v1/responses.
     LLMProvider.OPENAI: (
         *_profiles(
-            ("gpt-5.6-sol", "gpt-5.6-terra"),
-            parallel=True,
-            structured_output="json_schema",
-            docs_url="https://developers.openai.com/api/docs/models",
-        ),
-        # luna 400s on function tools at any non-none reasoning effort on
-        # /v1/chat/completions (observed 2026-08-01), so tools requests pin it.
-        *_profiles(
-            ("gpt-5.6-luna",),
+            ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
             parallel=True,
             structured_output="json_schema",
             tools_reasoning_effort="none",

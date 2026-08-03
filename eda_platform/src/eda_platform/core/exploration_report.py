@@ -104,6 +104,15 @@ def render_exploration_report(
                 *insight.limitations,
             )
         )
+        if insight.statement:
+            evidence_texts.append(insight.statement)
+        if insight.rationale:
+            evidence_texts.append(insight.rationale)
+        evidence_texts.append(str(len(insight.supporting_receipt_ids)))
+        evidence_texts.append(str(len(insight.contradicting_receipt_ids)))
+        stats_line = _key_statistics_line(state, insight)
+        if stats_line is not None:
+            evidence_texts.append(stats_line)
         bundle = state.admitted_bundles[insight.claim_bundle_id]
         for claim in bundle.claims:
             evidence_texts.extend((claim.claim_id, claim.claim_text))
@@ -129,25 +138,57 @@ def _insight_lines(
     *,
     statuses: set[str],
 ) -> list[str]:
+    """One compact human-readable block per insight; the full claim bundle
+    stays in workflow-state.json for audit."""
     lines: list[str] = []
     for insight in insights:
         if insight.status not in statuses:
             continue
-        bundle = state.admitted_bundles[insight.claim_bundle_id]
-        lane = (
-            "Exploratory — hypothesis-generating"
-            if bundle.evidence_lane == "exploratory"
-            else "Confirmatory evidence — not a claim of certainty"
+        statement = insight.statement or "(no statement recorded)"
+        lines.append(f"- **{statement}** — {insight.status}/{insight.trust_level}")
+        summary = (
+            f"{len(insight.supporting_receipt_ids)} supporting, "
+            f"{len(insight.contradicting_receipt_ids)} contradicting receipt(s)"
         )
-        claims = "; ".join(
-            claim.claim_text for claim in sorted(bundle.claims, key=lambda item: item.claim_id)
+        edges = ", ".join(
+            f"{edge.receipt_id} ({edge.comparison})" for edge in insight.proof
         )
-        proof = ", ".join(
-            f"{edge.receipt_id}:{'/'.join(edge.fact_ids)}"
-            for edge in insight.proof
-        )
-        lines.append(f"- [{lane}] ({insight.insight_id}) {claims}; proof: {proof}")
+        lines.append(f"  - evidence: {summary}" + (f"; {edges}" if edges else ""))
+        stats = _key_statistics_line(state, insight)
+        if stats is not None:
+            lines.append(f"  - {stats}")
+        if insight.rationale and insight.rationale.strip():
+            lines.append(f"  - why: {insight.rationale}")
     return lines or [_EMPTY]
+
+
+def _key_statistics_line(
+    state: ExplorationWorkflowState, insight: InsightRecord
+) -> str | None:
+    """Key numbers from up to two adjudicating receipts' statistics."""
+    fragments: list[str] = []
+    for receipt_id in (*insight.supporting_receipt_ids, *insight.contradicting_receipt_ids):
+        receipt = state.committed_receipts.get(receipt_id)
+        statistics = receipt.statistics if receipt is not None else None
+        if statistics is None:
+            continue
+        parts = [
+            f"{name}={value:g}" if isinstance(value, float) else f"{name}={value}"
+            for name, value in (
+                ("p_value", statistics.p_value),
+                ("effect_size", statistics.effect_size),
+                ("sample_size", statistics.sample_size),
+            )
+            if value is not None
+        ]
+        if not parts:
+            continue
+        fragments.append(f"{receipt_id}: " + ", ".join(parts))
+        if len(fragments) == 2:
+            break
+    if not fragments:
+        return None
+    return "key stats: " + "; ".join(fragments)
 
 
 def _validate_insight_proof(
@@ -159,11 +200,16 @@ def _validate_insight_proof(
     assigned = set(insight.supporting_receipt_ids) | set(
         insight.contradicting_receipt_ids
     )
-    if assigned != set(bundle_receipt_ids):
+    # Since R1 an admitted bundle may also carry claims from receipts that were
+    # never adjudicated; those are not evidence for either side and carry no
+    # proof edge. Evidence must still be drawn from the gated bundle.
+    if not assigned <= set(bundle_receipt_ids):
         raise ValueError("insight evidence assignment does not match its claim bundle.")
     if set(insight.supporting_receipt_ids) & set(insight.contradicting_receipt_ids):
         raise ValueError("one receipt cannot both support and contradict an insight.")
 
+    # Only the adjudicated receipts owe proof edges; the bundle's other claims
+    # are exploratory context that no insight side rests on.
     expected_facts: dict[str, set[str]] = {}
     bundle = state.admitted_bundles[insight.claim_bundle_id]
     for claim in bundle.claims:
@@ -193,7 +239,12 @@ def _validate_insight_proof(
         if edge.comparison != expected_comparison:
             raise ValueError("insight proof comparison conflicts with its evidence side.")
         actual_facts.setdefault(edge.receipt_id, set()).update(edge.fact_ids)
-    if actual_facts != expected_facts:
+    proved_expectation = {
+        receipt_id: facts
+        for receipt_id, facts in expected_facts.items()
+        if receipt_id in assigned
+    }
+    if actual_facts != proved_expectation:
         raise ValueError("insight proof nodes do not match the gated claim references.")
 
 

@@ -23,7 +23,9 @@ from eda_platform.core.event_journal import (
 from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.exploration import (
     EXPLORATION_JOURNAL_SCHEMA_VERSION,
+    MAIN_LINE_ID,
     AttemptStartedEvent,
+    BranchAbandonedEvent,
     BudgetAmendedEvent,
     ExplorationLoopEvent,
     ExplorationLoopState,
@@ -162,6 +164,7 @@ def reduce_exploration_event(
             raise EventTransitionError(
                 f"round_index must be {state.rounds_started}, got {event.round_index}."
             )
+        _apply_round_branch_rules(values, state, event.branch_id)
         values["current_round_index"] = event.round_index
         values["rounds_started"] = state.rounds_started + 1
         values["remaining_round_budget"] = state.remaining_round_budget - 1
@@ -333,14 +336,73 @@ def reduce_exploration_event(
             raise EventTransitionError(
                 "terminal reduction metadata does not match the settled round."
             )
+        if (
+            event.terminal_reason == "no_new_information"
+            and state.branch_trigger_stagnant_rounds is not None
+            and len(state.started_branch_ids) < state.max_branches
+        ):
+            raise EventTransitionError(
+                "branches must be exhausted before no_new_information (plan E6)."
+            )
         values["current_round_index"] = None
         values["current_round_reduction_committed"] = False
         values["rounds_settled"] = state.rounds_settled + 1
         values["consecutive_no_progress"] = (
             0 if event.progress else state.consecutive_no_progress + 1
         )
+        values["consecutive_empty_frontier"] = (
+            state.consecutive_empty_frontier + 1 if event.frontier_empty else 0
+        )
+        # None = pre-plan-B event: counted as movement so a resumed legacy
+        # journal can never soft-stop on rounds it never measured.
+        values["consecutive_no_adjudication"] = (
+            0
+            if event.adjudicated_transitions is None
+            or event.adjudicated_transitions > 0
+            else state.consecutive_no_adjudication + 1
+        )
         values["pending_terminal_reason"] = event.terminal_reason
         values["pending_terminal_has_reduction"] = event.terminal_has_reduction
+    elif isinstance(event, BranchAbandonedEvent):
+        _require_running(state, "branch_abandoned")
+        _require_no_pending(state)
+        if state.branch_trigger_stagnant_rounds is None:
+            raise EventTransitionError("branching is disabled for this run.")
+        if state.current_round_index is not None:
+            raise EventTransitionError("branch abandonment requires no open round.")
+        if state.pending_terminal_reason is not None:
+            raise EventTransitionError(
+                "cannot abandon a line after a terminal decision."
+            )
+        if state.current_line_abandoned:
+            raise EventTransitionError("the current line is already abandoned.")
+        if state.rounds_settled == 0 or event.round_index != state.rounds_settled - 1:
+            raise EventTransitionError(
+                "branch_abandoned round_index must identify the last settled round."
+            )
+        current_line = state.active_branch_id or MAIN_LINE_ID
+        if event.branch_id != current_line:
+            raise EventTransitionError(
+                f"only the current line {current_line!r} can be abandoned."
+            )
+        if state.consecutive_no_progress < state.branch_trigger_stagnant_rounds:
+            raise EventTransitionError(
+                "branch abandonment requires the system stagnation signal "
+                f"({state.consecutive_no_progress} < "
+                f"{state.branch_trigger_stagnant_rounds} stagnant rounds)."
+            )
+        if len(state.started_branch_ids) >= state.max_branches:
+            raise EventTransitionError(
+                "branch budget is exhausted; no successor branch can start."
+            )
+        values["abandoned_line_ids"] = [*state.abandoned_line_ids, event.branch_id]
+        values["current_line_abandoned"] = True
+        values["consecutive_no_progress"] = 0
+        values["consecutive_no_adjudication"] = 0
+        values["abandoned_constraints"] = [
+            *state.abandoned_constraints,
+            *event.constraints,
+        ]
     elif isinstance(event, PauseRequestedEvent):
         if state.status != "running":
             raise EventTransitionError("pause can only be requested while running.")
@@ -637,7 +699,12 @@ def _start_exploration(event: ExplorationLoopEvent) -> ExplorationLoopState:
             "the first event must be exploration_started with seq 0."
         )
     max_llm_requests = event.budget.llm.max_requests
+    branching = event.budget.branching
     return ExplorationLoopState(
+        branch_trigger_stagnant_rounds=(
+            None if branching is None else branching.trigger_stagnant_rounds
+        ),
+        max_branches=0 if branching is None else branching.max_branches,
         exploration_id=event.exploration_id,
         policy_fingerprint=event.policy_fingerprint,
         effective_policy_fingerprint=event.policy_fingerprint,
@@ -669,6 +736,41 @@ def _check_attempt_epoch(
     if event.attempt_epoch != expected:
         raise EventTransitionError(
             f"event attempt_epoch must be {expected}, got {event.attempt_epoch}."
+        )
+
+
+def _apply_round_branch_rules(
+    values: dict[str, object],
+    state: ExplorationLoopState,
+    branch_id: str | None,
+) -> None:
+    if branch_id is None:
+        if state.current_line_abandoned:
+            raise EventTransitionError(
+                "this line was abandoned; the next round must open a new branch."
+            )
+        if state.active_branch_id is not None:
+            raise EventTransitionError(
+                "an active branch requires its branch id on round_started."
+            )
+        return
+    if state.branch_trigger_stagnant_rounds is None:
+        raise EventTransitionError("branching is disabled for this run.")
+    if state.current_line_abandoned:
+        expected = f"br_{len(state.started_branch_ids) + 1}"
+        if branch_id != expected:
+            raise EventTransitionError(
+                f"the next branch must be {expected!r}, got {branch_id!r}."
+            )
+        if len(state.started_branch_ids) >= state.max_branches:
+            raise EventTransitionError("branch budget is exhausted.")
+        values["active_branch_id"] = branch_id
+        values["started_branch_ids"] = [*state.started_branch_ids, branch_id]
+        values["current_line_abandoned"] = False
+        return
+    if branch_id != state.active_branch_id:
+        raise EventTransitionError(
+            "a new branch may only start after the current line is abandoned."
         )
 
 

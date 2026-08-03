@@ -8,10 +8,14 @@ doubles; the driver supplies only environment-specific LLM/tools/storage.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from eda_platform.agents.exploration.branching import (
+    bundle_hypotheses_from_events,
+    derive_branch_constraints,
+)
 from eda_platform.agents.exploration.candidates import (
     CandidateSeed,
     DatasetExplorationProfile,
@@ -19,6 +23,7 @@ from eda_platform.agents.exploration.candidates import (
     materialize_proposal_batch,
 )
 from eda_platform.agents.exploration.executor import (
+    PROBE_LOCAL_ERROR_CODES,
     JsonlProbeJournalHooks,
     LlmResponseStore,
     NativeToolProvider,
@@ -46,23 +51,39 @@ from eda_platform.agents.exploration.supervisor import (
     ReductionOutcome,
     ScoredFrontier,
     SupervisorBudgetExhausted,
+    SupervisorCancelled,
     SupervisorInvariantError,
+    SupervisorPhase,
     ValidationOutcome,
+    phase_step_id,
 )
 from eda_platform.agents.runtime import AgentTool
 from eda_platform.agents.tool_context import HypothesisExecutionBinding
 from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.cancellation import CancellationError
 from eda_platform.core.claim_gates import GateReport, run_claim_gates
 from eda_platform.core.exploration_budget import ToolCallLedger
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
 from eda_platform.core.ids import make_artifact_id, stable_hash
+from eda_platform.core.kernel import SessionCancelled
+from eda_platform.core.llm import MalformedProviderResponseError
 from eda_platform.core.llm_ledger import logical_llm_call
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
-from eda_platform.schemas.claims import Claim, ClaimBundle
-from eda_platform.schemas.exploration import LlmCallCompletedEvent
+from eda_platform.schemas.claims import Claim, ClaimBundle, ClaimScope
+from eda_platform.schemas.exploration import BranchConstraint, LlmCallCompletedEvent
 from eda_platform.schemas.hypotheses import HypothesisProposalBatch
 from eda_platform.schemas.insights import InsightRecord, TransitionProposal
 from eda_platform.schemas.receipts import EvidenceReceipt, verify_receipt_digest
+
+# Read from the schema so the prompt and the contract cannot drift apart.
+_MAX_PROPOSALS_PER_BATCH = next(
+    constraint.max_length
+    for constraint in HypothesisProposalBatch.model_fields["proposals"].metadata
+    if hasattr(constraint, "max_length")
+)
+# One repair attempt. A model that breaks the contract twice in a row is not
+# going to be talked into it by a third copy of the same error.
+_PROPOSAL_SCHEMA_ATTEMPTS = 2
 
 
 class StructuredHypothesisProvider(Protocol):
@@ -107,6 +128,9 @@ class JournaledCandidateGenerator:
     dataset_profiles: tuple[DatasetExplorationProfile, ...]
     goal: str | None = None
     task: str = "exploration_generate_hypotheses"
+    dataset_columns: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    supported_method_families: tuple[str, ...] = ()
+    coverage_completed: Callable[[], frozenset[str]] = lambda: frozenset()
 
     def generate(self, context: PhaseContext, *, logical_step_id: str) -> CandidateBatch:
         call_id = "llm_" + stable_hash(
@@ -132,41 +156,23 @@ class JournaledCandidateGenerator:
                 )
             except BudgetExceeded as exc:
                 raise SupervisorBudgetExhausted(str(exc)) from exc
-        self.journal.append_new("llm_call_started", call_id=call_id, step_id=logical_step_id)
-        payload = self._payload(context)
-        try:
-            with logical_llm_call(call_id):
-                batch = self.provider.structured(
-                    task=self.task,
-                    schema=HypothesisProposalBatch,
-                    payload=payload,
-                )
-        except BudgetExceeded as exc:
-            self.journal.append_new(
-                "llm_call_rejected",
-                call_id=call_id,
-                error=_safe_error(exc),
-            )
-            raise SupervisorBudgetExhausted(str(exc)) from exc
-        except Exception as exc:
-            self.journal.append_new(
-                "llm_call_uncertain",
-                call_id=call_id,
-                error=_safe_error(exc),
-            )
-            raise
+        batch = self._propose(context, call_id=call_id, logical_step_id=logical_step_id)
         first_index = context.round_index * 10_000 + 1
         generated = materialize_proposal_batch(
             batch,
             first_sequence_index=first_index,
         )
-        mandatory = (
-            mandatory_probe_seeds(
+        # Replayed every round, not just round 0: a batch-limited tier can only
+        # execute part of the mandatory coverage per round, and a probe dropped
+        # from a later batch is coverage lost for the whole run.
+        explored = self.coverage_completed()
+        mandatory = tuple(
+            seed
+            for seed in mandatory_probe_seeds(
                 self.dataset_profiles,
                 first_sequence_index=first_index + len(generated),
             )
-            if context.round_index == 0
-            else ()
+            if seed.coverage_key not in explored
         )
         result = CandidateBatch((*mandatory, *generated))
         self.recovery.remember(logical_step_id, result)
@@ -178,20 +184,142 @@ class JournaledCandidateGenerator:
         )
         return result
 
-    def _payload(self, context: PhaseContext) -> dict[str, Any]:
+    def _propose(
+        self,
+        context: PhaseContext,
+        *,
+        call_id: str,
+        logical_step_id: str,
+    ) -> HypothesisProposalBatch:
+        """One proposal call, retried once when the answer breaks the schema.
+
+        A schema violation means the provider answered and the answer is
+        unusable -- the same class as unparseable tool arguments, not an unknown
+        outcome. Two unusable answers conclude the round rather than discarding
+        every round already paid for.
+
+        The last attempt deliberately leaves its call pending: the caller
+        settles it with ``llm_call_completed``, whose digest covers the durable
+        candidate batch rather than the raw provider answer. Journaling a
+        rejection there instead would clear the pending call and leave the
+        generate step with no way to be marked durably complete.
+        """
+        rejections: list[str] = []
+        last = _PROPOSAL_SCHEMA_ATTEMPTS - 1
+        for attempt in range(_PROPOSAL_SCHEMA_ATTEMPTS):
+            payload = self._payload(context, rejections=rejections)
+            self.journal.append_new(
+                "llm_call_started", call_id=call_id, step_id=logical_step_id
+            )
+            try:
+                with logical_llm_call(call_id):
+                    return self.provider.structured(
+                        task=self.task,
+                        schema=HypothesisProposalBatch,
+                        payload=payload,
+                    )
+            except BudgetExceeded as exc:
+                self.journal.append_new(
+                    "llm_call_rejected",
+                    call_id=call_id,
+                    error=_safe_error(exc),
+                )
+                raise SupervisorBudgetExhausted(str(exc)) from exc
+            except MalformedProviderResponseError as exc:
+                error = _safe_error(exc)
+                rejections.append(error)
+                if attempt < last:
+                    self.journal.append_new(
+                        "llm_call_rejected",
+                        call_id=call_id,
+                        error=error,
+                    )
+            except Exception as exc:
+                self.journal.append_new(
+                    "llm_call_uncertain",
+                    call_id=call_id,
+                    error=_safe_error(exc),
+                )
+                raise
+        return HypothesisProposalBatch(
+            concluded=True,
+            conclusion_reason=(
+                f"The proposal call broke the batch contract on all "
+                f"{_PROPOSAL_SCHEMA_ATTEMPTS} attempts "
+                f"({' | '.join(rejections)}); concluding this round on the "
+                "evidence already gathered."
+            ),
+        )
+
+    def _payload(
+        self,
+        context: PhaseContext,
+        *,
+        rejections: Sequence[str] = (),
+    ) -> dict[str, Any]:
         instruction = (
-            "Propose a small, falsifiable batch. Scores, priorities, coverage "
+            "Propose a small, falsifiable batch of at most "
+            f"{_MAX_PROPOSALS_PER_BATCH} hypotheses. Scores, priorities, coverage "
             "and identities are assigned by the system."
         )
         if self.goal is not None:
             instruction += " Every proposal must directly test the stated user goal."
+        instruction += (
+            " Every proposal must use the exact dataset ids, column names and "
+            "method_family values listed here; anything else is rejected by the "
+            "system before it can run."
+        )
         return {
             "round_index": context.round_index,
             "data_state_witness": context.data_state_witness,
             "budget_context": context.soft_countdown_context,
             "goal": self.goal,
+            "datasets": [
+                {"dataset_id": dataset_id, "columns": list(columns)}
+                for dataset_id, columns in sorted(self.dataset_columns.items())
+            ],
+            "method_families": sorted(self.supported_method_families),
             "instruction": instruction,
+            "rejected_prior_attempts": list(rejections),
         }
+
+
+@dataclass(slots=True)
+class WorkflowBranchDeriver:
+    """Live-side abandonment constraints; must equal the issuer's replay recompute."""
+
+    journal: JsonlExplorationJournal
+    recovery: CompletedStepRecoveryPort
+    state: ExplorationWorkflowState
+
+    def derive(self, context: PhaseContext) -> tuple[BranchConstraint, ...]:
+        journal_state = self.journal.rebuild()
+        if journal_state is None:
+            raise SupervisorInvariantError(
+                "branch derivation requires an initialized journal."
+            )
+        candidates: dict[str, CandidateSeed] = {}
+        for round_index in range(journal_state.rounds_started):
+            step_id = phase_step_id(
+                context.exploration_id, round_index, SupervisorPhase.GENERATE
+            )
+            batch = self.recovery.load_required(step_id)
+            if not isinstance(batch, CandidateBatch):
+                raise SupervisorInvariantError(
+                    "recovered candidate batch has the wrong type."
+                )
+            for seed in batch.candidates:
+                if isinstance(seed, CandidateSeed):
+                    candidates[seed.hypothesis_id] = seed
+        return derive_branch_constraints(
+            candidates=candidates,
+            committed_receipts=self.state.committed_receipts,
+            gate_reports=self.state.gate_reports,
+            bundle_hypotheses=bundle_hypotheses_from_events(
+                self.journal.events(), self.state.committed_receipts
+            ),
+            prior=tuple(journal_state.abandoned_constraints),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +333,7 @@ class ExplorationWorkflowComponents:
     validator: PassThroughValidatorPort
     reducer: ClaimGateReducerPort
     tool_ledger: ToolCallLedger
+    branch_deriver: WorkflowBranchDeriver
 
 
 def compose_exploration_workflow(
@@ -230,6 +359,8 @@ def compose_exploration_workflow(
     persist_state: Callable[[ExplorationWorkflowState], None] = lambda _state: None,
     stat_attempt_counts: Callable[[], Mapping[str, int]] = lambda: {},
     goal: str | None = None,
+    dataset_columns: Mapping[str, Iterable[str]] | None = None,
+    supported_method_families: Iterable[str] = (),
 ) -> ExplorationWorkflowComponents:
     """Wire real E4a control components; only provider/tools/data signals are injected."""
     if not tools:
@@ -257,6 +388,12 @@ def compose_exploration_workflow(
             recovery=recovery,
             dataset_profiles=tuple(dataset_profiles),
             goal=goal,
+            dataset_columns={
+                dataset_id: tuple(sorted(columns))
+                for dataset_id, columns in (dataset_columns or {}).items()
+            },
+            supported_method_families=tuple(sorted(supported_method_families)),
+            coverage_completed=lambda: frozenset(state.coverage_completed),
         ),
         scheduler=DeterministicSchedulerPort(
             policy=scheduler_policy,
@@ -264,6 +401,7 @@ def compose_exploration_workflow(
             signals=signals,
             state=state,
             persist_state=persist_state,
+            journal=journal,
         ),
         executor=SupervisorProbeExecutorPort(
             executor=probe_executor,
@@ -282,6 +420,9 @@ def compose_exploration_workflow(
             stat_attempt_counts=stat_attempt_counts,
         ),
         tool_ledger=tool_ledger,
+        branch_deriver=WorkflowBranchDeriver(
+            journal=journal, recovery=recovery, state=state
+        ),
     )
 
 
@@ -292,23 +433,36 @@ class DeterministicSchedulerPort:
     signals: Callable[[PhaseContext, tuple[CandidateSeed, ...]], Mapping[str, CandidateSignals]]
     state: ExplorationWorkflowState
     persist_state: Callable[[ExplorationWorkflowState], None] = lambda _state: None
+    journal: JsonlExplorationJournal | None = None
 
     def admit_and_score(self, context: PhaseContext, candidates: CandidateBatch) -> ScoredFrontier:
         typed = tuple(candidates.candidates)
         if not all(isinstance(candidate, CandidateSeed) for candidate in typed):
             raise SupervisorInvariantError("candidate batch contains a non-CandidateSeed.")
         seeds = tuple(candidate for candidate in typed if isinstance(candidate, CandidateSeed))
+        context_value = self.admission_context(context)
+        if self.journal is not None:
+            journal_state = self.journal.rebuild()
+            if journal_state is not None and journal_state.abandoned_constraints:
+                # System-owned merge: abandonment facts always reach admission,
+                # regardless of what the environment-specific builder supplies.
+                context_value = replace(
+                    context_value,
+                    abandoned_constraints=(
+                        *context_value.abandoned_constraints,
+                        *journal_state.abandoned_constraints,
+                    ),
+                )
         result = schedule_candidates(
             seeds,
             signals=self.signals(context, seeds),
-            context=self.admission_context(context),
+            context=context_value,
             policy=self.policy,
         )
-        prior_ids = {decision.hypothesis_id for decision in self.state.decisions}
-        new_decisions = tuple(
-            decision for decision in result.decisions if decision.hypothesis_id not in prior_ids
-        )
-        self.state.decisions = (*self.state.decisions, *new_decisions)
+        # Every round appends its whole batch, duplicates included: the round's
+        # frontier digest covers all of its decisions, so replay reads them back
+        # as one positional slice per round.
+        self.state.decisions = (*self.state.decisions, *result.decisions)
         self.persist_state(self.state)
         by_id = {seed.hypothesis_id: seed for seed in seeds}
         decisions = {decision.hypothesis_id: decision for decision in result.decisions}
@@ -361,6 +515,16 @@ def scheduling_decision_digest(decisions: Sequence[SchedulingDecision]) -> str:
     )
 
 
+def _probe_outcome_is_usable(execution: ProbeExecutionResult) -> bool:
+    """Whether the round may continue on what this probe already committed."""
+    if execution.status in {"completed", "limit_reached"}:
+        return True
+    return (
+        execution.status == "failed"
+        and execution.error_code in PROBE_LOCAL_ERROR_CODES
+    )
+
+
 @dataclass(slots=True)
 class SupervisorProbeExecutorPort:
     executor: ProbeExecutor
@@ -409,7 +573,18 @@ class SupervisorProbeExecutorPort:
                 )
             except BudgetExceeded as exc:
                 raise SupervisorBudgetExhausted(str(exc)) from exc
-            if execution.status != "completed":
+            except (SessionCancelled, CancellationError) as exc:
+                # Cancellation is a decision, not a defect. Escaping as a
+                # generic exception settled the run as `failed`.
+                raise SupervisorCancelled(str(exc) or "probe cancelled") from exc
+            # `limit_reached` means this probe used up its own conversation
+            # step/tool budget — an expected outcome for an eager model, not a
+            # control-plane fault. Its committed receipts are already journaled
+            # and valid, so the round proceeds with the evidence it did gather.
+            # `failed` with a probe-local code (truncation, content filter, an
+            # unresponsive model) is the same shape. Every other `failed` is an
+            # integrity fault and stays terminal.
+            if not _probe_outcome_is_usable(execution):
                 raise SupervisorInvariantError(
                     f"probe execution ended as {execution.status}: {execution.error or ''}"
                 )
@@ -470,6 +645,24 @@ class ClaimGateReducerPort:
     persist_state: Callable[[ExplorationWorkflowState], None] = lambda _state: None
     stat_attempt_counts: Callable[[], Mapping[str, int]] = lambda: {}
 
+    def reduce_without_probes(
+        self,
+        context: PhaseContext,
+        frontier: ScoredFrontier,
+        *,
+        logical_step_id: str,
+    ) -> ReductionOutcome:
+        """No probes ran, so no insight moves; only the round's decisions need
+        binding to the journal through the frontier digest."""
+        del context, logical_step_id
+        return ReductionOutcome(
+            transitions=(),
+            frontier=frontier,
+            ledger_digest=final_reduction_state_digest(self.state),
+            goal_satisfied=self.goal_satisfied(self.state),
+            coverage_target_met=self.coverage_target_met(self.state),
+        )
+
     def reduce(
         self,
         context: PhaseContext,
@@ -487,6 +680,9 @@ class ClaimGateReducerPort:
             if isinstance(item.payload, CandidateSeed)
         }
         transitions: list[str] = []
+        admitted_before = set(self.state.admitted_bundles)
+        journal_state = self.journal.rebuild()
+        recorded_verdicts = {} if journal_state is None else dict(journal_state.gate_verdicts)
         bindings = dict(validated.payload.receipt_hypothesis_bindings)
         if len(bindings) != len(validated.payload.receipt_hypothesis_bindings):
             raise SupervisorInvariantError("one receipt has multiple hypothesis bindings.")
@@ -515,10 +711,13 @@ class ClaimGateReducerPort:
                     raise SupervisorInvariantError(
                         "receipt hypothesis outcome conflicts with its execution binding."
                     )
-                if statistics is not None and statistics.hypothesis_outcome == "contradicts":
-                    new_contradicting.append(receipt.receipt_id)
-                else:
+                outcome = None if statistics is None else statistics.hypothesis_outcome
+                # An unadjudicated receipt is a legitimate exploratory claim, so
+                # it stays in the bundle; it is simply not evidence either way.
+                if outcome == "supports":
                     new_supporting.append(receipt.receipt_id)
+                elif outcome == "contradicts":
+                    new_contradicting.append(receipt.receipt_id)
                 limitations.extend(receipt.method.warnings)
                 if statistics is None or statistics.hypothesis_outcome is None:
                     limitations.append(
@@ -542,11 +741,17 @@ class ClaimGateReducerPort:
                 run_witness=context.data_state_witness,
                 stat_attempt_counts=self.stat_attempt_counts(),
             )
-            self.journal.append_new(
-                "gate_verdict",
-                claim_bundle_id=bundle.claim_bundle_id,
-                verdict="passed" if report.passed else "rejected",
-            )
+            verdict = "passed" if report.passed else "rejected"
+            # A crash between the verdict and reduction_committed replays this
+            # whole phase; a duplicate verdict event would desynchronize the
+            # issuer's positional gate cursor for good.
+            if recorded_verdicts.get(bundle.claim_bundle_id) != verdict:
+                self.journal.append_new(
+                    "gate_verdict",
+                    claim_bundle_id=bundle.claim_bundle_id,
+                    verdict=verdict,
+                )
+                recorded_verdicts[bundle.claim_bundle_id] = verdict
             self.state.gate_reports[bundle.claim_bundle_id] = report
             if not report.passed:
                 continue
@@ -573,6 +778,10 @@ class ClaimGateReducerPort:
                 # and reduction_committed adopts the prior result. It must not
                 # manufacture a second, supposedly independent reinforcement.
                 insight = prior
+            elif not new_supporting and not new_contradicting:
+                # The round produced evidence but adjudicated nothing; the
+                # bundle admission is the only ledger movement it earned.
+                continue
             else:
                 insight = reduce_insight(
                     proposal,
@@ -582,6 +791,8 @@ class ClaimGateReducerPort:
                     expected_witness=context.data_state_witness,
                     round_index=context.round_index,
                     require_typed_hypothesis_outcome=True,
+                    statement=candidate.proposal.statement,
+                    rationale=candidate.proposal.rationale,
                 )
             self.state.insights[insight.insight_id] = insight
             transitions.append(insight.status)
@@ -593,6 +804,7 @@ class ClaimGateReducerPort:
             ledger_digest=final_reduction_state_digest(self.state),
             goal_satisfied=self.goal_satisfied(self.state),
             coverage_target_met=self.coverage_target_met(self.state),
+            admitted_bundle_count=len(set(self.state.admitted_bundles) - admitted_before),
         )
 
 
@@ -696,6 +908,9 @@ def _claim_bundle(candidate: CandidateSeed, receipts: Sequence[EvidenceReceipt])
             ),
             uncertainty=("; ".join(receipt.method.warnings) or None),
             limitations=tuple(receipt.method.warnings),
+            scope=(
+                _absence_scope(receipt) if fact.support_type == "absence" else None
+            ),
         )
         for receipt in receipts
         for fact in receipt.facts
@@ -725,6 +940,17 @@ def _claim_bundle(candidate: CandidateSeed, receipts: Sequence[EvidenceReceipt])
             else "exploratory"
         ),
         claims=claims,
+    )
+
+
+def _absence_scope(receipt: EvidenceReceipt) -> ClaimScope:
+    """An absence claim may only declare what its own receipt actually scanned,
+    so the scope is copied verbatim — the gate compares the two for identity."""
+    return ClaimScope(
+        dataset_ids=receipt.scope.dataset_ids,
+        columns=receipt.scope.columns,
+        filters=receipt.scope.filters,
+        time_range=receipt.scope.time_range,
     )
 
 

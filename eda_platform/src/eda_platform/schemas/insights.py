@@ -90,6 +90,10 @@ class InsightRecord(BaseModel):
     family: InsightFamily
     status: InsightStatus
     trust_level: InsightTrustLevel
+    # Optional so records persisted before 2026-08-03 keep loading; the report
+    # renderer falls back to a placeholder when absent.
+    statement: str | None = None
+    rationale: str | None = None
     claim_bundle_id: str = Field(min_length=1)
     supporting_receipt_ids: tuple[str, ...] = ()
     contradicting_receipt_ids: tuple[str, ...] = ()

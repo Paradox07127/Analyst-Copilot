@@ -56,6 +56,15 @@ class SessionBudgetPolicyModel(BaseModel):
         return SessionBudgetPolicy(**self.model_dump())
 
 
+class ExplorationBranchPolicy(BaseModel):
+    """Stagnation-triggered branching caps (E6). Absent means branching is off."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trigger_stagnant_rounds: int = Field(ge=1)
+    max_branches: int = Field(ge=1)
+
+
 class ExplorationBudgetPolicy(BaseModel):
     """Multi-dimensional hard limits for one exploration run (plan §4.2)."""
 
@@ -68,6 +77,7 @@ class ExplorationBudgetPolicy(BaseModel):
     max_result_cells: int | None = Field(default=None, ge=1)
     idle_timeout_seconds: float = Field(gt=0)
     max_rounds: int = Field(ge=1)
+    branching: ExplorationBranchPolicy | None = None
 
     @model_validator(mode="after")
     def _per_kind_caps_positive(self) -> ExplorationBudgetPolicy:

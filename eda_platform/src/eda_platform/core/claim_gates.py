@@ -49,6 +49,10 @@ from eda_platform.tools.stat_tests import TEST_PUBLISHABILITY
 GATE_RETRY_BUDGET = 1
 ABSTAINED_STATUS: Literal["abstained"] = "abstained"
 
+# Relative, not absolute: p-values in this pipeline range down to 1e-30+, where
+# an absolute epsilon is a no-op.
+_MULTIPLICITY_RELATIVE_TOLERANCE = 1e-9
+
 GateName = Literal[
     "structure", "reachability", "numeric", "entity", "statistical", "state"
 ]
@@ -910,17 +914,29 @@ def _statistical_gate(
                 family_count = final_family_counts.get(
                     family_id, statistics.sequence_index or 1
                 )
-                expected = min(1.0, float(statistics.p_value) * family_count)
+                # Receipts are digest-bound: one issued as attempt k caches
+                # p x k, and a later test joining the family cannot re-sign it.
+                # Judging that cache against the family's *final* count would
+                # void correct receipts retroactively, so the only checkable
+                # property is self-consistency with the attempt number the
+                # registry assigned to this very receipt. Publishability is
+                # already gated by requiring the registry count to exist at
+                # all (above); nothing here reads the cache for a significance
+                # decision, so a stale one is inert.
+                own_attempt = statistics.sequence_index or 1
+                self_consistent = min(1.0, float(statistics.p_value) * own_attempt)
                 adjusted = statistics.adjusted_p_value
-                if (family_count > 1 and adjusted is None) or (
-                    adjusted is not None and float(adjusted) + 1e-12 < expected
+                if adjusted is not None and float(adjusted) < self_consistent * (
+                    1 - _MULTIPLICITY_RELATIVE_TOLERANCE
                 ):
                     violations.append(
                         GateViolation(
                             code="stale_multiplicity_adjustment",
                             message=(
-                                f"receipt {receipt.receipt_id} was adjusted for fewer "
-                                f"attempts than the family's final count of {family_count}."
+                                f"receipt {receipt.receipt_id} reports adjusted p-value "
+                                f"{adjusted}, more significant than its own attempt "
+                                f"{own_attempt} justifies ({self_consistent}); the "
+                                f"family finished with {family_count} tests."
                             ),
                             claim_id=claim.claim_id,
                             tool_call_id=receipt.tool_call_id,

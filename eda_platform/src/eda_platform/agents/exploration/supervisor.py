@@ -26,6 +26,8 @@ from typing import Literal, Protocol
 
 from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.exploration import (
+    MAIN_LINE_ID,
+    BranchConstraint,
     ExplorationGracefulStopReason,
     ExplorationStopReason,
 )
@@ -80,6 +82,8 @@ class SupervisorJournalState:
     remaining_llm_call_budget: int | None = None
     remaining_tool_call_budget: int = 0
     consecutive_no_progress: int = 0
+    consecutive_empty_frontier: int = 0
+    consecutive_no_adjudication: int = 0
     completed_step_ids: frozenset[str] = field(default_factory=frozenset)
     completed_probe_fingerprints: frozenset[str] = field(default_factory=frozenset)
     uncertain_call_ids: frozenset[str] = field(default_factory=frozenset)
@@ -91,6 +95,9 @@ class SupervisorJournalState:
     frontier_digest: str | None = None
     ledger_digest: str | None = None
     reduction_digest: str | None = None
+    active_branch_id: str | None = None
+    current_line_abandoned: bool = False
+    branches_started: int = 0
 
     def __post_init__(self) -> None:
         if not self.exploration_id or not self.data_state_witness:
@@ -101,6 +108,9 @@ class SupervisorJournalState:
             "remaining_round_budget": self.remaining_round_budget,
             "remaining_tool_call_budget": self.remaining_tool_call_budget,
             "consecutive_no_progress": self.consecutive_no_progress,
+            "consecutive_no_adjudication": self.consecutive_no_adjudication,
+            "consecutive_empty_frontier": self.consecutive_empty_frontier,
+            "branches_started": self.branches_started,
         }
         if self.remaining_llm_call_budget is not None:
             counts["remaining_llm_call_budget"] = self.remaining_llm_call_budget
@@ -128,10 +138,23 @@ class SupervisorJournalState:
 class SupervisorConfig:
     admission_score_threshold: float
     synthesize_on_graceful_stop: bool = True
+    # E6: stagnation-triggered branching. Both fields set = enabled; both unset
+    # = the pre-E6 termination behavior, unchanged.
+    branch_trigger_stagnant_rounds: int | None = None
+    max_branches: int = 0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.admission_score_threshold):
             raise ValueError("admission_score_threshold must be finite.")
+        if (self.branch_trigger_stagnant_rounds is None) != (self.max_branches == 0):
+            raise ValueError(
+                "branch mode requires both branch_trigger_stagnant_rounds "
+                "and max_branches (or neither)."
+            )
+        if self.branch_trigger_stagnant_rounds is not None and (
+            self.branch_trigger_stagnant_rounds < 1 or self.max_branches < 1
+        ):
+            raise ValueError("branch trigger and budget must be positive.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +165,9 @@ class PhaseContext:
     data_state_witness: str
     soft_countdown_context: str
     completed_step_ids: frozenset[str]
+    # Set only on terminal renders where the stop latched mid-round, so no
+    # settled-round event carries the reason yet (seed-6 regression).
+    terminal_reason: str | None = None
 
     def for_phase(self, phase: SupervisorPhase) -> PhaseContext:
         return PhaseContext(
@@ -151,6 +177,7 @@ class PhaseContext:
             data_state_witness=self.data_state_witness,
             soft_countdown_context=self.soft_countdown_context,
             completed_step_ids=self.completed_step_ids,
+            terminal_reason=self.terminal_reason,
         )
 
 
@@ -214,10 +241,16 @@ class ReductionOutcome:
     ledger_digest: str
     goal_satisfied: bool = False
     coverage_target_met: bool = False
+    # Claim bundles that newly passed the evidence gate this round.  Admissions
+    # are progress on their own: a round can pass gates and commit receipts
+    # without any insight in the ledger changing state.
+    admitted_bundle_count: int = 0
 
     def __post_init__(self) -> None:
         if not self.ledger_digest:
             raise ValueError("ledger_digest cannot be empty.")
+        if isinstance(self.admitted_bundle_count, bool) or self.admitted_bundle_count < 0:
+            raise ValueError("admitted_bundle_count must be a non-negative integer.")
 
 
 def reduction_outcome_digest(value: ReductionOutcome) -> str:
@@ -237,6 +270,7 @@ def reduction_outcome_digest(value: ReductionOutcome) -> str:
             "ledger_digest": value.ledger_digest,
             "goal_satisfied": value.goal_satisfied,
             "coverage_target_met": value.coverage_target_met,
+            "admitted_bundle_count": value.admitted_bundle_count,
         },
         length=32,
     )
@@ -264,7 +298,17 @@ class SupervisorJournalPort(Protocol):
 
     def snapshot(self) -> SupervisorJournalState: ...
 
-    def start_round(self, round_index: int) -> SupervisorJournalState: ...
+    def start_round(
+        self, round_index: int, *, branch_id: str | None = None
+    ) -> SupervisorJournalState: ...
+
+    def abandon_branch(
+        self,
+        *,
+        branch_id: str,
+        round_index: int,
+        constraints: tuple[BranchConstraint, ...],
+    ) -> SupervisorJournalState: ...
 
     def commit_reduction(
         self, *, frontier_digest: str, ledger_digest: str, reduction_digest: str
@@ -276,6 +320,8 @@ class SupervisorJournalPort(Protocol):
         *,
         progress: bool,
         terminal_reason: ExplorationGracefulStopReason | None,
+        frontier_empty: bool = False,
+        adjudicated_transitions: int = 0,
     ) -> SupervisorJournalState: ...
 
     def mark_paused(self) -> SupervisorJournalState: ...
@@ -299,6 +345,12 @@ class BudgetPort(Protocol):
 
 class ControlPort(Protocol):
     def checkpoint(self, transition: PhaseTransition) -> None: ...
+
+
+class BranchConstraintPort(Protocol):
+    """Deterministic "tried + why it failed" derivation for one abandonment."""
+
+    def derive(self, context: PhaseContext) -> tuple[BranchConstraint, ...]: ...
 
 
 class CandidateGeneratorPort(Protocol):
@@ -334,6 +386,14 @@ class ReducerPort(Protocol):
         self,
         context: PhaseContext,
         validated: ValidationOutcome,
+        frontier: ScoredFrontier,
+        *,
+        logical_step_id: str,
+    ) -> ReductionOutcome: ...
+
+    def reduce_without_probes(
+        self,
+        context: PhaseContext,
         frontier: ScoredFrontier,
         *,
         logical_step_id: str,
@@ -446,7 +506,10 @@ class ExplorationSupervisor:
         reducer: ReducerPort,
         finalizer: FinalizerPort,
         recovery: CompletedStepRecoveryPort,
+        branch_deriver: BranchConstraintPort | None = None,
     ) -> None:
+        if config.branch_trigger_stagnant_rounds is not None and branch_deriver is None:
+            raise ValueError("branch mode requires a branch constraint deriver.")
         self._config = config
         self._journal = journal
         self._witness = witness
@@ -459,6 +522,7 @@ class ExplorationSupervisor:
         self._reducer = reducer
         self._finalizer = finalizer
         self._recovery = recovery
+        self._branch_deriver = branch_deriver
 
     def run(self) -> SupervisorRunResult:
         """Run until a durable terminal event or a resumable pause is reached."""
@@ -479,7 +543,7 @@ class ExplorationSupervisor:
         except _WitnessChanged:
             return self._terminal(cursor, "state_witness_changed", error=None)
         except SupervisorBudgetExhausted as exc:
-            return self._terminal(cursor, "budget_exhausted", error=str(exc) or None)
+            return self._budget_exhausted_terminal(cursor, error=str(exc) or None)
         except Exception as exc:
             # Any unclassified dependency/recovery fault is terminal.  No partial
             # result is presented as a successful/no-information exploration.
@@ -570,7 +634,11 @@ class ExplorationSupervisor:
             return self._raise_witness_changed()
 
         if state.current_round_index is None:
-            state = self._journal.start_round(state.rounds_started)
+            if state.current_line_abandoned:
+                branch_id = f"br_{state.branches_started + 1}"
+            else:
+                branch_id = state.active_branch_id
+            state = self._journal.start_round(state.rounds_started, branch_id=branch_id)
         round_index = state.current_round_index
         if round_index is None:
             raise SupervisorInvariantError("journal did not open the requested round.")
@@ -632,6 +700,38 @@ class ExplorationSupervisor:
             raise SupervisorInvariantError("journal did not commit reduction.")
         return result
 
+    def _reduce_without_probes(
+        self, context: PhaseContext, frontier: ScoredFrontier
+    ) -> ReductionOutcome:
+        step_id = phase_step_id(
+            context.exploration_id, context.round_index, SupervisorPhase.REDUCE
+        )
+        result = self._reducer.reduce_without_probes(
+            context, frontier, logical_step_id=step_id
+        )
+        self._require_type(result, ReductionOutcome, "probe-free reduction outcome")
+        if result.transitions:
+            raise SupervisorInvariantError(
+                "a probe-free reduction cannot report insight transitions."
+            )
+        if result.admitted_bundle_count:
+            raise SupervisorInvariantError(
+                "a probe-free reduction cannot admit claim bundles."
+            )
+        if result.frontier is not frontier:
+            raise SupervisorInvariantError(
+                "a probe-free reduction must carry the scheduler's frontier."
+            )
+        self._recovery.remember(step_id, result)
+        state = self._journal.commit_reduction(
+            frontier_digest=result.frontier.digest,
+            ledger_digest=result.ledger_digest,
+            reduction_digest=reduction_outcome_digest(result),
+        )
+        if not state.current_round_reduction_committed:
+            raise SupervisorInvariantError("journal did not commit reduction.")
+        return result
+
     def _recover_reduction(self, context: PhaseContext) -> ReductionOutcome:
         step_id = phase_step_id(
             context.exploration_id, context.round_index, SupervisorPhase.REDUCE
@@ -655,13 +755,19 @@ class ExplorationSupervisor:
     ) -> SupervisorRunResult | None:
         context = self._require_context(cursor)
         before_settle = self._journal.snapshot()
+        adjudicated_transitions = sum(
+            1
+            for transition in reduction.transitions
+            if transition in _PROGRESS_TRANSITIONS
+        )
         progress = bool(
             before_settle.current_round_receipt_ids
-            and _PROGRESS_TRANSITIONS.intersection(reduction.transitions)
+            and (adjudicated_transitions > 0 or reduction.admitted_bundle_count > 0)
         )
-        terminal_reason = self._terminal_reason_after_settle(
+        terminal_reason, should_branch = self._settle_decision(
             before_settle,
             progress=progress,
+            adjudicated_transitions=adjudicated_transitions,
             frontier=reduction.frontier,
             goal_satisfied=(
                 reduction.goal_satisfied or reduction.coverage_target_met
@@ -671,10 +777,14 @@ class ExplorationSupervisor:
             context.round_index,
             progress=progress,
             terminal_reason=terminal_reason,
+            frontier_empty=not reduction.frontier.items,
+            adjudicated_transitions=adjudicated_transitions,
         )
 
         if terminal_reason is not None:
             return self._graceful_terminal(cursor, terminal_reason, reduction)
+        if should_branch:
+            self._abandon_current_line(cursor)
         self._move(cursor, SupervisorPhase.ORIENT)
         cursor.context = None
         cursor.reduction = None
@@ -683,45 +793,100 @@ class ExplorationSupervisor:
     def _settle_empty_frontier(
         self, cursor: _Cursor, frontier: ScoredFrontier
     ) -> SupervisorRunResult | None:
-        context = self._require_context(cursor)
-        before_settle = self._journal.snapshot()
-        terminal_reason = self._terminal_reason_after_settle(
-            before_settle,
-            progress=False,
-            frontier=frontier,
-            goal_satisfied=False,
-        )
-        self._journal.settle_round(
-            context.round_index,
-            progress=False,
-            terminal_reason=terminal_reason,
-        )
-        if terminal_reason is not None:
-            return self._terminal(cursor, terminal_reason, error=None)
-        self._move(cursor, SupervisorPhase.ORIENT)
-        cursor.context = None
-        return None
+        """Commit a probe-free reduction, then settle like any other round.
 
-    def _terminal_reason_after_settle(
+        The round still produced scheduling decisions, and ``frontier_digest``
+        on the reduction event is the only thing that binds them to the journal;
+        settling without one leaves them unverifiable (the E4a issuer rejects
+        such a root). Routing through the normal settle path also keeps the
+        finalizer — and therefore the report artifact — on the terminal edge.
+        """
+        context = self._require_context(cursor)
+        self._move(cursor, SupervisorPhase.REDUCE)
+        reduction = self._reduce_without_probes(
+            self._fresh_context(context, SupervisorPhase.REDUCE), frontier
+        )
+        cursor.reduction = reduction
+        return self._settle_reduction(cursor, reduction)
+
+    def _settle_decision(
         self,
         state: SupervisorJournalState,
         *,
         progress: bool,
+        adjudicated_transitions: int,
         frontier: ScoredFrontier,
         goal_satisfied: bool,
-    ) -> ExplorationGracefulStopReason | None:
+    ) -> tuple[ExplorationGracefulStopReason | None, bool]:
+        """Terminal reason plus whether to switch to a new branch instead.
+
+        Branch mode is only ever entered from the system stagnation signal; no
+        component or provider input reaches this decision (plan E6 gate 1).
+        """
         if goal_satisfied:
-            return "completed"
+            return "completed", False
+        # Predicted exactly as the journal will record it, so the decision and
+        # the durable counters can never disagree by one round.
         consecutive_no_progress = 0 if progress else state.consecutive_no_progress + 1
-        highest = frontier.highest_priority
-        below_admission = (
-            highest is None or highest < self._config.admission_score_threshold
+        consecutive_empty_frontier = (
+            state.consecutive_empty_frontier + 1 if not frontier.items else 0
         )
-        if consecutive_no_progress >= 2 and below_admission:
-            return "no_new_information"
+        highest = frontier.highest_priority
+        # "No candidate" is not "every candidate is worthless": a single empty
+        # frontier is a scheduling gap, and only a repeated one is exhaustion.
+        below_admission = (
+            highest is not None and highest < self._config.admission_score_threshold
+        )
+        line_exhausted = below_admission or consecutive_empty_frontier >= 2
+        trigger = self._config.branch_trigger_stagnant_rounds
+        # Plan-B soft stop (user decision 2026-08-03): gate admissions still
+        # count as progress, but two straight rounds without one adjudicated
+        # (new/reinforced/refuted) transition end the run — the seed-6 mode of
+        # burning to the hard cap on admissions alone. Branch-enabled runs
+        # keep the E6 stagnation machinery authoritative instead.
+        consecutive_no_adjudication = (
+            0
+            if adjudicated_transitions > 0
+            else state.consecutive_no_adjudication + 1
+        )
+        if trigger is None and consecutive_no_adjudication >= 2:
+            return "no_new_information", False
+        if trigger is None:
+            if consecutive_no_progress >= 2 and line_exhausted:
+                return "no_new_information", False
+        elif consecutive_no_progress >= trigger and line_exhausted:
+            branches_remain = state.branches_started < self._config.max_branches
+            if branches_remain and state.remaining_round_budget > 0:
+                return None, True
+            if not branches_remain:
+                return "no_new_information", False
         if state.remaining_round_budget <= 0:
-            return "budget_exhausted"
-        return None
+            return "budget_exhausted", False
+        return None, False
+
+    def _abandon_current_line(self, cursor: _Cursor) -> None:
+        context = self._require_context(cursor)
+        deriver = self._branch_deriver
+        if deriver is None:
+            raise SupervisorInvariantError(
+                "branch mode requires a branch constraint deriver."
+            )
+        state = self._journal.snapshot()
+        line_id = state.active_branch_id or MAIN_LINE_ID
+        constraints = deriver.derive(context)
+        if not isinstance(constraints, tuple) or not all(
+            isinstance(item, BranchConstraint) for item in constraints
+        ):
+            raise SupervisorInvariantError(
+                "branch constraints must be a tuple of BranchConstraint."
+            )
+        after = self._journal.abandon_branch(
+            branch_id=line_id,
+            round_index=context.round_index,
+            constraints=constraints,
+        )
+        if not after.current_line_abandoned:
+            raise SupervisorInvariantError("journal did not record the abandonment.")
 
     def _resume_settled_terminal(
         self,
@@ -750,17 +915,73 @@ class ExplorationSupervisor:
         cursor.reduction = reduction
         return self._graceful_terminal(cursor, reason, reduction)
 
+    def _budget_exhausted_terminal(
+        self,
+        cursor: _Cursor,
+        *,
+        error: str | None,
+    ) -> SupervisorRunResult:
+        """Budget death keeps the report the max_rounds path would have produced.
+
+        Synthesis is skipped on purpose — the budget that just latched is the
+        same one synthesis would spend — so the deterministic renderer runs
+        instead.  A reduction that cannot be recovered falls back to the bare
+        terminal rather than turning a budget stop into a failure.
+        """
+        state = self._journal.snapshot()
+        if state.rounds_settled > 0:
+            try:
+                context = PhaseContext(
+                    exploration_id=state.exploration_id,
+                    round_index=state.rounds_settled - 1,
+                    phase=SupervisorPhase.ORIENT,
+                    data_state_witness=state.data_state_witness,
+                    soft_countdown_context=render_soft_countdown(
+                        self._budget.remaining(state)
+                    ),
+                    completed_step_ids=state.completed_step_ids,
+                    # A mid-round latch leaves no settled terminal reason in
+                    # the journal; the renderer accepts this one instead.
+                    terminal_reason="budget_exhausted",
+                )
+                reduction = self._recover_reduction(context)
+                cursor.context = context
+                cursor.reduction = reduction
+                return self._graceful_terminal(
+                    cursor,
+                    "budget_exhausted",
+                    reduction,
+                    deterministic_only=True,
+                    error=error,
+                )
+            except Exception:
+                cursor.context = None
+                cursor.reduction = None
+        return self._terminal(cursor, "budget_exhausted", error=error)
+
     def _graceful_terminal(
         self,
         cursor: _Cursor,
         reason: ExplorationStopReason,
         reduction: ReductionOutcome,
+        *,
+        deterministic_only: bool = False,
+        error: str | None = None,
     ) -> SupervisorRunResult:
-        if not self._config.synthesize_on_graceful_stop:
-            return self._terminal(cursor, reason, error=None)
+        if not (self._config.synthesize_on_graceful_stop or deterministic_only):
+            return self._terminal(cursor, reason, error=error)
         context = self._require_context(cursor)
         self._move(cursor, SupervisorPhase.SYNTHESIZE)
         synth_context = self._fresh_context(context, SupervisorPhase.SYNTHESIZE)
+        if deterministic_only:
+            outcome = self._require_type(
+                self._finalizer.render_deterministic(synth_context, reduction),
+                FinalizationOutcome,
+                "deterministic finalization outcome",
+            )
+            return self._terminal(
+                cursor, reason, error=error, report_ref=outcome.report_ref
+            )
         step_id = phase_step_id(
             context.exploration_id, context.round_index, SupervisorPhase.SYNTHESIZE
         )
@@ -792,7 +1013,7 @@ class ExplorationSupervisor:
         return self._terminal(
             cursor,
             reason,
-            error=None,
+            error=error,
             report_ref=outcome.report_ref,
         )
 
@@ -900,6 +1121,7 @@ class ExplorationSupervisor:
             data_state_witness=base.data_state_witness,
             soft_countdown_context=base.soft_countdown_context,
             completed_step_ids=state.completed_step_ids,
+            terminal_reason=base.terminal_reason,
         )
 
     @staticmethod

@@ -30,6 +30,7 @@ from eda_platform.core.exploration_journal import (
     sealed_policy,
 )
 from eda_platform.schemas.exploration import (
+    BranchConstraint,
     ExplorationPolicy,
     ExplorationStateUnavailableError,
     ExplorationStopReason,
@@ -39,6 +40,7 @@ from eda_platform.schemas.exploration import (
 )
 from eda_platform.schemas.exploration_budget import (
     BudgetCapIncrease,
+    ExplorationBranchPolicy,
     ExplorationBudgetPolicy,
     SessionBudgetPolicyModel,
 )
@@ -287,6 +289,63 @@ def test_pending_operations_are_mutually_exclusive(tmp_path: Path) -> None:
         journal.append_new("llm_call_started", call_id="call-1")
     with pytest.raises(EventTransitionError, match="pending"):
         journal.append_new("round_settled", round_index=0, progress=False)
+
+
+def test_round_settled_tracks_the_consecutive_empty_frontier_streak(
+    tmp_path: Path,
+) -> None:
+    """An empty frontier is its own signal, counted separately from
+    no-progress rounds, and any non-empty round clears the streak."""
+    journal = _journal(tmp_path)
+    journal.append_new("round_started", round_index=0)
+    state = journal.append_new(
+        "round_settled", round_index=0, progress=False, frontier_empty=True
+    )
+    assert state.consecutive_empty_frontier == 1
+    assert state.consecutive_no_progress == 1
+
+    journal.append_new("round_started", round_index=1)
+    state = journal.append_new(
+        "round_settled", round_index=1, progress=False, frontier_empty=True
+    )
+    assert state.consecutive_empty_frontier == 2
+
+    journal.append_new("round_started", round_index=2)
+    state = journal.append_new("round_settled", round_index=2, progress=False)
+    assert state.consecutive_empty_frontier == 0
+    assert state.consecutive_no_progress == 3
+
+
+def test_round_settled_tracks_the_no_adjudication_streak(tmp_path: Path) -> None:
+    """Plan-B soft stop: the streak counts rounds with zero adjudicated
+    transitions, resets on any adjudication, and treats legacy events (no
+    field) as movement so resumed old journals never soft-stop retroactively."""
+    journal = _journal(tmp_path, policy=_policy(budget=_budget(max_rounds=9)))
+    journal.append_new("round_started", round_index=0)
+    state = journal.append_new(
+        "round_settled", round_index=0, progress=True, adjudicated_transitions=0
+    )
+    assert state.consecutive_no_adjudication == 1
+
+    # Legacy event without the field: counted as movement, streak resets.
+    journal.append_new("round_started", round_index=1)
+    state = journal.append_new("round_settled", round_index=1, progress=True)
+    assert state.consecutive_no_adjudication == 0
+
+    journal.append_new("round_started", round_index=2)
+    state = journal.append_new(
+        "round_settled", round_index=2, progress=True, adjudicated_transitions=0
+    )
+    assert state.consecutive_no_adjudication == 1
+
+    journal.append_new("round_started", round_index=3)
+    state = journal.append_new(
+        "round_settled", round_index=3, progress=True, adjudicated_transitions=2
+    )
+    assert state.consecutive_no_adjudication == 0
+
+    # And a resume rebuilds the same streak from disk.
+    assert journal.rebuild().consecutive_no_adjudication == 0
 
 
 def test_budget_counters_decrement_and_reject_at_zero(tmp_path: Path) -> None:
@@ -893,3 +952,179 @@ def test_initialize_is_idempotent_and_fails_closed_on_identity_drift(
             code_fingerprint="code-v1",
             data_state_witness="dsw1_test",
         )
+
+
+# ------------------------------------------------------------- E6 branching
+
+
+def _branch_budget(**overrides: object) -> ExplorationBudgetPolicy:
+    fields: dict[str, object] = {
+        "branching": ExplorationBranchPolicy(
+            trigger_stagnant_rounds=2, max_branches=2
+        ),
+        "max_rounds": 8,
+    }
+    fields.update(overrides)
+    return _budget(**fields)
+
+
+def _branch_journal(
+    tmp_path: Path, **budget_overrides: object
+) -> JsonlExplorationJournal:
+    return _journal(
+        tmp_path, policy=_policy(budget=_branch_budget(**budget_overrides))
+    )
+
+
+def _settle_no_progress_round(
+    journal: JsonlExplorationJournal, round_index: int, *, branch_id: str | None = None
+) -> None:
+    journal.append_new("round_started", round_index=round_index, branch_id=branch_id)
+    journal.append_new("round_settled", round_index=round_index, progress=False)
+
+
+def test_branch_abandoned_requires_the_system_stagnation_signal(
+    tmp_path: Path,
+) -> None:
+    """A provider (or buggy driver) cannot declare branch mode: the reducer
+    rejects abandonment unless consecutive no-progress rounds reached the
+    policy trigger."""
+    journal = _branch_journal(tmp_path)
+    _settle_no_progress_round(journal, 0)
+    with pytest.raises(EventTransitionError, match="stagnation"):
+        journal.append_new(
+            "branch_abandoned", branch_id="main", round_index=0, constraints=()
+        )
+
+
+def test_branch_abandonment_switches_line_and_resets_stagnation(
+    tmp_path: Path,
+) -> None:
+    journal = _branch_journal(tmp_path)
+    _settle_no_progress_round(journal, 0)
+    _settle_no_progress_round(journal, 1)
+    state = journal.append_new(
+        "branch_abandoned", branch_id="main", round_index=1, constraints=()
+    )
+    assert state.consecutive_no_progress == 0
+    assert state.abandoned_line_ids == ["main"]
+
+    # The abandoned trunk cannot be continued; the next round must open br_1.
+    with pytest.raises(EventTransitionError, match="branch"):
+        journal.append_new("round_started", round_index=2)
+    with pytest.raises(EventTransitionError, match="br_1"):
+        journal.append_new("round_started", round_index=2, branch_id="br_2")
+    state = journal.append_new("round_started", round_index=2, branch_id="br_1")
+    assert state.active_branch_id == "br_1"
+    journal.append_new("round_settled", round_index=2, progress=False)
+    # An open branch keeps its id on every subsequent round.
+    with pytest.raises(EventTransitionError, match="active branch"):
+        journal.append_new("round_started", round_index=3)
+
+
+def test_branch_events_are_rejected_when_branching_is_disabled(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    _settle_no_progress_round(journal, 0)
+    _settle_no_progress_round(journal, 1)
+    with pytest.raises(EventTransitionError, match="disabled"):
+        journal.append_new(
+            "branch_abandoned", branch_id="main", round_index=1, constraints=()
+        )
+    with pytest.raises(EventTransitionError, match="disabled"):
+        journal.append_new("round_started", round_index=2, branch_id="br_1")
+
+
+def test_no_new_information_requires_branch_exhaustion(tmp_path: Path) -> None:
+    journal = _branch_journal(tmp_path, branching=ExplorationBranchPolicy(
+        trigger_stagnant_rounds=2, max_branches=1
+    ))
+    _settle_no_progress_round(journal, 0)
+    journal.append_new("round_started", round_index=1)
+    with pytest.raises(EventTransitionError, match="exhaust"):
+        journal.append_new(
+            "round_settled",
+            round_index=1,
+            progress=False,
+            terminal_reason="no_new_information",
+        )
+    journal.append_new("round_settled", round_index=1, progress=False)
+    journal.append_new(
+        "branch_abandoned", branch_id="main", round_index=1, constraints=()
+    )
+    _settle_no_progress_round(journal, 2, branch_id="br_1")
+    journal.append_new("round_started", round_index=3, branch_id="br_1")
+    # br_1 is the last allowed branch: terminating is now legal.
+    state = journal.append_new(
+        "round_settled",
+        round_index=3,
+        progress=False,
+        terminal_reason="no_new_information",
+    )
+    assert state.pending_terminal_reason == "no_new_information"
+
+
+def test_branch_budget_and_line_identity_fail_closed(tmp_path: Path) -> None:
+    journal = _branch_journal(tmp_path, branching=ExplorationBranchPolicy(
+        trigger_stagnant_rounds=2, max_branches=1
+    ))
+    _settle_no_progress_round(journal, 0)
+    _settle_no_progress_round(journal, 1)
+    with pytest.raises(EventTransitionError, match="round_index"):
+        journal.append_new(
+            "branch_abandoned", branch_id="main", round_index=0, constraints=()
+        )
+    with pytest.raises(EventTransitionError, match="line"):
+        journal.append_new(
+            "branch_abandoned", branch_id="br_1", round_index=1, constraints=()
+        )
+    journal.append_new(
+        "branch_abandoned", branch_id="main", round_index=1, constraints=()
+    )
+    with pytest.raises(EventTransitionError, match="abandoned"):
+        journal.append_new(
+            "branch_abandoned", branch_id="main", round_index=1, constraints=()
+        )
+    _settle_no_progress_round(journal, 2, branch_id="br_1")
+    _settle_no_progress_round(journal, 3, branch_id="br_1")
+    # max_branches=1: abandoning br_1 would leave no successor to branch into.
+    with pytest.raises(EventTransitionError, match="budget"):
+        journal.append_new(
+            "branch_abandoned", branch_id="br_1", round_index=3, constraints=()
+        )
+
+
+def test_branch_id_schema_caps_depth_at_two(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        RoundStartedEvent(
+            seq=1, exploration_id="xpl_test", round_index=0, branch_id="br_1.1.1"
+        )
+    with pytest.raises(ValueError):
+        RoundStartedEvent(
+            seq=1, exploration_id="xpl_test", round_index=0, branch_id="main"
+        )
+    event = RoundStartedEvent(
+        seq=1, exploration_id="xpl_test", round_index=0, branch_id="br_1.1"
+    )
+    assert event.branch_id == "br_1.1"
+
+
+def test_branch_constraints_accumulate_in_state(tmp_path: Path) -> None:
+    journal = _branch_journal(tmp_path)
+    _settle_no_progress_round(journal, 0)
+    _settle_no_progress_round(journal, 1)
+    constraint = BranchConstraint(
+        hypothesis_fingerprint="a" * 16,
+        coverage_key="cov_a",
+        family=InsightFamily.DIAGNOSTIC,
+        reason="refuted",
+        detail_code="rcpt_1",
+    )
+    state = journal.append_new(
+        "branch_abandoned", branch_id="main", round_index=1, constraints=(constraint,)
+    )
+    assert state.abandoned_constraints == [constraint]
+    rebuilt = rebuild_exploration_state(journal.events())
+    assert rebuilt is not None
+    assert rebuilt.abandoned_constraints == [constraint]

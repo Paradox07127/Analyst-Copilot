@@ -32,6 +32,7 @@ def _receipt(
     filters: str | None = None,
     time_range: str | None = None,
     scope_resolution: str = "explicit",
+    statistics: ReceiptStatistics | None = None,
 ) -> EvidenceReceipt:
     return build_receipt(
         tool_call_id=tool_call_id,
@@ -59,6 +60,7 @@ def _receipt(
             ),
         ),
         method=ReceiptMethod(family="sql_aggregation", warnings=warnings),
+        statistics=statistics,
         evidence_independence_key=independence_key,
         replication_kind=replication_kind,  # type: ignore[arg-type]
         data_state_witness=witness,
@@ -99,10 +101,12 @@ def _proposal(**overrides: object) -> TransitionProposal:
 def _bundle(
     proposal: TransitionProposal,
     receipts: dict[str, EvidenceReceipt] = COMMITTED,
+    extra_receipt_ids: tuple[str, ...] = (),
 ) -> ClaimBundle:
     receipt_ids = (
         *proposal.supporting_receipt_ids,
         *proposal.contradicting_receipt_ids,
+        *extra_receipt_ids,
     )
     refs = tuple(
         f"{receipt_id}:{receipts[receipt_id].facts[0].fact_id}"
@@ -130,8 +134,12 @@ def _reduce(
     prior: InsightRecord | None = None,
     committed: dict[str, EvidenceReceipt] = COMMITTED,
     round_index: int = 0,
+    require_typed: bool = False,
+    extra_receipt_ids: tuple[str, ...] = (),
+    statement: str | None = None,
+    rationale: str | None = None,
 ) -> InsightRecord:
-    bundle = _bundle(proposal, committed)
+    bundle = _bundle(proposal, committed, extra_receipt_ids)
     return reduce_insight(
         proposal,
         prior=prior,
@@ -139,6 +147,25 @@ def _reduce(
         admitted_claim_bundles={bundle.claim_bundle_id: bundle},
         expected_witness=RUN_WITNESS,
         round_index=round_index,
+        require_typed_hypothesis_outcome=require_typed,
+        statement=statement,
+        rationale=rationale,
+    )
+
+
+def _typed(
+    outcome: str, *, hypothesis_id: str = "hyp_1"
+) -> ReceiptStatistics:
+    return ReceiptStatistics(
+        hypothesis_id=hypothesis_id,
+        hypothesis_outcome=outcome,  # type: ignore[arg-type]
+        test_name="welch_t",
+        test_statistic=2.5,
+        p_value=0.01,
+        effect_size=0.5,
+        ci_low=0.1,
+        ci_high=0.9,
+        sample_size=40,
     )
 
 
@@ -149,6 +176,43 @@ def test_a_first_supported_insight_becomes_new_with_fact_level_proof() -> None:
     assert record.proof[0].receipt_id == SUPPORT.receipt_id
     assert record.proof[0].fact_ids == ("f_n",)
     assert record.proof[0].comparison == "supports"
+    assert record.statement is None and record.rationale is None
+
+
+def test_reduce_insight_records_the_proposal_statement_and_rationale() -> None:
+    record = _reduce(
+        _proposal(),
+        statement="Revenue differs by region.",
+        rationale="Planted structure.",
+    )
+    assert record.statement == "Revenue differs by region."
+    assert record.rationale == "Planted structure."
+
+
+def test_a_prior_statement_is_immutable_once_set() -> None:
+    first = _reduce(_proposal(), statement="Original claim.", rationale="Original why.")
+    second = _reduce(
+        _proposal(supporting_receipt_ids=(SUPPORT_2.receipt_id,)),
+        prior=first,
+        round_index=1,
+        statement="Rewritten claim.",
+        rationale="Rewritten why.",
+    )
+    assert second.statement == "Original claim."
+    assert second.rationale == "Original why."
+
+
+def test_an_update_may_backfill_a_missing_prior_statement() -> None:
+    first = _reduce(_proposal())
+    second = _reduce(
+        _proposal(supporting_receipt_ids=(SUPPORT_2.receipt_id,)),
+        prior=first,
+        round_index=1,
+        statement="Backfilled claim.",
+        rationale="Backfilled why.",
+    )
+    assert second.statement == "Backfilled claim."
+    assert second.rationale == "Backfilled why."
 
 
 def test_a_distinct_holdout_receipt_reinforces_an_insight() -> None:
@@ -170,6 +234,9 @@ def test_repeating_the_same_receipt_cannot_fake_reinforcement() -> None:
 
 
 def test_same_snapshot_support_is_corroboration_not_reinforcement() -> None:
+    """R3 (user decision, 2026-08-03): same-snapshot corroboration is not an
+    upgrade, but it is not a downgrade either — the prior status survives and
+    the caveat is recorded as a limitation instead of a status change."""
     same_snapshot = _receipt(
         "call_same_snapshot",
         independence_key="same-snapshot-query-2",
@@ -183,8 +250,90 @@ def test_same_snapshot_support_is_corroboration_not_reinforcement() -> None:
         committed=committed,
         round_index=1,
     )
-    assert second.status == "inconclusive"
+    assert first.status == "new"
+    assert second.status == "new"
     assert second.trust_level == "supported"
+    assert any("not an independent replication" in item for item in second.limitations)
+
+
+def test_same_snapshot_corroboration_keeps_a_reinforced_status() -> None:
+    """R3: a prior reinforcement is not walked back by extra same-snapshot work."""
+    same_snapshot = _receipt(
+        "call_same_snapshot_after_holdout",
+        independence_key="same-snapshot-query-3",
+        replication_kind="same_snapshot_corroboration",
+    )
+    committed = {**COMMITTED, same_snapshot.receipt_id: same_snapshot}
+    first = _reduce(_proposal(), committed=committed)
+    second = _reduce(
+        _proposal(supporting_receipt_ids=(SUPPORT_2.receipt_id,)),
+        prior=first,
+        committed=committed,
+        round_index=1,
+    )
+    assert second.status == "reinforced"
+    third = _reduce(
+        _proposal(supporting_receipt_ids=(same_snapshot.receipt_id,)),
+        prior=second,
+        committed=committed,
+        round_index=2,
+    )
+    assert third.status == "reinforced"
+    assert third.trust_level == "supported"
+
+
+def test_an_unadjudicated_bundle_receipt_does_not_join_an_evidence_side() -> None:
+    """R1: the bundle keeps every receipt the round produced; only receipts the
+    executor typed reach the insight's sides and its proof."""
+    typed = _receipt("call_typed_supports", statistics=_typed("supports"))
+    unadjudicated = _receipt("call_unadjudicated")
+    committed = {
+        **COMMITTED,
+        typed.receipt_id: typed,
+        unadjudicated.receipt_id: unadjudicated,
+    }
+    record = _reduce(
+        _proposal(supporting_receipt_ids=(typed.receipt_id,)),
+        committed=committed,
+        require_typed=True,
+        extra_receipt_ids=(unadjudicated.receipt_id,),
+    )
+    assert record.status == "new"
+    assert record.trust_level == "supported"
+    assert record.supporting_receipt_ids == (typed.receipt_id,)
+    assert tuple(proof.receipt_id for proof in record.proof) == (typed.receipt_id,)
+
+
+def test_a_typed_run_rejects_a_contradicting_receipt_on_the_supporting_side() -> None:
+    """R2: side placement is not the proposer's to choose."""
+    contradicts = _receipt("call_typed_contradicts", statistics=_typed("contradicts"))
+    committed = {**COMMITTED, contradicts.receipt_id: contradicts}
+    with pytest.raises(ValueError, match="typed outcome"):
+        _reduce(
+            _proposal(supporting_receipt_ids=(contradicts.receipt_id,)),
+            committed=committed,
+            require_typed=True,
+        )
+
+
+def test_a_typed_run_rejects_an_unadjudicated_receipt_on_an_evidence_side() -> None:
+    with pytest.raises(ValueError, match="typed outcome"):
+        _reduce(_proposal(), require_typed=True)
+
+
+def test_a_typed_run_rejects_a_receipt_adjudicating_another_hypothesis() -> None:
+    """R2: the reducer claims to be authoritative, so it checks the binding too."""
+    foreign = _receipt(
+        "call_typed_foreign",
+        statistics=_typed("supports", hypothesis_id="hyp_other"),
+    )
+    committed = {**COMMITTED, foreign.receipt_id: foreign}
+    with pytest.raises(ValueError, match="hypothesis"):
+        _reduce(
+            _proposal(supporting_receipt_ids=(foreign.receipt_id,)),
+            committed=committed,
+            require_typed=True,
+        )
 
 
 def test_contradicting_evidence_alone_refutes_despite_agent_proposal() -> None:
@@ -258,7 +407,7 @@ def test_claim_bundle_references_must_match_the_transition_assignment() -> None:
             update={"supporting_receipt_ids": (SUPPORT_2.receipt_id,)}
         )
     )
-    with pytest.raises(ValueError, match="exactly match"):
+    with pytest.raises(ValueError, match="must cover"):
         reduce_insight(
             proposal,
             prior=None,
@@ -269,20 +418,31 @@ def test_claim_bundle_references_must_match_the_transition_assignment() -> None:
         )
 
 
-def test_narrow_contradiction_cannot_refute_a_broader_prior_scope() -> None:
+def test_narrow_contradiction_is_downgraded_to_a_limitation_not_a_refutation() -> None:
+    """U7: a narrower-scope contradiction used to raise and kill the whole
+    round. It is legitimate exploratory evidence, just not proof against a
+    broader prior — so it is dropped from the contradicting side and recorded
+    as a limitation instead."""
     first = _reduce(_proposal())
-    with pytest.raises(ValueError, match="outside its scanned scope"):
-        _reduce(
-            _proposal(
-                supporting_receipt_ids=(),
-                contradicting_receipt_ids=(NARROW_CONTRA.receipt_id,),
-            ),
-            prior=first,
-            round_index=1,
-        )
+    second = _reduce(
+        _proposal(
+            supporting_receipt_ids=(),
+            contradicting_receipt_ids=(NARROW_CONTRA.receipt_id,),
+        ),
+        prior=first,
+        round_index=1,
+    )
+    assert second.status == "new"
+    assert second.trust_level == "supported"
+    assert NARROW_CONTRA.receipt_id not in second.contradicting_receipt_ids
+    assert any(
+        NARROW_CONTRA.receipt_id in item and "narrower scope" in item
+        for item in second.limitations
+    )
+    assert all(proof.receipt_id != NARROW_CONTRA.receipt_id for proof in second.proof)
 
 
-def test_filtered_or_time_bounded_contradiction_cannot_refute_global_scope() -> None:
+def test_filtered_or_time_bounded_contradiction_is_downgraded_not_a_refutation() -> None:
     scoped = _receipt(
         "call_contra_scoped",
         filters="region = 'west'",
@@ -291,19 +451,21 @@ def test_filtered_or_time_bounded_contradiction_cannot_refute_global_scope() -> 
     committed = {**COMMITTED, scoped.receipt_id: scoped}
     first = _reduce(_proposal(), committed=committed)
 
-    with pytest.raises(ValueError, match="outside its scanned scope"):
-        _reduce(
-            _proposal(
-                supporting_receipt_ids=(),
-                contradicting_receipt_ids=(scoped.receipt_id,),
-            ),
-            prior=first,
-            committed=committed,
-            round_index=1,
-        )
+    second = _reduce(
+        _proposal(
+            supporting_receipt_ids=(),
+            contradicting_receipt_ids=(scoped.receipt_id,),
+        ),
+        prior=first,
+        committed=committed,
+        round_index=1,
+    )
+    assert second.status == "new"
+    assert scoped.receipt_id not in second.contradicting_receipt_ids
+    assert any(scoped.receipt_id in item for item in second.limitations)
 
 
-def test_explicit_scope_cannot_refute_a_whole_dataset_prior_scope() -> None:
+def test_explicit_scope_downgrade_against_a_whole_dataset_prior_scope() -> None:
     whole = _receipt(
         "call_support_whole",
         columns=(),
@@ -315,16 +477,51 @@ def test_explicit_scope_cannot_refute_a_whole_dataset_prior_scope() -> None:
         committed=committed,
     )
 
-    with pytest.raises(ValueError, match="outside its scanned scope"):
-        _reduce(
-            _proposal(
-                supporting_receipt_ids=(),
-                contradicting_receipt_ids=(CONTRA.receipt_id,),
-            ),
-            prior=first,
-            committed=committed,
-            round_index=1,
+    second = _reduce(
+        _proposal(
+            supporting_receipt_ids=(),
+            contradicting_receipt_ids=(CONTRA.receipt_id,),
+        ),
+        prior=first,
+        committed=committed,
+        round_index=1,
+    )
+    assert second.status == "new"
+    assert CONTRA.receipt_id not in second.contradicting_receipt_ids
+    assert any(CONTRA.receipt_id in item for item in second.limitations)
+
+
+def test_same_scope_contradiction_still_contests_after_the_scope_downgrade_fix() -> None:
+    """Control group 1: same-scope contradicting evidence must still land on
+    the contradicting side (here making the insight contested, since the
+    prior's supporting evidence is sticky) — the fix only changes
+    narrower-scope contradictions, not scope-matching ones."""
+    first = _reduce(_proposal())
+    second = _reduce(
+        _proposal(
+            supporting_receipt_ids=(),
+            contradicting_receipt_ids=(CONTRA.receipt_id,),
+        ),
+        prior=first,
+        round_index=1,
+    )
+    assert second.status == "inconclusive"
+    assert second.trust_level == "contested"
+    assert second.contradicting_receipt_ids == (CONTRA.receipt_id,)
+
+
+def test_narrow_contradiction_on_a_brand_new_insight_is_unaffected() -> None:
+    """Control group 2: when there is no prior (first sighting), the scope
+    check was already skipped before this fix and must still be skipped —
+    narrow-scope contradicting evidence behaves exactly as before."""
+    record = _reduce(
+        _proposal(
+            supporting_receipt_ids=(),
+            contradicting_receipt_ids=(NARROW_CONTRA.receipt_id,),
         )
+    )
+    assert record.status == "refuted"
+    assert record.contradicting_receipt_ids == (NARROW_CONTRA.receipt_id,)
 
 
 def test_receipt_witness_must_match_the_run_witness() -> None:

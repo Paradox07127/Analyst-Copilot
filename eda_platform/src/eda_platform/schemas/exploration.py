@@ -7,6 +7,7 @@ resumable status and deliberately absent from the stop reasons (plan R3.1).
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -51,6 +52,27 @@ ExplorationGracefulStopReason = Literal[
 ExplorationRunStatus = Literal["running", "pause_requested", "paused", "stopped"]
 
 GateVerdictValue = Literal["passed", "rejected"]
+
+MAIN_LINE_ID = "main"
+_BRANCH_ID_PATTERN = r"^br_[1-9][0-9]*(\.[1-9][0-9]*)?$"  # depth <= 2 by shape
+
+BranchConstraintReason = Literal["refuted", "gate_rejected", "inconclusive"]
+
+
+class BranchConstraint(BaseModel):
+    """One structured "tried and why it failed" fact from an abandoned line.
+
+    Content must be deterministically recomputable from committed receipts and
+    gate reports; the issuer re-derives it and rejects tampering (plan E6 #4).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hypothesis_fingerprint: str = Field(min_length=1)
+    coverage_key: str = Field(min_length=1)
+    family: InsightFamily
+    reason: BranchConstraintReason
+    detail_code: str = Field(min_length=1)
 
 
 class ExplorationStateUnavailableError(RuntimeError):
@@ -107,6 +129,9 @@ class AttemptStartedEvent(ExplorationEventBase):
 class RoundStartedEvent(ExplorationEventBase):
     event_type: Literal["round_started"] = "round_started"
     round_index: int = Field(ge=0)
+    # None = the main line. Branch rounds carry their line id; the journal
+    # stays linear and round non-overlap rules are unchanged (plan E6 #5).
+    branch_id: str | None = Field(default=None, pattern=_BRANCH_ID_PATTERN)
 
 
 class LlmCallStartedEvent(ExplorationEventBase):
@@ -184,6 +209,13 @@ class RoundSettledEvent(ExplorationEventBase):
     event_type: Literal["round_settled"] = "round_settled"
     round_index: int = Field(ge=0)
     progress: bool
+    # Distinct from "no progress": the scheduler admitted nothing at all this
+    # round. One such round is a gap; a streak of them is exhaustion.
+    frontier_empty: bool = False
+    # Adjudicated (new/reinforced/refuted) insight transitions this round.
+    # None on pre-plan-B journals; treated as movement so legacy runs never
+    # soft-stop retroactively.
+    adjudicated_transitions: int | None = Field(default=None, ge=0)
     terminal_reason: ExplorationGracefulStopReason | None = None
     terminal_has_reduction: bool = False
 
@@ -191,6 +223,23 @@ class RoundSettledEvent(ExplorationEventBase):
     def _terminal_metadata_is_consistent(self) -> RoundSettledEvent:
         if self.terminal_has_reduction and self.terminal_reason is None:
             raise ValueError("terminal_has_reduction requires terminal_reason.")
+        return self
+
+
+class BranchAbandonedEvent(ExplorationEventBase):
+    """The current line is abandoned; its negatives become admission constraints."""
+
+    event_type: Literal["branch_abandoned"] = "branch_abandoned"
+    branch_id: str = Field(min_length=1)
+    round_index: int = Field(ge=0)
+    constraints: tuple[BranchConstraint, ...] = ()
+
+    @model_validator(mode="after")
+    def _line_id_is_valid(self) -> BranchAbandonedEvent:
+        if self.branch_id != MAIN_LINE_ID and not re.fullmatch(
+            _BRANCH_ID_PATTERN, self.branch_id
+        ):
+            raise ValueError("branch_id must be 'main' or a valid branch id.")
         return self
 
 
@@ -235,6 +284,7 @@ ExplorationLoopEvent = Annotated[
     | GateVerdictEvent
     | ReductionCommittedEvent
     | RoundSettledEvent
+    | BranchAbandonedEvent
     | PauseRequestedEvent
     | PausedEvent
     | ResumedEvent
@@ -274,6 +324,15 @@ class ExplorationLoopState(BaseModel):
     rounds_started: int = Field(ge=0, default=0)
     rounds_settled: int = Field(ge=0, default=0)
     consecutive_no_progress: int = Field(ge=0, default=0)
+    consecutive_empty_frontier: int = Field(ge=0, default=0)
+    consecutive_no_adjudication: int = Field(ge=0, default=0)
+    branch_trigger_stagnant_rounds: int | None = Field(default=None, ge=1)
+    max_branches: int = Field(ge=0, default=0)
+    active_branch_id: str | None = Field(default=None, pattern=_BRANCH_ID_PATTERN)
+    current_line_abandoned: bool = False
+    started_branch_ids: list[str] = Field(default_factory=list)
+    abandoned_line_ids: list[str] = Field(default_factory=list)
+    abandoned_constraints: list[BranchConstraint] = Field(default_factory=list)
     current_round_index: int | None = Field(default=None, ge=0)
     current_round_reduction_committed: bool = False
     pending_terminal_reason: ExplorationGracefulStopReason | None = None
@@ -368,6 +427,33 @@ class ExplorationLoopState(BaseModel):
             raise ValueError("pending terminal reduction requires a terminal decision.")
         if (self.stop_reason is not None) != (self.status == "stopped"):
             raise ValueError("stop_reason must be set exactly when status is stopped.")
+        if self.branch_trigger_stagnant_rounds is None:
+            if (
+                self.max_branches
+                or self.active_branch_id is not None
+                or self.current_line_abandoned
+                or self.started_branch_ids
+                or self.abandoned_line_ids
+                or self.abandoned_constraints
+            ):
+                raise ValueError("branch state requires branching to be enabled.")
+        else:
+            if self.max_branches < 1:
+                raise ValueError("enabled branching requires max_branches >= 1.")
+            if len(self.started_branch_ids) != len(set(self.started_branch_ids)):
+                raise ValueError("started_branch_ids must be unique.")
+            if len(self.abandoned_line_ids) != len(set(self.abandoned_line_ids)):
+                raise ValueError("abandoned_line_ids must be unique.")
+            if len(self.started_branch_ids) > self.max_branches:
+                raise ValueError("started branches cannot exceed max_branches.")
+            if self.active_branch_id is not None and (
+                self.active_branch_id not in self.started_branch_ids
+            ):
+                raise ValueError("active_branch_id must be a started branch.")
+            if self.current_line_abandoned and (
+                (self.active_branch_id or MAIN_LINE_ID) not in self.abandoned_line_ids
+            ):
+                raise ValueError("an abandoned current line must be recorded.")
         return self
 
     def require_stop_reason(self) -> ExplorationStopReason:

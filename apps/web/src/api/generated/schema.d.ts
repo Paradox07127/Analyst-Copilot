@@ -4305,6 +4305,16 @@ export interface components {
             /** Note */
             note: string;
         };
+        /**
+         * ExplorationBranchPolicy
+         * @description Stagnation-triggered branching caps (E6). Absent means branching is off.
+         */
+        ExplorationBranchPolicy: {
+            /** Trigger Stagnant Rounds */
+            trigger_stagnant_rounds: number;
+            /** Max Branches */
+            max_branches: number;
+        };
         /** ExplorationBudgetExtended */
         ExplorationBudgetExtended: {
             exploration: components["schemas"]["ExplorationView"];
@@ -4332,6 +4342,7 @@ export interface components {
             idle_timeout_seconds: number;
             /** Max Rounds */
             max_rounds: number;
+            branching?: components["schemas"]["ExplorationBranchPolicy"] | null;
         };
         /** ExplorationBudgetView */
         ExplorationBudgetView: {

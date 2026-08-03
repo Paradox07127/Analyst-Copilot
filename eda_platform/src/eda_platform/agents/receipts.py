@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any, Literal
 
 from eda_platform.agents.tool_context import HypothesisExecutionBinding
@@ -177,12 +178,19 @@ def _predicate_outcome(
             if statistics.adjusted_p_value is not None
             else statistics.p_value
         )
-        if p_value is not None and p_value <= 0.05:
+        if p_value is not None:
+            if p_value > 0.05:
+                # The test ran and found no effect: a direct negation of
+                # differs/associated_with, not an unadjudicated case.
+                return "contradicts"
             effect = statistics.effect_size
-            if operator in {"differs", "associated_with"}:
-                materiality = predicate.threshold or 0.0
-                if effect is None or abs(effect) > materiality:
-                    return "supports"
+            materiality = predicate.threshold or 0.0
+            if effect is not None:
+                return "supports" if abs(effect) > materiality else "contradicts"
+            if predicate.threshold:
+                # Materiality was required but no effect size exists to check it.
+                return None
+            return "supports"
 
     # A statistical group-comparison effect is a standardized difference,
     # rank effect, eta-squared, odds ratio, or another test-family quantity. It
@@ -214,11 +222,75 @@ def _predicate_outcome(
                 return "supports" if abs(float(delta)) >= threshold else "contradicts"
         return None
 
+    if operator == "associated_with" and receipt.tool_name == "correlate_columns":
+        if predicate.right_operand is None:
+            return None
+        target_pair = {
+            predicate.metric.casefold(),
+            predicate.right_operand.casefold(),
+        }
+        for fact_id, value in facts.items():
+            if not fact_id.startswith("pair") or not fact_id.endswith(".columns"):
+                continue
+            if not isinstance(value, str) or {
+                item.strip().casefold() for item in value.split("~")
+            } != target_pair:
+                continue
+            prefix = fact_id.removesuffix(".columns")
+            coefficient = _finite_fact_number(facts.get(prefix + ".coefficient"))
+            p_value = _finite_fact_number(facts.get(prefix + ".adjusted_p"))
+            if coefficient is None or p_value is None:
+                return None
+            if p_value > 0.05:
+                return "contradicts"
+            materiality = predicate.threshold or 0.0
+            return "supports" if abs(coefficient) > materiality else "contradicts"
+        return None
+
     if operator == "has_spike" and receipt.tool_name == "analyze_time_series":
         detected = facts.get("spike_detected")
         if isinstance(detected, bool):
             return "supports" if detected else "contradicts"
         return None
+
+    if operator == "has_spike" and receipt.tool_name == "screen_anomalies":
+        # The scanned column must be the predicate's target; binding.columns
+        # may be empty and the subset gate above would then pass vacuously.
+        if receipt.scope.scope_resolution != "whole_dataset" and predicate.metric.casefold() not in {
+            column.casefold() for column in receipt.scope.columns
+        }:
+            return None
+        outlier_count = _finite_fact_number(facts.get("outlier_count"))
+        if outlier_count is None:
+            return None
+        return "supports" if outlier_count > 0 else "contradicts"
+
+    if operator == "associated_with" and receipt.tool_name == "run_baseline_model":
+        target = facts.get("target_column")
+        if not isinstance(target, str):
+            return None
+        operands = {predicate.metric.casefold()}
+        if predicate.right_operand is not None:
+            operands.add(predicate.right_operand.casefold())
+        if target.casefold() not in operands:
+            return None
+        task_type = facts.get("task_type")
+        if task_type == "classification":
+            accuracy = _finite_fact_number(facts.get("metric.accuracy"))
+            baseline = _finite_fact_number(facts.get("baseline_accuracy"))
+            if accuracy is None or baseline is None:
+                return None
+            skill = accuracy - baseline
+        elif task_type == "regression":
+            # R^2 is skill over the mean-predictor baseline by definition.
+            r2 = _finite_fact_number(facts.get("metric.r2"))
+            if r2 is None:
+                return None
+            skill = r2
+        else:
+            return None
+        materiality = predicate.threshold or 0.0
+        return "supports" if skill > materiality else "contradicts"
 
     if operator in {"exists", "absent"}:
         exists = receipt.result_count > 0
@@ -236,6 +308,12 @@ def _predicate_outcome(
         return "supports" if value == threshold else "contradicts"
     if operator == "not_equal_to":
         return "supports" if value != threshold else "contradicts"
+    return None
+
+
+def _finite_fact_number(value: float | int | str | bool | None) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
     return None
 
 

@@ -60,5 +60,5 @@ def test_quick_has_narrow_coverage_but_standard_and_deep_have_all_families() -> 
 def test_returned_profiles_do_not_share_mutable_tool_cap_maps() -> None:
     first = exploration_budget_profile("quick")
     second = exploration_budget_profile("quick")
-    first.max_tool_calls_by_kind["run_sql"] = 999
-    assert second.max_tool_calls_by_kind["run_sql"] != 999
+    first.max_tool_calls_by_kind["run_stat_test"] = 999
+    assert second.max_tool_calls_by_kind["run_stat_test"] != 999

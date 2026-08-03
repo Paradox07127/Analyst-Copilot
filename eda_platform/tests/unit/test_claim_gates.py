@@ -670,7 +670,14 @@ def test_a_publishable_confirmatory_claim_registers_cleanly() -> None:
     assert _violations(report, "statistical") == []
 
 
-def test_confirmatory_gate_rechecks_the_final_stat_family_size() -> None:
+def test_confirmatory_gate_recomputes_stale_adjustment_instead_of_rejecting_it() -> None:
+    """The receipt is digest-bound and issued when its family had 1 test, so
+    adjusted_p_value=None was correct at issue time. A second test later joins
+    the family (count -> 5); the receipt can't be re-signed, so the gate must
+    recompute the adjustment at verification time rather than retroactively
+    voiding a receipt whose cache is merely absent, not wrong. Was previously
+    rejected with stale_multiplicity_adjustment (a real R4 regression: see
+    output/e4a/_failed/failed-2026-08-03-empty-frontier-binding)."""
     first = _receipt(
         tool_call_id="call_stat_first",
         facts=(
@@ -701,6 +708,51 @@ def test_confirmatory_gate_rechecks_the_final_stat_family_size() -> None:
         _bundle(claim, evidence_lane="confirmatory"),
         committed_receipts=committed,
         stat_attempt_counts={"fam_repeated": 5},
+    )
+    assert report.passed, report.model_dump()
+    assert _violations(report, "statistical") == []
+
+
+def test_confirmatory_gate_rejects_an_adjustment_its_own_attempt_cannot_justify() -> None:
+    """Control: the gate must still catch a receipt claiming more significance
+    than its own registry-assigned attempt number allows.
+
+    This test previously used family growth (attempt 1, cache p x 1, family
+    later 2) as the forgery case. That is the legitimate case — an immutable
+    receipt cannot know about tests that join its family afterwards — so the
+    scenario moved to a self-inconsistent cache: attempt 3 claiming p x 1.
+    """
+    first = _receipt(
+        tool_call_id="call_stat_lenient",
+        facts=(
+            _fact("f_p_lenient", 0.01, "number"),
+            _fact("f_effect_lenient", 0.5, "number"),
+            _fact("f_n_lenient", 100, "count"),
+        ),
+        tool_name="run_stat_test",
+        method_family="independent_t_test",
+        statistics=ReceiptStatistics(
+            hypothesis_id="fam_lenient",
+            test_name="independent_t_test",
+            p_value=0.01,
+            adjusted_p_value=0.01,  # attempt 3 must cache at least p x 3
+            effect_size=0.5,
+            ci_low=0.1,
+            ci_high=0.9,
+            sample_size=100,
+            sequence_index=3,
+        ),
+    )
+    committed = {**COMMITTED, first.receipt_id: first}
+    claim = _claim(
+        claim_text="The repeated comparison has p = 0.01.",
+        evidence_fact_ids=(_ref(first, "f_p_lenient"),),
+        statistics_receipt_ids=(first.receipt_id,),
+    )
+    report = _run(
+        _bundle(claim, evidence_lane="confirmatory"),
+        committed_receipts=committed,
+        stat_attempt_counts={"fam_lenient": 3},
     )
     assert not report.passed
     assert "stale_multiplicity_adjustment" in _codes(report, "statistical")
@@ -967,3 +1019,47 @@ def test_a_forged_bundle_instance_is_revalidated_by_the_structure_gate() -> None
 
 def test_revalidation_keeps_a_well_formed_bundle_instance_working() -> None:
     assert _run(_bundle()).passed
+
+
+def test_a_receipt_adjusted_for_its_own_attempt_survives_later_family_growth() -> None:
+    """A receipt issued as attempt 2 legitimately caches p x 2. When a third
+    test later joins the family it cannot be re-signed, so judging its cache
+    against the *final* count is the same retroactive invalidation R4 set out
+    to remove — only self-consistency with its own sequence_index is checkable.
+    Observed in the real deepseek-v4-flash trial (2026-08-03, seed 2): eight
+    stale_multiplicity_adjustment violations on receipts whose adjustment was
+    exactly right for their own attempt number."""
+    second = _receipt(
+        tool_call_id="call_stat_attempt_two",
+        facts=(
+            _fact("f_p_second", 0.01, "number"),
+            _fact("f_effect_second", 0.5, "number"),
+            _fact("f_n_second", 100, "count"),
+        ),
+        tool_name="run_stat_test",
+        method_family="independent_t_test",
+        statistics=ReceiptStatistics(
+            hypothesis_id="fam_grows",
+            test_name="independent_t_test",
+            p_value=0.01,
+            adjusted_p_value=0.02,  # exactly p x its own sequence_index
+            effect_size=0.5,
+            ci_low=0.1,
+            ci_high=0.9,
+            sample_size=100,
+            sequence_index=2,
+        ),
+    )
+    committed = {**COMMITTED, second.receipt_id: second}
+    claim = _claim(
+        claim_text="The growing family reports p = 0.01.",
+        evidence_fact_ids=(_ref(second, "f_p_second"),),
+        statistics_receipt_ids=(second.receipt_id,),
+    )
+    report = _run(
+        _bundle(claim, evidence_lane="confirmatory"),
+        committed_receipts=committed,
+        stat_attempt_counts={"fam_grows": 3},
+    )
+    assert report.passed, report.model_dump()
+    assert _violations(report, "statistical") == []

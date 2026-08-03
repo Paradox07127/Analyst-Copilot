@@ -13,7 +13,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eda_platform.agents.exploration.candidates import CandidateSeed, HypothesisStatus
-from eda_platform.schemas.exploration import InsightFamily
+from eda_platform.schemas.exploration import BranchConstraint, InsightFamily
+
+_HARD_ABANDONMENT_REASONS = frozenset({"refuted", "gate_rejected"})
 
 
 class CandidateSignals(BaseModel):
@@ -97,6 +99,9 @@ class AdmissionContext:
     remaining_cost: float
     family_quota_remaining: Mapping[InsightFamily, int]
     unexplored_coverage_keys: frozenset[str]
+    # E6: "tried + why it failed" facts from abandoned lines. Hard reasons
+    # (refuted / gate_rejected) block re-admission; soft ones stay advisory.
+    abandoned_constraints: tuple[BranchConstraint, ...] = ()
 
 
 AdmissionCheckName = Literal[
@@ -104,6 +109,7 @@ AdmissionCheckName = Literal[
     "policy_and_capability",
     "novelty",
     "not_already_answered",
+    "not_previously_abandoned",
     "falsifiable",
     "within_remaining_budget",
     "coverage_and_quota",
@@ -190,6 +196,14 @@ def schedule_candidates(
     if any(value < 0 for value in context.family_quota_remaining.values()):
         raise ValueError("family quotas cannot be negative.")
 
+    hard_abandonment: dict[str, str] = {}
+    for constraint in context.abandoned_constraints:
+        if constraint.reason in _HARD_ABANDONMENT_REASONS:
+            current = hard_abandonment.get(constraint.hypothesis_fingerprint)
+            code = f"abandoned_{constraint.reason}"
+            if current is None or code < current:
+                hard_abandonment[constraint.hypothesis_fingerprint] = code
+
     ordered = tuple(sorted(candidates, key=lambda item: item.hypothesis_fingerprint))
     group_members: dict[str, list[CandidateSeed]] = defaultdict(list)
     for candidate in ordered:
@@ -212,11 +226,15 @@ def schedule_candidates(
             )
         scope_exists = _scope_exists(candidate, context)
         policy_capability = _policy_and_capability(candidate, context)
+        # Historical dedup exists to stop the model re-proposing its own past
+        # hypotheses. A mandatory probe is instead a system-owned coverage
+        # obligation replayed until it is explored, so it is exempt from the
+        # historical set; within-batch dedup and the query check still apply.
         hypothesis_is_novel = (
-            candidate.hypothesis_fingerprint
+            candidate.mandatory
+            or candidate.hypothesis_fingerprint
             not in context.historical_hypothesis_fingerprints
-            and candidate.hypothesis_fingerprint not in seen_exact
-        )
+        ) and candidate.hypothesis_fingerprint not in seen_exact
         seen_exact.add(candidate.hypothesis_fingerprint)
         query_is_novel = (
             signal.query_fingerprint is None
@@ -232,6 +250,8 @@ def schedule_candidates(
             candidate.hypothesis_fingerprint
             not in context.answered_hypothesis_fingerprints
         )
+        abandonment_code = hard_abandonment.get(candidate.hypothesis_fingerprint)
+        not_abandoned = abandonment_code is None
         falsifiable = bool(candidate.proposal.falsification_conditions)
         within_budget = signal.expected_cost <= context.remaining_cost
         quota_remaining = context.family_quota_remaining.get(
@@ -267,6 +287,12 @@ def schedule_candidates(
                 "not_answered",
                 "stronger_answer_exists",
             ),
+            _check(
+                "not_previously_abandoned",
+                not_abandoned,
+                "not_abandoned",
+                abandonment_code or "not_abandoned",
+            ),
             _check("falsifiable", falsifiable, "falsifiable", "not_falsifiable"),
             _check(
                 "within_remaining_budget",
@@ -292,6 +318,7 @@ def schedule_candidates(
             policy_capability=policy_capability,
             is_novel=is_novel,
             not_answered=not_answered,
+            not_abandoned=not_abandoned,
             falsifiable=falsifiable,
             within_budget=within_budget,
             multiplicity_ok=multiplicity_ok,
@@ -431,6 +458,7 @@ def _admission_status(
     policy_capability: bool,
     is_novel: bool,
     not_answered: bool,
+    not_abandoned: bool,
     falsifiable: bool,
     within_budget: bool,
     multiplicity_ok: bool,
@@ -443,7 +471,7 @@ def _admission_status(
         or not multiplicity_ok
     ):
         return "rejected_policy"
-    if not is_novel or not not_answered:
+    if not is_novel or not not_answered or not not_abandoned:
         return "rejected_duplicate"
     return "admitted"
 

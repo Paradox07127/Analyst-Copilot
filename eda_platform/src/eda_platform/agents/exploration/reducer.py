@@ -24,6 +24,9 @@ from eda_platform.schemas.receipts import (
 )
 
 _INDEPENDENT_REPLICATION_KINDS = frozenset({"holdout", "external_replication"})
+_SAME_SNAPSHOT_LIMITATION = (
+    "Additional same-snapshot corroboration; not an independent replication."
+)
 
 
 def reduce_insight(
@@ -35,6 +38,8 @@ def reduce_insight(
     expected_witness: str,
     round_index: int,
     require_typed_hypothesis_outcome: bool = False,
+    statement: str | None = None,
+    rationale: str | None = None,
 ) -> InsightRecord:
     """Fold one proposal into the insight's next state.
 
@@ -65,9 +70,12 @@ def reduce_insight(
     cited = set(bundle.referenced_receipt_ids())
     if not assigned:
         raise ValueError("an insight transition requires committed evidence.")
-    if cited != assigned:
+    # The bundle also carries the round's unadjudicated receipts, which are
+    # legitimate exploratory claims but never evidence for or against the
+    # hypothesis; every side receipt must still be in it.
+    if not assigned <= cited:
         raise ValueError(
-            "claim bundle receipt references must exactly match the proposal's "
+            "claim bundle receipt references must cover the proposal's "
             "supporting and contradicting evidence."
         )
     new_supporting = supporting
@@ -108,47 +116,124 @@ def reduce_insight(
         contradicting = _merge(prior.contradicting_receipt_ids, contradicting)
         supporting = _merge(prior.supporting_receipt_ids, supporting)
 
+    # A narrower-scope contradiction is real exploratory evidence, but it does
+    # not get to overturn a broader prior finding — "scan the whole table,
+    # then recheck on a slice" is exactly the pattern this loop encourages, so
+    # a scope mismatch downgrades to a limitation instead of aborting the
+    # round (U7).
+    narrow_contradicting: tuple[str, ...] = ()
     if new_contradicting and prior is not None:
         prior_scopes = [
             committed_receipts[receipt_id].scope
             for receipt_id in prior.supporting_receipt_ids
         ]
-        contradiction_scopes = [
-            committed_receipts[receipt_id].scope for receipt_id in new_contradicting
-        ]
-        if prior_scopes and not any(
-            all(_scope_covers(scope, prior_scope) for prior_scope in prior_scopes)
-            for scope in contradiction_scopes
-        ):
-            raise ValueError(
-                "contradicting evidence cannot refute an insight outside its scanned scope."
+        if prior_scopes:
+            narrow_contradicting = tuple(
+                receipt_id
+                for receipt_id in new_contradicting
+                if not all(
+                    _scope_covers(committed_receipts[receipt_id].scope, prior_scope)
+                    for prior_scope in prior_scopes
+                )
             )
+    scope_limitations = tuple(
+        _narrow_scope_limitation(receipt_id, committed_receipts[receipt_id])
+        for receipt_id in narrow_contradicting
+    )
+    if narrow_contradicting:
+        contradicting = tuple(
+            receipt_id for receipt_id in contradicting if receipt_id not in narrow_contradicting
+        )
 
-    status, trust = _verdict(
+    if require_typed_hypothesis_outcome:
+        _assert_typed_sides(
+            supporting=supporting,
+            contradicting=contradicting,
+            receipts=committed_receipts,
+            hypothesis_id=proposal.hypothesis_id,
+        )
+
+    status, trust, extra_limitations = _verdict(
         supporting=supporting,
         contradicting=contradicting,
         is_update=prior is not None,
         new_supporting=new_supporting,
         receipts=committed_receipts,
+        prior_status=prior.status if prior is not None else None,
+        prior_trust=prior.trust_level if prior is not None else None,
+        had_downgraded_contradiction=bool(narrow_contradicting),
         require_typed_hypothesis_outcome=require_typed_hypothesis_outcome,
     )
-    proof = _proof(bundle, proposal, committed_receipts)
+    proof = _proof(
+        bundle,
+        proposal,
+        committed_receipts,
+        downgraded_contradicting_receipt_ids=frozenset(narrow_contradicting),
+    )
+    # The hypothesis text is immutable once set: a prior's statement/rationale
+    # survive every later update.
+    if prior is not None and prior.statement is not None:
+        statement = prior.statement
+    if prior is not None and prior.rationale is not None:
+        rationale = prior.rationale
     return InsightRecord(
         insight_id=proposal.insight_id,
         hypothesis_id=proposal.hypothesis_id,
         family=proposal.family,
         status=status,
         trust_level=trust,
+        statement=statement,
+        rationale=rationale,
         claim_bundle_id=proposal.claim_bundle_id,
         supporting_receipt_ids=supporting,
         contradicting_receipt_ids=contradicting,
         proof=_merge_proof(prior.proof if prior is not None else (), proof),
         limitations=_merge(
-            prior.limitations if prior is not None else (), proposal.limitations
+            prior.limitations if prior is not None else (),
+            (*proposal.limitations, *extra_limitations, *scope_limitations),
         ),
         created_round=prior.created_round if prior is not None else round_index,
         last_updated_round=round_index,
     )
+
+
+def _assert_typed_sides(
+    *,
+    supporting: Sequence[str],
+    contradicting: Sequence[str],
+    receipts: Mapping[str, EvidenceReceipt],
+    hypothesis_id: str,
+) -> None:
+    """Typed runs: the executor's outcome, not the proposer, owns side placement."""
+    for expected, receipt_ids in (
+        ("supports", supporting),
+        ("contradicts", contradicting),
+    ):
+        for receipt_id in receipt_ids:
+            receipt = receipts[receipt_id]
+            if receipt.method.hypothesis_evidence_is_explicitly_invalid():
+                # The executor already spoke: this method cannot address the
+                # hypothesis. _verdict downgrades it rather than raising, and
+                # the workflow never puts such a receipt on a side anyway
+                # (adjudicate_receipt_hypothesis clears its outcome).
+                continue
+            statistics = receipt.statistics
+            outcome = None if statistics is None else statistics.hypothesis_outcome
+            if statistics is None or outcome is None:
+                raise ValueError(
+                    f"receipt {receipt_id!r} carries no typed outcome and cannot "
+                    "sit on an evidence side."
+                )
+            if outcome != expected:
+                raise ValueError(
+                    f"receipt {receipt_id!r} has typed outcome {outcome!r} and "
+                    f"cannot sit on the {expected} side."
+                )
+            if statistics.hypothesis_id != hypothesis_id:
+                raise ValueError(
+                    f"receipt {receipt_id!r} adjudicates hypothesis "
+                    f"{statistics.hypothesis_id!r}, not {hypothesis_id!r}."
+                )
 
 
 def _verdict(
@@ -158,8 +243,11 @@ def _verdict(
     is_update: bool,
     new_supporting: Sequence[str],
     receipts: Mapping[str, EvidenceReceipt],
+    prior_status: InsightStatus | None,
+    prior_trust: InsightTrustLevel | None,
+    had_downgraded_contradiction: bool,
     require_typed_hypothesis_outcome: bool,
-) -> tuple[InsightStatus, InsightTrustLevel]:
+) -> tuple[InsightStatus, InsightTrustLevel, tuple[str, ...]]:
     if any(
         _receipt_is_inconclusive(
             receipts[receipt_id],
@@ -167,16 +255,21 @@ def _verdict(
         )
         for receipt_id in (*supporting, *contradicting)
     ):
-        return "inconclusive", "unsupported"
+        return "inconclusive", "unsupported", ()
     if supporting and contradicting:
-        return "inconclusive", "contested"
+        return "inconclusive", "contested", ()
     if contradicting:
-        return "refuted", "refuted"
+        return "refuted", "refuted", ()
     if not supporting:
-        return "inconclusive", "unsupported"
+        return "inconclusive", "unsupported", ()
     if not is_update:
-        return "new", "supported"
+        return "new", "supported", ()
     if not new_supporting:
+        if had_downgraded_contradiction:
+            # The only new evidence this round was a narrower-scope
+            # contradiction, already downgraded to a limitation above — that
+            # is not a reinforcement attempt, so the prior verdict stands.
+            return (prior_status or "new"), (prior_trust or "supported"), ()
         raise ValueError("reinforcement requires novel supporting evidence.")
     independence_keys = {
         receipts[receipt_id].evidence_independence_key
@@ -192,8 +285,10 @@ def _verdict(
         and receipts[receipt_id].evidence_independence_key
     }
     if not independence_keys - prior_keys:
-        return "inconclusive", "supported"
-    return "reinforced", "supported"
+        # R3 (user decision 2026-08-03): another query against the same snapshot
+        # is neither an upgrade nor a reason to walk back what already held.
+        return (prior_status or "new"), "supported", (_SAME_SNAPSHOT_LIMITATION,)
+    return "reinforced", "supported", ()
 
 
 def _resolve(
@@ -230,6 +325,8 @@ def _proof(
     bundle: ClaimBundle,
     proposal: TransitionProposal,
     committed: Mapping[str, EvidenceReceipt],
+    *,
+    downgraded_contradicting_receipt_ids: frozenset[str] = frozenset(),
 ) -> tuple[InsightProof, ...]:
     fact_ids_by_receipt: dict[str, set[str]] = {}
     for claim in bundle.claims:
@@ -248,6 +345,11 @@ def _proof(
                 )
             fact_ids_by_receipt.setdefault(receipt_id, set()).update(evidence_ids)
     supporting = set(proposal.supporting_receipt_ids)
+    # A receipt downgraded for scope reasons sits in neither side this round:
+    # it does not support, and it was disqualified from contradicting.
+    contradicting = set(proposal.contradicting_receipt_ids) - downgraded_contradicting_receipt_ids
+    # Bundle receipts the executor never adjudicated get no proof edge: an edge
+    # must say "supports" or "contradicts", and neither would be true.
     return tuple(
         InsightProof(
             receipt_id=receipt_id,
@@ -256,6 +358,7 @@ def _proof(
             evidence_independence_key=committed[receipt_id].evidence_independence_key,
         )
         for receipt_id, fact_ids in sorted(fact_ids_by_receipt.items())
+        if receipt_id in supporting or receipt_id in contradicting
     )
 
 
@@ -314,3 +417,14 @@ def _scope_covers(candidate: ReceiptScope, target: ReceiptScope) -> bool:
     if candidate.time_range != target.time_range:
         return False
     return True
+
+
+def _narrow_scope_limitation(receipt_id: str, receipt: EvidenceReceipt) -> str:
+    scope = receipt.scope
+    return (
+        f"Receipt {receipt_id!r} found contradicting evidence on a narrower scope "
+        f"(filters={scope.filters!r}, time_range={scope.time_range!r}, "
+        f"columns={scope.columns!r}) than the evidence that established this "
+        "insight; it does not refute the broader finding, so review that receipt "
+        "before trusting the insight beyond that narrower scope."
+    )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,7 +36,11 @@ from eda_platform.core.exploration_journal import (
     sealed_policy,
 )
 from eda_platform.core.ids import stable_hash
-from eda_platform.core.llm import LLMToolCall, LLMToolResponse
+from eda_platform.core.llm import (
+    LLMToolCall,
+    LLMToolResponse,
+    MalformedProviderResponseError,
+)
 from eda_platform.schemas.exploration import ExplorationPolicy
 from eda_platform.schemas.exploration_budget import (
     ExplorationBudgetPolicy,
@@ -158,6 +162,34 @@ class _Meter:
         return ToolCallProjection(
             kind=projected.kind,
             rows_scanned=(projected.rows_scanned if self.failed_rows is None else self.failed_rows),
+        )
+
+
+@dataclass(frozen=True)
+class _RaisingMeter(_Meter):
+    """A ``_Meter`` whose project()/success() calls can raise on demand."""
+
+    raise_on_project: BaseException | None = None
+    raise_on_success: BaseException | None = None
+
+    def project(self, *, call: Any, tool: AgentTool, arguments: Any) -> ToolCallProjection:
+        if self.raise_on_project is not None:
+            raise self.raise_on_project
+        return super().project(call=call, tool=tool, arguments=arguments)
+
+    def success(
+        self,
+        *,
+        call: Any,
+        tool: AgentTool,
+        arguments: Any,
+        result: AgentToolResult,
+        projected: ToolCallProjection,
+    ) -> ToolCallProjection:
+        if self.raise_on_success is not None:
+            raise self.raise_on_success
+        return super().success(
+            call=call, tool=tool, arguments=arguments, result=result, projected=projected
         )
 
 
@@ -437,8 +469,8 @@ def test_finish_reason_failures_are_terminal_without_retry(
     assert len(provider.calls) == 1
 
 
-def test_empty_response_gets_exactly_one_legal_exit_retry() -> None:
-    provider = _Provider([LLMToolResponse(), LLMToolResponse()])
+def test_empty_response_gets_a_legal_exit_retry_within_a_bounded_allowance() -> None:
+    provider = _Provider([LLMToolResponse() for _ in range(6)])
     result = ProbeExecutor(
         provider,
         [_tool("inspect", lambda _args: AgentToolResult(content={}))],
@@ -447,7 +479,7 @@ def test_empty_response_gets_exactly_one_legal_exit_retry() -> None:
 
     assert result.status == "failed"
     assert result.error_code == "empty_response"
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 4
     assert "only valid exits" in provider.calls[1]["messages"][-1]["content"]
 
 
@@ -731,6 +763,104 @@ def test_budget_and_cancellation_errors_penetrate_even_if_failure_settlement_lat
     assert ledger.snapshot()["rows_scanned"] == 6
 
 
+def test_usage_meter_success_error_settles_as_failed_tool_and_run_continues() -> None:
+    provider = _Provider(
+        [
+            LLMToolResponse(tool_calls=[_call("inspect")]),
+            LLMToolResponse(content="Recovered after meter failure."),
+        ]
+    )
+
+    def execute(_args: BaseModel) -> AgentToolResult:
+        return AgentToolResult(content={"value": 1}, receipt_artifact=_Receipt("rcpt-1"))
+
+    ledger = ToolCallLedger(_policy("inspect"))
+    hooks = _Hooks()
+    executor = ProbeExecutor(
+        provider,
+        [_tool("inspect", execute)],
+        ledger,
+        journal=hooks,
+        usage_meter=_RaisingMeter(raise_on_success=ValueError("dataset_id not in scope")),
+    )
+
+    result = executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+
+    assert result.status == "completed"
+    assert result.answer == "Recovered after meter failure."
+    assert result.tool_calls == 1
+    assert ledger.snapshot()["successful_tool_calls"] == 0
+    terminal = [fields for event, fields in hooks.events if event == "tool_terminal"]
+    assert terminal[-1]["outcome"] == "failed"
+    assert "dataset_id not in scope" in terminal[-1]["error"]
+    second_call_messages = provider.calls[1]["messages"]
+    tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
+    assert tool_messages
+    assert json.loads(tool_messages[-1]["content"])["ok"] is False
+
+
+def test_usage_meter_project_error_skips_the_call_without_a_journal_entry() -> None:
+    executions = 0
+
+    def execute(_args: BaseModel) -> AgentToolResult:
+        nonlocal executions
+        executions += 1
+        return AgentToolResult(content={"value": 1})
+
+    provider = _Provider(
+        [
+            LLMToolResponse(tool_calls=[_call("inspect")]),
+            LLMToolResponse(content="Recovered after project failure."),
+        ]
+    )
+    ledger = ToolCallLedger(_policy("inspect"))
+    hooks = _Hooks()
+    executor = ProbeExecutor(
+        provider,
+        [_tool("inspect", execute)],
+        ledger,
+        journal=hooks,
+        usage_meter=_RaisingMeter(raise_on_project=ValueError("dataset_id not in scope")),
+    )
+
+    result = executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+
+    assert result.status == "completed"
+    assert result.answer == "Recovered after project failure."
+    assert executions == 0
+    assert result.tool_calls == 0
+    assert not any(event in {"tool_started", "tool_terminal"} for event, _fields in hooks.events)
+    second_call_messages = provider.calls[1]["messages"]
+    tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
+    assert tool_messages
+    assert json.loads(tool_messages[-1]["content"])["ok"] is False
+
+
+def test_usage_meter_success_budget_error_still_terminates_the_run() -> None:
+    provider = _Provider([LLMToolResponse(tool_calls=[_call("inspect")])])
+
+    def execute(_args: BaseModel) -> AgentToolResult:
+        return AgentToolResult(content={"value": 1}, receipt_artifact=_Receipt("rcpt-1"))
+
+    ledger = ToolCallLedger(_policy("inspect"))
+    hooks = _Hooks()
+    budget_error = BudgetExceeded("meter enforced its own cap")
+    executor = ProbeExecutor(
+        provider,
+        [_tool("inspect", execute)],
+        ledger,
+        journal=hooks,
+        usage_meter=_RaisingMeter(raise_on_success=budget_error),
+    )
+
+    with pytest.raises(BudgetExceeded) as captured:
+        executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+
+    assert captured.value is budget_error
+    terminal = [fields for event, fields in hooks.events if event == "tool_terminal"]
+    assert terminal[-1]["outcome"] == "failed"
+
+
 def test_failure_history_is_capped_at_five_entries_of_160_chars() -> None:
     provider = _Provider(
         [
@@ -887,3 +1017,100 @@ def test_jsonl_hooks_reject_an_unclaimed_executor_before_provider_call(tmp_path:
         ).run(phase="execute_probes", system_prompt="x", user_message="y")
 
     assert provider.calls == []
+
+
+def test_a_malformed_tool_call_is_retried_not_fatal() -> None:
+    """A provider that emits unparseable tool arguments has answered — the
+    answer is just unusable. Killing the run discards every round already paid
+    for; observed on deepseek-v4-flash at round 2 of the 2026-08-03 trial."""
+    hooks = _Hooks()
+    provider = _Provider(
+        [
+            MalformedProviderResponseError("LLM tool arguments are not valid JSON."),
+            LLMToolResponse(content="Recovered."),
+        ]
+    )
+    result = ProbeExecutor(
+        provider,
+        [_tool("inspect", lambda _args: AgentToolResult(content={}))],
+        ToolCallLedger(_policy("inspect")),
+        journal=hooks,
+    ).run(phase="execute_probes", system_prompt="x", user_message="y")
+
+    assert result.status == "completed"
+    assert [
+        fields["outcome"] for event, fields in hooks.events if event == "llm_terminal"
+    ] == ["rejected", "completed"]
+    assert "not valid JSON" in provider.calls[1]["messages"][-1]["content"]
+
+
+class _IndexArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    n: int
+
+
+def test_a_later_empty_turn_is_retried_rather_than_ending_the_probe() -> None:
+    """One empty turn early and one empty turn later are two independent model
+    hiccups, not evidence the probe is stuck. Latching a single run-wide bool
+    killed probes that had already committed receipts."""
+    provider = _Provider(
+        [
+            LLMToolResponse(),
+            LLMToolResponse(tool_calls=[_call("inspect")]),
+            LLMToolResponse(),
+            LLMToolResponse(content="Probe complete.", finish_reason="stop"),
+        ]
+    )
+    result = ProbeExecutor(
+        provider,
+        [_tool("inspect", lambda _args: AgentToolResult(content={}))],
+        ToolCallLedger(_policy("inspect")),
+    ).run(phase="execute_probes", system_prompt="x", user_message="y")
+
+    assert result.status == "completed"
+    assert result.answer == "Probe complete."
+    assert len(provider.calls) == 4
+
+
+def test_an_oversized_native_batch_rejects_the_overflow_before_executing_any_tool() -> None:
+    """A 14-call batch whose first two calls are filtered out used to execute 12
+    tools and then raise on the 13th action index, leaving the journal holding
+    work no caller could settle. The overflow must be refused up front."""
+    executed: list[int] = []
+
+    def execute(args: BaseModel) -> AgentToolResult:
+        executed.append(cast(_IndexArgs, args).n)
+        return AgentToolResult(content={})
+
+    calls = [
+        _call("ghost", "call-0", n=0),
+        _call("ghost", "call-00", n=-1),
+        *[
+            _call("inspect", f"call-{index}", n=index)
+            for index in range(1, 13)
+        ],
+    ]
+    assert len(calls) == 14
+    provider = _Provider(
+        [
+            LLMToolResponse(tool_calls=calls),
+            LLMToolResponse(content="Probe complete.", finish_reason="stop"),
+        ]
+    )
+    result = ProbeExecutor(
+        provider,
+        [_tool("inspect", execute, args_schema=_IndexArgs)],
+        ToolCallLedger(_policy("inspect", max_calls=12)),
+    ).run(phase="execute_probes", system_prompt="x", user_message="y")
+
+    assert result.status == "completed"
+    # Actions 13 and 14 are past the per-step ceiling and never ran.
+    assert executed == list(range(1, 11))
+    overflow = [
+        message
+        for message in provider.calls[1]["messages"]
+        if message.get("role") == "tool"
+        and "batch position" in str(message.get("content", ""))
+    ]
+    assert len(overflow) == 2

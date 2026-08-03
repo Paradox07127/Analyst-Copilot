@@ -62,8 +62,8 @@ class _ToolArgs(BaseModel):
 
 def _tool() -> AgentTool:
     return AgentTool(
-        name="inspect_data_catalog",
-        description="Read the approved catalog.",
+        name="profile_slice",
+        description="Profile an approved slice.",
         args_schema=_ToolArgs,
         execute=lambda _args: AgentToolResult(content={"ok": True}),
     )
@@ -494,3 +494,26 @@ def test_restart_rebuilds_multi_round_scheduler_and_goal_state_from_disk(
         recovery=recovery,
         journal=journal,
     )
+
+
+def test_no_cost_cap_means_no_budget_pressure_not_zero_budget() -> None:
+    """max_cost_usd=None is schema-legal "uncapped"; mapping it to 0.0 made
+    within_remaining_budget reject every candidate including mandatory ones."""
+    from decimal import Decimal
+
+    from eda_platform.agents.exploration.supervisor import (
+        PhaseContext,
+        SupervisorPhase,
+    )
+    from eda_platform.worker.exploration import _remaining_cost_fraction
+
+    context = PhaseContext(
+        exploration_id="xpl-cost",
+        round_index=0,
+        phase=SupervisorPhase.ORIENT,
+        data_state_witness="dsw1_cost",
+        soft_countdown_context="not-a-countdown",
+        completed_step_ids=frozenset(),
+    )
+    assert _remaining_cost_fraction(context, None) == 1.0
+    assert _remaining_cost_fraction(context, Decimal("0")) == 0.0
