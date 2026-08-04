@@ -476,6 +476,10 @@ class QuestionExecutionSummary(BaseModel):
     qexec_artifact_id: str
     execution_session_id: str
     abstention_code: str | None = None
+    failure_reason: str | None = None
+    """First line of the execution's error, so a failed card can say why it
+    failed without the reader opening its artifact. The full text stays on the
+    QuestionExecutionResult artifact."""
 
 
 class QuestionSummary(BaseModel):

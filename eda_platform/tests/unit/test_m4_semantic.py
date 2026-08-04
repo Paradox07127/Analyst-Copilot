@@ -133,13 +133,15 @@ def test_limitations_section_synthesized_from_quality_artifact(tmp_path: Path) -
     limitations = _section_text(markdown, "## Limitations and Risks")
 
     assert "No validated conclusion is available" not in limitations
-    # Each line reads as human prose, prefixed with the dataset name.
-    assert "teams.csv: columns that are 100% missing:" in limitations
-    assert "`notes`" in limitations
-    assert "teams.csv: constant columns" in limitations
-    assert "`region`" in limitations
+    # Each line reads as human prose, prefixed with the dataset name, and says
+    # what the flag costs the analysis rather than naming the scanner code.
+    assert "teams.csv: `notes` is entirely missing" in limitations
+    assert "teams.csv: `region`, `score` hold one value in every row" in limitations
     assert "teams.csv: high-risk columns for analysis:" in limitations
-    assert "`score`" in limitations
+    # One fact, one line: the grouped footer owns these codes, so the same
+    # column must not also get a per-column sentence above it.
+    assert limitations.count("`notes`") == 2  # empty-column footer + high-risk footer
+    assert limitations.count("`region`") == 1
     # Raw evidence ids are kept out of the human-readable limitations prose (P0-3).
     assert "Evidence:" not in limitations
 

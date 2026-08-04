@@ -155,10 +155,11 @@ function CategorySpark({ dist }: { dist: ColumnDistribution }) {
   );
 }
 
+/* Reserves the column's width and draws nothing. It used to draw a flat rule,
+ * which in a shape column reads as "this distribution is flat" — the opposite
+ * of "there is no distribution for this column". */
 function MissingSpark() {
-  return (
-    <span className="inline-block h-[2px] w-8 rounded-sm bg-track align-middle" />
-  );
+  return <span aria-hidden="true" className="inline-block w-8 align-middle" />;
 }
 
 /** Mini histogram for numeric columns, top-value bars for categorical ones —

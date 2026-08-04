@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import type { QualityIssueRow } from "../../api/client";
 import { useQuality } from "../../api/hooks";
+import { qualityCodeLabel, qualityCodeMeaning } from "../../api/quality-codes";
 import {
   EmptyState,
   ErrorState,
@@ -68,9 +69,15 @@ function IssueRow({
   return (
     <li className="flex min-w-0 flex-col gap-2 border-t border-hairline px-3 py-2.5 first:border-t-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <Badge tone="neutral">
-          <span className="font-mono">{issue.code}</span>
+        {/* Named condition first, code kept beside it: the code is what the
+          * filter and the `?codes=` URL use, so it stays visible, but it is no
+          * longer the only thing naming the flag. */}
+        <Badge tone="neutral" title={qualityCodeMeaning(issue.code)}>
+          {qualityCodeLabel(issue.code)}
         </Badge>
+        <span className="font-mono text-[11px] text-status-neutral">
+          {issue.code}
+        </span>
         <Marquee className="text-sm font-medium">
           {issue.dataset_name}
         </Marquee>
@@ -351,9 +358,9 @@ export function Component() {
                         </span>
                       </div>
                       {codeOptions.map((option) => (
-                        <label key={option.code} className="flex items-center gap-2 rounded-sm px-1 py-1 hover:bg-surface">
+                        <label key={option.code} title={qualityCodeMeaning(option.code)} className="flex items-center gap-2 rounded-sm px-1 py-1 hover:bg-surface">
                           <input type="checkbox" aria-label={`${option.code} (${option.count})`} checked={selectedCodes?.has(option.code) ?? true} onChange={() => toggleCode(option.code)} />
-                          <span className="min-w-0 flex-1 truncate font-mono text-xs">{option.code}</span>
+                          <span className="min-w-0 flex-1 truncate text-xs">{qualityCodeLabel(option.code)}</span>
                           <span className="tabular text-xs text-status-neutral">{option.count}</span>
                         </label>
                       ))}

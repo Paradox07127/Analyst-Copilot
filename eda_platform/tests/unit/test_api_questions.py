@@ -22,6 +22,7 @@ from eda_platform.application.ports import JobRef
 from eda_platform.application.services.approval_service import ApprovalService
 from eda_platform.application.services.question_service import (
     QuestionService,
+    _failure_headline,
     candidate_fingerprint,
     latest_candidate_set,
 )
@@ -772,3 +773,41 @@ def test_runner_fails_unknown_job_kind(workspace: Path) -> None:
     assert final is not None
     assert final["status"] == "failed"
     assert final["error_code"] == "ValueError"
+
+
+class TestFailureHeadline:
+    """A failed card must say what blocked it, not just that it failed."""
+
+    GUARD_ERROR = (
+        "Tool guard rejected parameters for `execute_question_candidate`.\n"
+        "What was wrong:\n"
+        "- `plan.sql` got 'SQL containing a JOIN with no declared "
+        "required_relations': SQL joins tables but the question declares no "
+        "required_relations.\n"
+        "Allowed:\n"
+        "- `plan.sql`: JOIN SQL only for questions declaring confirmed relations.\n"
+        "How to fix:\n"
+        "- `plan.sql`: Declare required_relations."
+    )
+
+    def test_prefers_the_cause_over_the_generic_first_line(self) -> None:
+        # The first line names the mechanism; the reader needs the cause.
+        assert _failure_headline(self.GUARD_ERROR) == (
+            "SQL joins tables but the question declares no required_relations."
+        )
+
+    def test_falls_back_to_the_first_line_without_a_cause_section(self) -> None:
+        assert _failure_headline("Timed out after 180s.") == "Timed out after 180s."
+
+    def test_reads_a_bare_bullet_when_it_has_no_guard_prefix(self) -> None:
+        error = "head\nWhat was wrong:\n- the table was empty\nAllowed:\n- rows"
+        assert _failure_headline(error) == "the table was empty"
+
+    @pytest.mark.parametrize("error", [None, "", "   \n  \n", 42, {"a": 1}])
+    def test_returns_none_when_there_is_nothing_to_say(self, error: object) -> None:
+        assert _failure_headline(error) is None
+
+    def test_truncates_a_runaway_cause(self) -> None:
+        headline = _failure_headline("x" * 900)
+        assert headline is not None
+        assert len(headline) == 240

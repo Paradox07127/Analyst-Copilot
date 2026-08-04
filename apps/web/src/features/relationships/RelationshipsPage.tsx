@@ -1376,6 +1376,46 @@ function DiscoverAction({
   );
 }
 
+/* Shown in place of the workbench until discovery has run. Teaches what the
+ * step costs and produces, rather than rendering an empty grid of every table
+ * pair and hiding the only available action underneath it. */
+function PreDiscoveryPanel({
+  projectId,
+  sessionId,
+  datasetCount,
+  canDiscover,
+}: {
+  projectId: string;
+  sessionId: string;
+  datasetCount: number;
+  /* Readable source tables, not table count: discovery re-reads every source
+   * file, so a session whose uploads are gone cannot run it. */
+  canDiscover: boolean;
+}) {
+  const pairCount = (datasetCount * (datasetCount - 1)) / 2;
+  return (
+    <Card className="flex max-w-3xl flex-col gap-3 p-5">
+      <SectionHeader
+        level={2}
+        title="Relationship discovery has not run"
+        description="Nothing on this page is empty because the tables are unrelated — the session has not looked yet. It deferred cross-table discovery to keep the main analysis fast."
+      />
+      <p className="text-sm">
+        Running it reads all {datasetCount} source tables and scores the{" "}
+        <span className="tabular">{pairCount}</span> possible table pairs for
+        columns that could join. It runs as a background job; you can keep
+        working while it does.
+      </p>
+      <DiscoverAction
+        projectId={projectId}
+        sessionId={sessionId}
+        canDiscover={canDiscover}
+        rerun={false}
+      />
+    </Card>
+  );
+}
+
 function RelationshipGraph({
   nodes: nodeData,
   pairs,
@@ -2427,30 +2467,31 @@ export function Component() {
       title="Relationships"
       description="Discover and validate how tables connect. A candidate never becomes usable as a join until it is confirmed."
     >
-      <MetricStrip>
-        <MetricTile label="Datasets" value={formatCompact(nodes.length)} />
-        <MetricTile
-          label="Dataset pairs"
-          value={formatCompact(pairCount)}
-          hint="Unique source-to-target table pairs with at least one candidate."
-        />
-        <MetricTile
-          label="Column candidates"
-          value={formatCompact(edges.length)}
-          hint="Scored column-level relationships across all dataset pairs."
-        />
-        <MetricTile
-          label="Confirmed joins"
-          value={formatCompact(confirmedJoinCount)}
-          tone={confirmedJoinCount > 0 ? "ok" : "neutral"}
-          hint="Column relationships promoted for use as joins."
-        />
-        <MetricTile
-          label="Discovery"
-          value={graph.data.discovered ? "Complete" : "Not run"}
-          tone={graph.data.discovered ? "ok" : "neutral"}
-        />
-      </MetricStrip>
+      {graph.data.discovered && (
+        /* Before discovery runs these read "0 pairs, 0 candidates, 0 joins",
+         * which states a finding the session never looked for. The pre-run
+         * state is carried by the panel below instead. */
+        <MetricStrip>
+          <MetricTile label="Datasets" value={formatCompact(nodes.length)} />
+          <MetricTile
+            label="Dataset pairs"
+            value={formatCompact(pairCount)}
+            hint="Unique source-to-target table pairs with at least one candidate."
+          />
+          <MetricTile
+            label="Column candidates"
+            value={formatCompact(edges.length)}
+            hint="Scored column-level relationships across all dataset pairs."
+          />
+          <MetricTile
+            label="Confirmed joins"
+            value={formatCompact(confirmedJoinCount)}
+            tone={confirmedJoinCount > 0 ? "ok" : "neutral"}
+            hint="Column relationships promoted for use as joins."
+          />
+          <MetricTile label="Discovery" value="Complete" tone="ok" />
+        </MetricStrip>
+      )}
 
       <SearchCoverage graph={graph.data} />
 
@@ -2458,6 +2499,19 @@ export function Component() {
         <EmptyState
           title="No datasets in this session"
           description="Upload data and start a session to explore relationships."
+        />
+      ) : !graph.data.discovered ? (
+        /* The whole workbench is scaffolding for data that does not exist yet:
+         * a focus picker listing every table as "Isolated", and a 12x12 matrix
+         * of empty cells, with the one useful control — Discover — below all
+         * 144 of them. */
+        <PreDiscoveryPanel
+          projectId={projectId}
+          sessionId={sessionId}
+          datasetCount={nodes.length}
+          canDiscover={
+            nodes.filter((node) => node.source_available).length >= 2
+          }
         />
       ) : (
         <Workbench

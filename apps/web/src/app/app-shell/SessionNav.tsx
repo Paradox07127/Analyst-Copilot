@@ -19,6 +19,9 @@ interface NavPage {
 interface NavGroup {
   title: string;
   pages: NavPage[];
+  /** Routes that belong to this stage but render no link — a capability-gated
+   *  page still has to resolve to its own stage when opened directly. */
+  alsoOwns?: string[];
 }
 
 type StageState = "ready" | "running" | "waiting";
@@ -86,6 +89,11 @@ function buildNavGroups(
     },
     {
       title: "Investigate with the agent",
+      /* Explore is hidden while the release certificate is missing, but the
+       * route still renders. Without this the stage matcher found no owning
+       * group and fell back to stage 1, so opening Explore said "Understand
+       * the data". */
+      alsoOwns: [at("explorations")],
       pages: [
         ...(explorationAvailable
           ? [{ label: "Explore", icon: "sparkle" as const, to: at("explorations") }]
@@ -265,8 +273,11 @@ function SessionNavGroups({
   );
 
   const currentGroup =
-    groups.find((group) => group.pages.some((page) => pageMatches(pathname, page))) ??
-    groups[0]!;
+    groups.find(
+      (group) =>
+        group.pages.some((page) => pageMatches(pathname, page)) ||
+        (group.alsoOwns ?? []).some((path) => matchesPath(pathname, path)),
+    ) ?? groups[0]!;
   const lookahead = browsing?.pathname === pathname ? browsing.title : null;
   const selected =
     groups.find((group) => group.title === lookahead) ?? currentGroup;

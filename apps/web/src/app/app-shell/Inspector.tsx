@@ -7,6 +7,7 @@ import {
   useSessionDetail,
   useSupportDocs,
 } from "../../api/hooks";
+import { qualityCodeLabel, qualityCodeTitle } from "../../api/quality-codes";
 import { sessionSectionPath } from "../paths";
 import { isUnfiled } from "../unfiled";
 import { Marquee } from "../../components/ui";
@@ -21,6 +22,7 @@ const SECTION_LABELS: Record<string, string> = {
   cleaning: "Cleanup",
   relationships: "Relationships",
   semantic: "Knowledge",
+  explorations: "Explore",
   questions: "Questions",
   "deep-analysis": "Deep analysis",
   findings: "Findings",
@@ -117,8 +119,17 @@ function DataReadiness({ sessionId }: { sessionId: string }) {
             {dataset.grain ?? "Grain not established."}
           </p>
           {dataset.materialCodes.length > 0 && (
-            <p className="font-mono text-[10px] text-status-neutral">
-              {dataset.materialCodes.slice(0, 4).join(" · ")}
+            /* Named conditions, not scanner codes: this strip used to read
+             * "duplicate_rows · empty_column · high_missing · id_not_unique",
+             * which only helps a reader who already knows the enum. The code
+             * itself stays reachable through the title. */
+            <p className="flex flex-wrap gap-x-1.5 text-[10px] text-status-neutral">
+              {dataset.materialCodes.slice(0, 4).map((code, index) => (
+                <span key={code} title={qualityCodeTitle(code)}>
+                  {index > 0 && <span aria-hidden className="mr-1.5">·</span>}
+                  {qualityCodeLabel(code)}
+                </span>
+              ))}
             </p>
           )}
           {dataset.piiCount > 0 && (
@@ -309,15 +320,24 @@ export function Inspector() {
   const projectId = focused?.projectId ?? route.projectId ?? "";
   const sessionId = focused?.sessionId ?? route.sessionId ?? "";
   const run = useSessionDetail(sessionId);
-  // "table/:datasetId" ends in an id, not a section name; fall back to the
-  // preceding segment so the page keeps its label and its data context.
+  // "table/:datasetId" and "explorations/:explorationId" end in an id, not a
+  // section name; fall back to the preceding segment so the page keeps its
+  // label and its data context.
   const segments = pathname.split("/").filter(Boolean);
   const lastSegment = segments.at(-1) ?? "";
+  const previousSegment = segments.at(-2) ?? "";
   const pathSection =
-    lastSegment in SECTION_LABELS ? lastSegment : (segments.at(-2) ?? lastSegment);
+    lastSegment in SECTION_LABELS
+      ? lastSegment
+      : previousSegment in SECTION_LABELS
+        ? previousSegment
+        : lastSegment;
   const section = focused?.section ?? pathSection;
+  /* Only a mapped section may name itself. The old fallback printed whatever
+   * segment it landed on, which put a raw session id under "Current page" on
+   * any route this map does not know. */
   const sectionLabel =
-    SECTION_LABELS[section] ?? (section && sessionId ? section : "Home");
+    SECTION_LABELS[section] ?? (sessionId ? "This session" : "Home");
 
   return (
     <aside

@@ -28,6 +28,7 @@ import {
 import {
   queryKeys,
   useChatMessages,
+  useDatasets,
   useChatPendingPlans,
   useArtifact,
   useSandboxStatus,
@@ -402,10 +403,33 @@ function MessageRow({
   );
 }
 
+/* Grounded in this session's own tables, so the first question is answerable
+ * rather than a generic example the agent has to refuse. */
+function starterPrompts(datasetNames: string[]): string[] {
+  const first = datasetNames[0];
+  const second = datasetNames[1] ?? first;
+  if (!first) {
+    return [
+      "Which columns have the most missing values?",
+      "Which two numeric columns move together most strongly?",
+      "What is the grain of each table — what does one row mean?",
+    ];
+  }
+  return [
+    `What does one row of ${first} mean?`,
+    `Which columns in ${first} have the most missing values?`,
+    `How do ${first} and ${second} relate to each other?`,
+  ];
+}
+
 export function Component() {
   const { sessionId = "" } = useParams();
   const queryClient = useQueryClient();
   const transcript = useChatMessages(sessionId);
+  const datasets = useDatasets(sessionId);
+  const datasetNames = (datasets.data ?? [])
+    .map((dataset) => dataset.display_name)
+    .filter((name): name is string => Boolean(name));
   const [turn, setTurn] = useState<ChatMessageAccepted | null>(null);
   const [draft, setDraft] = useState("");
   const [llmMode, setLlmMode] = useState<"env" | "offline">("env");
@@ -605,9 +629,28 @@ export function Component() {
             )}
 
             {messages.length === 0 && (
-              <p className="my-auto text-center text-sm text-status-neutral">
-                No messages yet. Ask a question below.
-              </p>
+              /* "No messages yet" told the reader what they could already see.
+               * An opening question is the hard part here, so the empty state
+               * offers three that name this session's own tables. */
+              <div className="my-auto flex flex-col items-center gap-3 text-center">
+                <p className="text-sm text-status-neutral">
+                  Ask about this session&apos;s data. Every answer names the
+                  table and query it came from.
+                </p>
+                <ul className="flex flex-col items-center gap-1.5">
+                  {starterPrompts(datasetNames).map((prompt) => (
+                    <li key={prompt}>
+                      <button
+                        type="button"
+                        onClick={() => setDraft(prompt)}
+                        className="rounded-base border border-border px-3 py-1.5 text-left text-sm hover:border-primary hover:text-primary"
+                      >
+                        {prompt}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
             <ul className="flex flex-col gap-3">
               {messages.map((message) => (

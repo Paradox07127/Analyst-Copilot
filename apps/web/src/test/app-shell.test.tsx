@@ -91,7 +91,15 @@ describe("App Shell", () => {
       ),
     ).toBeInTheDocument();
     expect(within(inspector).getByText("limited")).toBeInTheDocument();
-    expect(within(inspector).getByText("id_not_unique")).toBeInTheDocument();
+    /* The condition is named, not spelled as the scanner's enum; the code
+     * itself stays reachable through the title. */
+    expect(within(inspector).getByText("Ids repeat")).toBeInTheDocument();
+    expect(
+      within(inspector).getByTitle(/id_not_unique/),
+    ).toBeInTheDocument();
+    expect(
+      within(inspector).queryByText("id_not_unique"),
+    ).not.toBeInTheDocument();
     expect(
       within(inspector).getByText("1 PII column masked in shared artifacts"),
     ).toBeInTheDocument();

@@ -148,8 +148,12 @@ function FieldTable({
         .map((item) => `${String(item.value)} ${formatCompact(item.count)}`)
         .join(" · ") || "True / false";
     }
-    if (kind === "temporal") return field.sample_values || "Date / time values";
-    return field.sample_values || "No sample";
+    /* Everything above describes the column's shape. The fallback is a handful
+     * of actual cell values, so it says so: under a "Shape" header, a bare
+     * "1, 1, 1" for match_id reads as a statistic rather than three rows. */
+    const samples = field.sample_values?.trim();
+    if (!samples) return kind === "temporal" ? "Date / time values" : "No sample";
+    return `e.g. ${samples}`;
   }
 
   return (

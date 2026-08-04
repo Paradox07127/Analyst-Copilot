@@ -54,11 +54,28 @@ def test_quality_context_contains_observations_without_business_cause_fields(
     assert set(context_set.contexts[0].model_dump()) == set(QualityContext.model_fields)
     forbidden = {"business_cause", "root_cause", "cause", "caused_by"}
     assert forbidden.isdisjoint(context_set.contexts[0].model_dump())
-    assert all(
-        "business cause remains unconfirmed" in context.report_limitation
-        or context.requires_data
-        for context in context_set.contexts
+    # The limitation states what the flag costs the analysis and never why the
+    # flag is there. It used to end in a fixed "business cause remains
+    # unconfirmed" clause; asserting on that string let the sentence around it
+    # splice the raw scanner code into the report, so the invariant is now
+    # checked directly.
+    causal_language = (
+        " because ",
+        "caused by",
+        "due to",
+        "the cause is",
+        "as a result of",
     )
+    for context in context_set.contexts:
+        limitation = context.report_limitation
+        assert limitation and limitation[-1] == "."
+        assert context.issue_code not in limitation, (
+            f"scanner code leaked into prose: {limitation!r}"
+        )
+        lowered = limitation.lower()
+        assert not any(phrase in lowered for phrase in causal_language), (
+            f"limitation asserts a cause: {limitation!r}"
+        )
 
 
 def test_quality_context_rejects_mismatched_profile_and_issue_set(tmp_path: Path) -> None:

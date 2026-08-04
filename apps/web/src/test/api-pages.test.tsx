@@ -159,9 +159,10 @@ describe("Data Map with real API", () => {
 
     expect(await screen.findByText("limited for analysis")).toBeInTheDocument();
     expect(screen.getByText("1 PII column")).toBeInTheDocument();
+    /* Named conditions rather than the raw scanner codes. */
     expect(screen.getByText("limited for analysis")).toHaveAttribute(
       "title",
-      expect.stringContaining("empty_dataset, id_not_unique"),
+      expect.stringContaining("Empty table, Ids repeat"),
     );
   });
 

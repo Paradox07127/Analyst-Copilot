@@ -430,7 +430,11 @@ export function Component() {
           className="min-w-0"
         >
           <Card tone="quiet" className="flex h-full min-w-0 flex-col divide-y divide-hairline p-0">
-            <section className="min-h-0 flex-1 p-3.5 sm:p-4">
+            {/* Both halves are `flex-1` inside a fixed-height card, so a recent
+              * list longer than its share used to paint over the Projects
+              * heading below it (measured 318px of content in a 260px box).
+              * Scrolling keeps each half inside its own bounds. */}
+            <section className="min-h-0 flex-1 overflow-auto p-3.5 sm:p-4">
               {historyUsage.isPending && (
                 <LoadingSkeleton lines={3} label="Loading recent work" />
               )}
@@ -447,7 +451,7 @@ export function Component() {
               )}
             </section>
 
-            <section className="min-h-0 flex-1 p-3.5 sm:p-4">
+            <section className="min-h-0 flex-1 overflow-auto p-3.5 sm:p-4">
               {projects.isPending && (
                 <LoadingSkeleton lines={3} label="Loading projects" />
               )}

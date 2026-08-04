@@ -24,9 +24,40 @@ export type ClaimLedgerRow = {
   coverage: string;
 };
 
+/* Headings from here down are the machine record, not the narrative: a chart
+ * inventory with one entry per generated chart, the claim ledger, the
+ * per-figure verification trace, and the validator's own notes. They are the
+ * reason the report is defensible and they are also ~half its words, so the
+ * page keeps them behind one disclosure instead of in the reading path.
+ * schemas/reports.py:318 fixes this section order. */
+const REFERENCE_HEADINGS = new Set([
+  "Appendix: Charts and Technical Summary",
+  "Claim Ledger",
+  "Evidence detail",
+  "Validator Findings",
+  "Audit Notes",
+]);
+
+/* schemas/reports.py:10-11. The exporter prints one of these under every
+ * section heading that carries claims, so a 11-section report repeats the same
+ * sentence up to 11 times. The badges on each claim already say what tier of
+ * evidence backs it. */
+const SECTION_PREAMBLES = new Set([
+  "Validated evidence-backed findings are listed below.",
+  "Analysis focus questions from this run are listed below.",
+]);
+
 export type ReportOutline = {
   /** Markdown with the hoisted status line removed. */
   body: string;
+  /** `body` up to the first reference heading — the part meant to be read. */
+  narrative: string;
+  /** The reference half, or "" when the report has no such sections. */
+  reference: string;
+  /** Headings inside `reference`, for the disclosure's summary line. */
+  referenceHeadings: ReportHeading[];
+  /** Words in `narrative` only — what the reading estimate should count. */
+  narrativeWords: number;
   status: string | null;
   gate: string | null;
   headings: ReportHeading[];
@@ -61,7 +92,10 @@ function splitRow(line: string): string[] {
 
 export function readReportOutline(markdown: string): ReportOutline {
   const kept: string[] = [];
+  const narrativeLines: string[] = [];
+  const referenceLines: string[] = [];
   const headings: ReportHeading[] = [];
+  const referenceHeadings: ReportHeading[] = [];
   const ledger: ClaimLedgerRow[] = [];
   const inspectableIds = new Set<string>();
   const seenHeadings = new Set<string>();
@@ -69,16 +103,23 @@ export function readReportOutline(markdown: string): ReportOutline {
   let gate: string | null = null;
   let fenced = false;
   let inLedger = false;
+  let inReference = false;
   let words = 0;
+  let narrativeWords = 0;
 
   for (const line of markdown.split("\n")) {
+    const emit = (text: string) => {
+      kept.push(text);
+      (inReference ? referenceLines : narrativeLines).push(text);
+    };
+
     if (FENCE.test(line)) {
       fenced = !fenced;
-      kept.push(line);
+      emit(line);
       continue;
     }
     if (fenced) {
-      kept.push(line);
+      emit(line);
       continue;
     }
 
@@ -93,13 +134,25 @@ export function readReportOutline(markdown: string): ReportOutline {
       }
     }
 
+    if (SECTION_PREAMBLES.has(line.trim())) continue;
+
     const heading = HEADING.exec(line);
     if (heading) {
       const text = (heading[2] ?? "").trim();
       const id = headingId(text);
+      /* Latching: once the report reaches its reference half it stays there,
+       * so a stray narrative-looking heading after the ledger cannot pull the
+       * evidence tables back into the reading path. */
+      inReference = inReference || REFERENCE_HEADINGS.has(text);
+      const entry: ReportHeading = {
+        id,
+        text,
+        level: heading[1]?.length === 2 ? 2 : 3,
+      };
       if (!seenHeadings.has(id)) {
         seenHeadings.add(id);
-        headings.push({ id, text, level: heading[1]?.length === 2 ? 2 : 3 });
+        headings.push(entry);
+        if (inReference) referenceHeadings.push(entry);
       }
       inLedger = text === "Claim Ledger";
     } else if (/^\s*#/.test(line)) {
@@ -129,12 +182,20 @@ export function readReportOutline(markdown: string): ReportOutline {
     const leading = LEADING_ID.exec(line.trim());
     if (leading?.[1]) inspectableIds.add(leading[1]);
 
-    words += line.split(/\s+/).filter((token) => WORDISH.test(token)).length;
-    kept.push(line);
+    const lineWords = line
+      .split(/\s+/)
+      .filter((token) => WORDISH.test(token)).length;
+    words += lineWords;
+    if (!inReference) narrativeWords += lineWords;
+    emit(line);
   }
 
   return {
     body: kept.join("\n"),
+    narrative: narrativeLines.join("\n"),
+    reference: referenceLines.join("\n").trim() ? referenceLines.join("\n") : "",
+    referenceHeadings,
+    narrativeWords,
     status,
     gate,
     headings,

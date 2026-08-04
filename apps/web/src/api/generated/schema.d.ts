@@ -6501,6 +6501,8 @@ export interface components {
             execution_session_id: string;
             /** Abstention Code */
             abstention_code?: string | null;
+            /** Failure Reason */
+            failure_reason?: string | null;
         };
         /** QuestionPrepareRequest */
         QuestionPrepareRequest: {
