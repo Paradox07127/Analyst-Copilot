@@ -66,6 +66,7 @@ from eda_platform.agents.exploration.supervisor import (
     reduction_outcome_digest,
 )
 from eda_platform.agents.exploration.workflow import (
+    DatasetFacts,
     ExplorationProvider,
     ExplorationWorkflowState,
     candidate_batch_digest,
@@ -596,6 +597,7 @@ def run_composed_shadow_exploration(
     admission_score_threshold: float | None = None,
     dataset_columns: Mapping[str, Iterable[str]] | None = None,
     supported_method_families: Iterable[str] = (),
+    dataset_facts: Mapping[str, DatasetFacts] | None = None,
     probe_concurrency: int = 1,
 ) -> ShadowExplorationRunResult:
     """Official E4a composition root: real ports, durable ledgers, shadow-only sinks."""
@@ -762,6 +764,7 @@ def run_composed_shadow_exploration(
             goal=policy.goal,
             dataset_columns=dataset_columns,
             supported_method_families=supported_method_families,
+            dataset_facts=dataset_facts,
             probe_concurrency=probe_concurrency,
         )
 

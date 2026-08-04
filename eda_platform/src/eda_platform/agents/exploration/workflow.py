@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from eda_platform.agents.exploration.branching import (
@@ -122,6 +123,38 @@ class ExecutedProbeBatch:
     receipt_hypothesis_bindings: tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ColumnFact:
+    """One column as the proposing model needs to see it.
+
+    Column names alone made the model guess types: it grouped by dates, ran
+    correlations on ids, and re-proposed missingness probes on complete columns.
+    """
+
+    name: str
+    role: str
+    shape: str
+    missing_percent: float
+    distinct_count: int
+    example_values: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetFacts:
+    dataset_id: str
+    row_count: int
+    columns: tuple[ColumnFact, ...]
+    grain: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PriorFinding:
+    """A conclusion this run already reached, replayed back into GENERATE."""
+
+    statement: str
+    verdict: str
+
+
 @dataclass(slots=True)
 class JournaledCandidateGenerator:
     """One structured proposal call plus deterministic mandatory coverage seeds."""
@@ -135,6 +168,8 @@ class JournaledCandidateGenerator:
     dataset_columns: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     supported_method_families: tuple[str, ...] = ()
     coverage_completed: Callable[[], frozenset[str]] = lambda: frozenset()
+    dataset_facts: Mapping[str, DatasetFacts] = field(default_factory=dict)
+    prior_findings: Callable[[], tuple[PriorFinding, ...]] = lambda: ()
 
     def generate(self, context: PhaseContext, *, logical_step_id: str) -> CandidateBatch:
         call_id = "llm_" + stable_hash(
@@ -283,19 +318,92 @@ class JournaledCandidateGenerator:
             "method_family values listed here; anything else is rejected by the "
             "system before it can run."
         )
+        settled = self.prior_findings()
+        if settled:
+            instruction += (
+                " already_settled lists what this run has established or refuted."
+                " Do not re-propose those questions or a reworded variant of them;"
+                " propose what they now make worth asking next."
+            )
         return {
             "round_index": context.round_index,
             "data_state_witness": context.data_state_witness,
             "budget_context": context.soft_countdown_context,
             "goal": self.goal,
             "datasets": [
-                {"dataset_id": dataset_id, "columns": list(columns)}
+                self._dataset_payload(dataset_id, columns)
                 for dataset_id, columns in sorted(self.dataset_columns.items())
+            ],
+            "already_settled": [
+                {"finding": finding.statement, "verdict": finding.verdict}
+                for finding in settled
             ],
             "method_families": sorted(self.supported_method_families),
             "instruction": instruction,
             "rejected_prior_attempts": list(rejections),
         }
+
+    def _dataset_payload(
+        self, dataset_id: str, columns: Sequence[str]
+    ) -> dict[str, Any]:
+        """Column names alone when the session has no profile for this dataset."""
+        facts = self.dataset_facts.get(dataset_id)
+        if facts is None:
+            return {"dataset_id": dataset_id, "columns": list(columns)}
+        named = {fact.name: fact for fact in facts.columns}
+        payload: dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "row_count": facts.row_count,
+            "columns": [
+                _column_payload(named[name]) if name in named else {"name": name}
+                for name in columns
+            ],
+        }
+        if facts.grain:
+            payload["grain"] = facts.grain
+        return payload
+
+
+_MAX_SETTLED_FINDINGS = 24
+_MAX_SETTLED_STATEMENT_CHARS = 240
+
+
+def settled_findings(state: ExplorationWorkflowState) -> tuple[PriorFinding, ...]:
+    """Conclusions already reached, newest first, for the next GENERATE call.
+
+    Server-side fingerprint dedup only rejects a repeat after the model has
+    already spent a proposal on it. Showing the model what it settled is what
+    stops the reworded duplicates that dedup cannot see.
+    """
+    findings: list[PriorFinding] = []
+    for insight in sorted(state.insights.values(), key=lambda item: item.insight_id):
+        bundle = state.admitted_bundles.get(insight.claim_bundle_id)
+        if bundle is None:
+            continue
+        statement = "; ".join(claim.claim_text for claim in bundle.claims).strip()
+        if not statement:
+            continue
+        if len(statement) > _MAX_SETTLED_STATEMENT_CHARS:
+            statement = statement[: _MAX_SETTLED_STATEMENT_CHARS - 1].rstrip() + "…"
+        # trust_level, not status: "new" says nothing about whether the
+        # question is answered, and answered is what suppresses a re-ask.
+        findings.append(
+            PriorFinding(statement=statement, verdict=insight.trust_level)
+        )
+    return tuple(findings[-_MAX_SETTLED_FINDINGS:])
+
+
+def _column_payload(fact: ColumnFact) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": fact.name,
+        "role": fact.role,
+        "shape": fact.shape,
+        "missing_percent": round(fact.missing_percent, 2),
+        "distinct_count": fact.distinct_count,
+    }
+    if fact.example_values:
+        payload["example_values"] = list(fact.example_values)
+    return payload
 
 
 @dataclass(slots=True)
@@ -375,6 +483,7 @@ def compose_exploration_workflow(
     goal: str | None = None,
     dataset_columns: Mapping[str, Iterable[str]] | None = None,
     supported_method_families: Iterable[str] = (),
+    dataset_facts: Mapping[str, DatasetFacts] | None = None,
     probe_concurrency: int = 1,
 ) -> ExplorationWorkflowComponents:
     """Wire real E4a control components; only provider/tools/data signals are injected."""
@@ -414,6 +523,8 @@ def compose_exploration_workflow(
             },
             supported_method_families=tuple(sorted(supported_method_families)),
             coverage_completed=lambda: frozenset(state.coverage_completed),
+            dataset_facts=dict(dataset_facts or {}),
+            prior_findings=lambda: settled_findings(state),
         ),
         scheduler=DeterministicSchedulerPort(
             policy=scheduler_policy,
@@ -430,6 +541,10 @@ def compose_exploration_workflow(
             receipt_decoder=artifact_receipt_decoder,
             persist_state=persist_state,
             probe_concurrency=probe_concurrency,
+            dataset_columns={
+                dataset_id: tuple(sorted(columns))
+                for dataset_id, columns in (dataset_columns or {}).items()
+            },
         ),
         validator=PassThroughValidatorPort(),
         reducer=ClaimGateReducerPort(
@@ -556,6 +671,10 @@ class SupervisorProbeExecutorPort:
     # Speedup plan P4: probe sessions have no data dependency on each other, so
     # a round's chosen batch may run concurrently. 1 = today's serial loop.
     probe_concurrency: int = 1
+    # Real schema per dataset. Without it the probe only ever saw its own
+    # hypothesis's columns and invented the rest (seed 9: transaction_date,
+    # date, created_at).
+    dataset_columns: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def _run_probe(
         self,
@@ -576,7 +695,7 @@ class SupervisorProbeExecutorPort:
                     "summary after tools; claims are built and gated separately. "
                     + context.soft_countdown_context
                 ),
-                user_message=_candidate_prompt(candidate),
+                user_message=_candidate_prompt(candidate, self.dataset_columns),
                 run_id=execution_run_id,
                 seen_probe_fingerprints=seen_probe_fingerprints,
                 failure_history=journal_state.failure_history,
@@ -958,16 +1077,30 @@ def _completed_response_digests(
     }
 
 
-def _candidate_prompt(value: object) -> str:
+def _candidate_prompt(
+    value: object,
+    dataset_columns: Mapping[str, tuple[str, ...]] = MappingProxyType({}),
+) -> str:
     if not isinstance(value, CandidateSeed):
         raise SupervisorInvariantError("frontier payload is not a CandidateSeed.")
     proposal = value.proposal
+    schema = "; ".join(
+        f"{dataset_id}({', '.join(dataset_columns[dataset_id])})"
+        for dataset_id in proposal.dataset_ids
+        if dataset_id in dataset_columns
+    )
     return (
         f"hypothesis_id={value.hypothesis_id}; statement={proposal.statement}; "
         f"expected_evidence={proposal.expected_evidence}; "
         f"falsification={'; '.join(proposal.falsification_conditions)}; "
         f"predicate={proposal.predicate.model_dump_json()}; "
         f"datasets={','.join(proposal.dataset_ids)}; columns={','.join(proposal.columns)}"
+        + (
+            f"; available_columns={schema} (these are the only columns that "
+            "exist; any other name will be rejected)"
+            if schema
+            else ""
+        )
     )
 
 

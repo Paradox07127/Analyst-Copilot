@@ -8,8 +8,12 @@ import {
   remainingBudget,
   stopReasonGuidance,
   stopReasonLabel,
+  statisticEntries,
   stopSeverity,
+  formatStatistic,
   type EvidenceLane,
+  type ExplorationEvidenceView,
+  type ExplorationFactView,
   type ExplorationInsightView,
   type ExplorationReportSectionId,
   type ExplorationRunView,
@@ -249,6 +253,63 @@ function ProofTrail({ insights }: { insights: readonly ExplorationInsightView[] 
   );
 }
 
+function factLabel(fact: ExplorationFactView): string {
+  const value =
+    typeof fact.value === "number" ? formatStatistic(fact.value) : String(fact.value ?? "—");
+  return fact.unit ? `${value} ${fact.unit}` : value;
+}
+
+/** The numbers first; the receipt id is provenance, not the finding. */
+function EvidenceCard({ evidence }: { evidence: ExplorationEvidenceView }) {
+  const statistics = evidence.statistics;
+  const entries = statistics ? statisticEntries(statistics) : [];
+  return (
+    <Card as="li" tone="quiet" className="flex flex-col gap-1.5 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">{evidence.toolName}</span>
+        {statistics?.outcome && (
+          <Badge
+            tone={statistics.outcome === "supports" ? "ok" : "critical"}
+            variant="outline"
+          >
+            {statistics.outcome}
+          </Badge>
+        )}
+        {statistics && (
+          <span className="text-xs text-status-neutral">{statistics.testName}</span>
+        )}
+      </div>
+      {entries.length > 0 && (
+        <dl className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs">
+          {entries.map((entry) => (
+            <div key={entry.label} className="flex items-baseline gap-1">
+              <dt className="text-status-neutral">{entry.label}</dt>
+              <dd className="tabular font-medium">{entry.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {entries.length === 0 && <p className="text-sm">{evidence.summary}</p>}
+      {evidence.facts.length > 0 && (
+        <Disclosure
+          summary="Measured facts"
+          meta={`${evidence.factIds.length} fact${evidence.factIds.length === 1 ? "" : "s"}`}
+        >
+          <dl className="flex flex-col gap-0.5 text-xs">
+            {evidence.facts.map((fact) => (
+              <div key={fact.factId} className="flex flex-wrap items-baseline gap-2">
+                <dt className="text-status-neutral">{fact.name}</dt>
+                <dd className="tabular font-medium">{factLabel(fact)}</dd>
+              </div>
+            ))}
+          </dl>
+        </Disclosure>
+      )}
+      <code className="text-2xs text-status-neutral">{evidence.receiptId}</code>
+    </Card>
+  );
+}
+
 export function ExplorationRunPanel({ run }: { run: ExplorationRunView }) {
   const current = run.currentHypothesis;
   return (
@@ -293,13 +354,7 @@ export function ExplorationRunPanel({ run }: { run: ExplorationRunView }) {
           ) : (
             <ul className="flex flex-col gap-2">
               {run.currentEvidence.map((evidence) => (
-                <Card as="li" key={evidence.receiptId} tone="quiet" className="px-3 py-2">
-                  <code className="text-xs">{evidence.receiptId}</code>
-                  <p className="text-sm">{evidence.summary}</p>
-                  <p className="text-xs text-status-neutral">
-                    Facts: {evidence.factIds.join(", ")}
-                  </p>
-                </Card>
+                <EvidenceCard key={evidence.receiptId} evidence={evidence} />
               ))}
             </ul>
           )}

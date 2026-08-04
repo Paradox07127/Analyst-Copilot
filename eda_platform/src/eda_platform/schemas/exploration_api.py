@@ -131,6 +131,31 @@ class ExplorationHypothesisView(BaseModel):
     priority: float
 
 
+class ExplorationFactView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fact_id: str
+    name: str
+    value: float | int | str | bool | None = None
+    unit: str | None = None
+
+
+class ExplorationStatisticsView(BaseModel):
+    """The adjudicating numbers, so a reader never has to open the journal."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    test_name: str
+    outcome: Literal["supports", "contradicts"] | None = None
+    test_statistic: float | None = None
+    p_value: float | None = None
+    adjusted_p_value: float | None = None
+    effect_size: float | None = None
+    ci_low: float | None = None
+    ci_high: float | None = None
+    sample_size: int | None = None
+
+
 class ExplorationEvidenceView(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -138,6 +163,8 @@ class ExplorationEvidenceView(BaseModel):
     tool_name: str
     summary: str
     fact_ids: tuple[str, ...] = ()
+    facts: tuple[ExplorationFactView, ...] = ()
+    statistics: ExplorationStatisticsView | None = None
 
 
 class ExplorationInsightView(BaseModel):

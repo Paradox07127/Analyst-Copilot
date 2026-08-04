@@ -63,6 +63,7 @@ from eda_platform.schemas.exploration_api import (
     ExplorationCostRange,
     ExplorationEventView,
     ExplorationEvidenceView,
+    ExplorationFactView,
     ExplorationHypothesisView,
     ExplorationInsightView,
     ExplorationJobView,
@@ -70,6 +71,7 @@ from eda_platform.schemas.exploration_api import (
     ExplorationReportView,
     ExplorationRunMetadata,
     ExplorationStarted,
+    ExplorationStatisticsView,
     ExplorationView,
 )
 from eda_platform.schemas.exploration_budget import (
@@ -89,7 +91,9 @@ APPROVAL_KIND_EXPLORATION_START = "exploration_start"
 EXPLORATION_JOB_KIND = "exploration_run"
 EXPLORATION_SESSION_PREFIX = "explsess_"
 EXPLORATION_RELEASE_CERTIFICATE_ENV = "EDA_EXPLORATION_RELEASE_CERTIFICATE_PATH"
+EXPLORATION_RELEASE_TRUSTED_KEYS_ENV = "EDA_EXPLORATION_RELEASE_TRUSTED_KEYS"
 EXPLORATION_EVENTS_PAGE_LIMIT = 500
+_ED25519_PUBLIC_KEY_BYTES = 32
 _MAX_CERTIFICATE_BYTES = 2 << 20
 _AMENDMENT_APPROVER = "system:e4b-api"
 
@@ -169,17 +173,119 @@ class _ProductProjection:
 
 SourceSnapshotResolver = Callable[[str, tuple[str, ...]], ExplorationSourceSnapshot]
 
+_WorkflowProjectionParts = tuple[
+    tuple[EvidenceReceipt, ...],
+    dict[str, ClaimBundle],
+    tuple[InsightRecord, ...],
+    tuple[str, ...],
+]
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+@dataclass(frozen=True, slots=True)
+class ExplorationReleaseTrust:
+    """What one composition root is allowed to trust for E4b, resolved once."""
+
+    certificate: E4aReleaseCertificate | None
+    public_keys: Mapping[str, bytes]
+    runtime_identity: ExplorationRuntimeIdentity | None
+
+
+def operator_pinned_release_public_keys() -> Mapping[str, bytes]:
+    """Read issuer keys an operator pinned in the environment.
+
+    The shipped map stays empty on purpose: neither a workspace file nor the
+    certificate may nominate its own trust root. The process environment is a
+    different class of input -- it is owned by whoever starts the server, the
+    same authority that supplies the certificate path -- so a local operator can
+    open E4b without patching the production constant. A malformed value raises
+    instead of falling back to the empty map: a typo in a trust root must be
+    loud, never a silent downgrade to "no trust".
+    """
+    raw = os.environ.get(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, "").strip()
+    if not raw:
+        return TRUSTED_E4A_RELEASE_PUBLIC_KEYS
+    keys: dict[str, bytes] = {}
+    for item in raw.split(","):
+        key_id, separator, hex_key = item.strip().partition(":")
+        if not separator or not key_id.strip():
+            raise ValueError(
+                f"{EXPLORATION_RELEASE_TRUSTED_KEYS_ENV} entries must be "
+                "'<key_id>:<hex_public_key>'"
+            )
+        try:
+            public_key = bytes.fromhex(hex_key.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"{EXPLORATION_RELEASE_TRUSTED_KEYS_ENV} public key for "
+                f"{key_id.strip()!r} is not hexadecimal"
+            ) from exc
+        if len(public_key) != _ED25519_PUBLIC_KEY_BYTES:
+            raise ValueError(
+                f"{EXPLORATION_RELEASE_TRUSTED_KEYS_ENV} public key for "
+                f"{key_id.strip()!r} must be {_ED25519_PUBLIC_KEY_BYTES} bytes"
+            )
+        keys[key_id.strip()] = public_key
+    return MappingProxyType(keys)
+
+
+def _operator_pinned_runtime_identity(
+    certificate: E4aReleaseCertificate,
+) -> ExplorationRuntimeIdentity:
+    """Bind the installed certificate to this build's own version constants.
+
+    The bindings and caps come from the certificate because the operator that
+    pinned its issuer key is vouching for them. The three version fields come
+    from the running code, so a certificate issued under a different gate,
+    scoring or statistical policy is still rejected -- and the worker still
+    recomputes the tool digest against the live tool inventory.
+    """
+    return ExplorationRuntimeIdentity(
+        release_gate_version=E4A_RELEASE_GATE_VERSION,
+        bindings=certificate.bindings,
+        hard_caps=certificate.hard_caps,
+        scoring_policy_version=EXPLORATION_PROFILE_VERSION,
+        statistical_policy_version=EXPLORATION_STATISTICAL_POLICY_VERSION,
+    )
+
+
+def resolve_configured_release_trust() -> ExplorationReleaseTrust:
+    """Resolve certificate, issuer keys and runtime identity as one decision."""
+    public_keys = operator_pinned_release_public_keys()
+    pinned_by_operator = public_keys is not TRUSTED_E4A_RELEASE_PUBLIC_KEYS
+    identity = TRUSTED_EXPLORATION_RUNTIME_IDENTITY
+    raw = os.environ.get(EXPLORATION_RELEASE_CERTIFICATE_ENV, "").strip()
+    if not raw:
+        return ExplorationReleaseTrust(None, public_keys, identity)
+    try:
+        path = Path(raw).expanduser()
+        if not path.is_file() or path.stat().st_size > _MAX_CERTIFICATE_BYTES:
+            return ExplorationReleaseTrust(None, public_keys, identity)
+        certificate = E4aReleaseCertificate.model_validate_json(path.read_bytes())
+        verified = verify_e4a_release_certificate(
+            certificate,
+            trusted_public_keys=public_keys,
+        )
+        if pinned_by_operator and identity is None:
+            identity = _operator_pinned_runtime_identity(verified)
+        assert_certificate_matches_runtime(verified, identity)
+        return ExplorationReleaseTrust(verified, public_keys, identity)
+    except (OSError, ValueError):
+        return ExplorationReleaseTrust(None, public_keys, identity)
+
 
 def load_configured_release_certificate(
     *,
-    trusted_release_public_keys: Mapping[str, bytes] = (
-        TRUSTED_E4A_RELEASE_PUBLIC_KEYS
-    ),
-    trusted_runtime_identity: ExplorationRuntimeIdentity | None = (
-        TRUSTED_EXPLORATION_RUNTIME_IDENTITY
-    ),
+    trusted_release_public_keys: Mapping[str, bytes] | None = None,
+    trusted_runtime_identity: ExplorationRuntimeIdentity | None = None,
 ) -> E4aReleaseCertificate | None:
     """Load the operator-installed certificate; any ambiguity leaves E4b closed."""
+    if trusted_release_public_keys is None and trusted_runtime_identity is None:
+        return resolve_configured_release_trust().certificate
     raw = os.environ.get(EXPLORATION_RELEASE_CERTIFICATE_ENV, "").strip()
     if not raw:
         return None
@@ -190,7 +296,11 @@ def load_configured_release_certificate(
         certificate = E4aReleaseCertificate.model_validate_json(path.read_bytes())
         verified = verify_e4a_release_certificate(
             certificate,
-            trusted_public_keys=trusted_release_public_keys,
+            trusted_public_keys=(
+                TRUSTED_E4A_RELEASE_PUBLIC_KEYS
+                if trusted_release_public_keys is None
+                else trusted_release_public_keys
+            ),
         )
         assert_certificate_matches_runtime(verified, trusted_runtime_identity)
         return verified
@@ -225,6 +335,9 @@ class ExplorationService:
         self._source_snapshot_resolver = (
             source_snapshot_resolver or self._resolve_source_snapshot
         )
+        self._workflow_cache: (
+            tuple[Path, tuple[int, int, int, int], _WorkflowProjectionParts] | None
+        ) = None
 
     def require_release_certificate(
         self, *, provider: str | None = None
@@ -858,9 +971,16 @@ class ExplorationService:
         bundles: dict[str, ClaimBundle] = {}
         records: tuple[InsightRecord, ...] = ()
         workflow_coverage: tuple[str, ...] = ()
+        cached = self._cached_workflow_projection(workflow_path)
+        if cached is not None:
+            return self._projection_from_parts(
+                metadata, current_round_index, *cached
+            )
         try:
+            identity = _file_identity(workflow_path)
             raw = json.loads(workflow_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
+            identity = None
             raw = None
         except (OSError, json.JSONDecodeError) as exc:
             raise ExplorationConflictError(
@@ -889,13 +1009,41 @@ class ExplorationService:
                     "exploration workflow projection failed validation"
                 ) from exc
 
+        parts = (receipts, bundles, records, workflow_coverage)
+        if identity is not None and _file_identity(workflow_path) == identity:
+            # Re-stat after the read, not before: only an identity that still
+            # holds afterwards proves the bytes we parsed are the whole file.
+            self._workflow_cache = (workflow_path, identity, parts)
+        return self._projection_from_parts(metadata, current_round_index, *parts)
+
+    def _cached_workflow_projection(
+        self, workflow_path: Path
+    ) -> _WorkflowProjectionParts | None:
+        """Reuse the parse when the file is byte-for-byte the one we read.
+
+        Every SSE frame makes the client refetch this view, and a deep run's
+        workflow-state.json reaches ~2 MB with 150+ receipts to re-verify. The
+        journal is authoritative, so a stale cache is never a correctness
+        risk -- but a mismatched stat identity must invalidate it anyway.
+        """
+        cached = self._workflow_cache
+        if cached is None or cached[0] != workflow_path:
+            return None
+        if _file_identity(workflow_path) != cached[1]:
+            return None
+        return cached[2]
+
+    def _projection_from_parts(
+        self,
+        metadata: ExplorationRunMetadata,
+        current_round_index: int | None,
+        receipts: tuple[EvidenceReceipt, ...],
+        bundles: dict[str, ClaimBundle],
+        records: tuple[InsightRecord, ...],
+        workflow_coverage: tuple[str, ...],
+    ) -> _ProductProjection:
         evidence = tuple(
-            ExplorationEvidenceView(
-                receipt_id=receipt.receipt_id,
-                tool_name=receipt.tool_name,
-                summary=f"{receipt.tool_name}: {receipt.result_count} result(s)",
-                fact_ids=tuple(fact.fact_id for fact in receipt.facts),
-            )
+            _evidence_view(receipt)
             for receipt in sorted(receipts, key=lambda item: item.receipt_id)
         )
         insights: list[ExplorationInsightView] = []
@@ -909,7 +1057,11 @@ class ExplorationService:
                 ExplorationInsightView(
                     insight_id=record.insight_id,
                     hypothesis_id=record.hypothesis_id,
-                    statement="; ".join(claim.claim_text for claim in bundle.claims),
+                    statement=(
+                        record.statement
+                        if (record.statement or "").strip()
+                        else "; ".join(claim.claim_text for claim in bundle.claims)
+                    ),
                     family=record.family.value,
                     status=record.status,
                     trust_level=record.trust_level,
@@ -1104,6 +1256,33 @@ class ExplorationService:
         if row is None:
             raise SessionNotFoundError(session_id)
         return str(row["project_id"])
+
+    def read_report(self, session_id: str, exploration_id: str) -> str:
+        """Return the deterministic markdown report the run finalized.
+
+        The report lives in the shadow run directory, never in the artifact
+        store: the exploration lane is product-store blind by construction, so
+        this is the only path by which a reader can reach it.
+        """
+        metadata = self._metadata(session_id, exploration_id)
+        state = self._required_state(
+            self._journal(exploration_id), exploration_id
+        )
+        reference = state.final_report_ref
+        if not reference:
+            raise ExplorationNotFoundError(f"{exploration_id}:report")
+        path = validate_shadow_run_path(
+            self._store.root, exploration_id, self._store.root / reference
+        )
+        del metadata
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ExplorationNotFoundError(f"{exploration_id}:report") from exc
+        except OSError as exc:
+            raise ExplorationConflictError(
+                "the exploration report is unreadable"
+            ) from exc
 
     def _journal(self, exploration_id: str) -> JsonlExplorationJournal:
         root = shadow_run_root(self._store.root, exploration_id)
@@ -1445,6 +1624,68 @@ def _execution_session_id(exploration_id: str) -> str:
 
 def _events_url(session_id: str, exploration_id: str) -> str:
     return f"/api/v1/sessions/{session_id}/explorations/{exploration_id}/events"
+
+
+_MAX_EVIDENCE_FACTS = 8
+
+
+def _evidence_view(receipt: EvidenceReceipt) -> ExplorationEvidenceView:
+    """Carry the adjudicating numbers, not just the receipt id.
+
+    The panel previously rendered "<tool>: N result(s)" plus a row of opaque
+    ids, so the one thing a reader needs -- what the probe measured -- was
+    reachable only by reading the run directory by hand.
+    """
+    statistics = receipt.statistics
+    view = (
+        None
+        if statistics is None
+        else ExplorationStatisticsView(
+            test_name=statistics.test_name,
+            outcome=statistics.hypothesis_outcome,
+            test_statistic=statistics.test_statistic,
+            p_value=statistics.p_value,
+            adjusted_p_value=statistics.adjusted_p_value,
+            effect_size=statistics.effect_size,
+            ci_low=statistics.ci_low,
+            ci_high=statistics.ci_high,
+            sample_size=statistics.sample_size,
+        )
+    )
+    return ExplorationEvidenceView(
+        receipt_id=receipt.receipt_id,
+        tool_name=receipt.tool_name,
+        summary=_evidence_summary(receipt),
+        fact_ids=tuple(fact.fact_id for fact in receipt.facts),
+        facts=tuple(
+            ExplorationFactView(
+                fact_id=fact.fact_id,
+                name=fact.name,
+                value=fact.value,
+                unit=fact.unit,
+            )
+            for fact in receipt.facts[:_MAX_EVIDENCE_FACTS]
+        ),
+        statistics=view,
+    )
+
+
+def _evidence_summary(receipt: EvidenceReceipt) -> str:
+    parts = [f"{receipt.tool_name}: {receipt.result_count} result(s)"]
+    statistics = receipt.statistics
+    if statistics is not None:
+        numbers = [
+            f"{name}={value:g}" if isinstance(value, float) else f"{name}={value}"
+            for name, value in (
+                ("p", statistics.adjusted_p_value or statistics.p_value),
+                ("effect", statistics.effect_size),
+                ("n", statistics.sample_size),
+            )
+            if value is not None
+        ]
+        if numbers:
+            parts.append(f"{statistics.test_name} · " + ", ".join(numbers))
+    return " — ".join(parts)
 
 
 def _job_view(job: JobStatus) -> ExplorationJobView:

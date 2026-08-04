@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { useNavigate, useParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import type {
   ExplorationBudgetIncrease,
@@ -13,16 +13,14 @@ import {
   useCancelExploration,
   useDatasets,
   useExploration,
+  useExplorationReport,
   useExtendExplorationBudget,
   usePauseExploration,
   usePrepareExploration,
   useResumeExploration,
   useStartExploration,
 } from "../../api/hooks";
-import {
-  artifactPath,
-  explorationRunPath,
-} from "../../app/paths";
+import { explorationRunPath } from "../../app/paths";
 import {
   ErrorState,
   LoadingSkeleton,
@@ -302,7 +300,31 @@ function BudgetExtension({ sessionId, explorationId }: { sessionId: string; expl
   );
 }
 
-function ExplorationRun({ projectId, sessionId, explorationId }: { projectId: string; sessionId: string; explorationId: string }) {
+/** The report is a file in the run directory, so it is fetched and shown here
+ *  rather than linked as an artifact that never existed. */
+function FinalReport({ sessionId, explorationId }: { sessionId: string; explorationId: string }) {
+  const report = useExplorationReport(sessionId, explorationId);
+  return (
+    <Card as="section" aria-label="Final exploration report" className="flex flex-col gap-2 p-4">
+      <SectionHeader
+        level={3}
+        title="Deterministic final report"
+        description="Rendered by the run itself from its own journal, not re-summarized."
+      />
+      {report.isLoading && <LoadingSkeleton label="Loading the final report" lines={4} />}
+      {report.error && (
+        <ErrorState error={report.error} onRetry={() => void report.refetch()} />
+      )}
+      {report.data !== undefined && (
+        <pre className="max-h-[32rem] overflow-auto rounded-base bg-code-bg p-3 font-mono text-xs whitespace-pre-wrap text-code-text">
+          {report.data}
+        </pre>
+      )}
+    </Card>
+  );
+}
+
+function ExplorationRun({ sessionId, explorationId }: { sessionId: string; explorationId: string }) {
   const queryClient = useQueryClient();
   const exploration = useExploration(sessionId, explorationId);
   const pause = usePauseExploration(sessionId, explorationId);
@@ -356,11 +378,8 @@ function ExplorationRun({ projectId, sessionId, explorationId }: { projectId: st
       {controlError && <p role="alert" className="text-sm text-status-critical">{formatUnknownError(controlError)}</p>}
       <ExplorationRunPanel run={run} />
       {run.status !== "stopped" && <BudgetExtension sessionId={sessionId} explorationId={explorationId} />}
-      {run.report?.available && run.report.artifactRef && (
-        <Card className="flex items-center justify-between gap-3 p-3">
-          <span className="text-sm">The deterministic final report is available.</span>
-          <Link className="text-sm text-primary hover:underline" to={artifactPath(projectId, sessionId, run.report.artifactRef)}>Open report artifact</Link>
-        </Card>
+      {run.report?.available && (
+        <FinalReport sessionId={sessionId} explorationId={explorationId} />
       )}
       <ExplorationReport run={run} />
     </main>
@@ -370,6 +389,6 @@ function ExplorationRun({ projectId, sessionId, explorationId }: { projectId: st
 export function Component() {
   const { projectId = "", sessionId = "", explorationId } = useParams();
   return explorationId
-    ? <ExplorationRun projectId={projectId} sessionId={sessionId} explorationId={explorationId} />
+    ? <ExplorationRun sessionId={sessionId} explorationId={explorationId} />
     : <ExplorationLaunch projectId={projectId} sessionId={sessionId} />;
 }

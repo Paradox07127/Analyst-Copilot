@@ -262,6 +262,19 @@ export function useExploration(
   });
 }
 
+export function useExplorationReport(
+  sessionId: string,
+  explorationId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: [...queryKeys.exploration(sessionId, explorationId), "report"],
+    queryFn: ({ signal }) =>
+      api.getExplorationReport(sessionId, explorationId, signal),
+    enabled: enabled && Boolean(sessionId && explorationId),
+  });
+}
+
 export function usePrepareExploration(sessionId: string) {
   return useMutation({
     mutationFn: (body: ExplorationPrepareRequest) =>

@@ -30,6 +30,7 @@ from eda_platform.agents.exploration.workflow import ExplorationWorkflowState
 from eda_platform.agents.receipts import build_receipt
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
 from eda_platform.application.services.exploration_service import (
+    ExplorationReleaseTrust,
     ExplorationRunMetadata,
     ExplorationSourceSnapshot,
 )
@@ -46,7 +47,12 @@ from eda_platform.drivers.exploration import (
     JsonSupervisorRecoveryStore,
     exploration_tool_capability_digest,
 )
-from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile
+from eda_platform.schemas.artifacts import (
+    Artifact,
+    ArtifactType,
+    ColumnProfile,
+    DatasetProfile,
+)
 from eda_platform.schemas.datasets import DatasetRecord
 from eda_platform.schemas.exploration import InsightFamily
 from eda_platform.schemas.hypotheses import HypothesisPredicate, HypothesisProposal
@@ -99,6 +105,31 @@ def _profile_artifact() -> Artifact:
         missing_percent={"region": 0.0, "amount": 0.0},
         numeric_columns=["amount"],
         categorical_columns=["region"],
+        grain="One row per order.",
+        columns_detail=[
+            ColumnProfile(
+                name="region",
+                dtype="object",
+                semantic_type="categorical",
+                missing_count=0,
+                missing_percent=0.0,
+                unique_count=2,
+                unique_percent=66.7,
+                sample_values=["North", "South"],
+                distribution_kind="discrete",
+            ),
+            ColumnProfile(
+                name="amount",
+                dtype="float64",
+                semantic_type="numeric",
+                missing_count=0,
+                missing_percent=0.0,
+                unique_count=3,
+                unique_percent=100.0,
+                sample_values=["1.0", "2.0", "3.0"],
+                distribution_kind="continuous",
+            ),
+        ],
     )
     return Artifact(
         id="art_profile",
@@ -280,11 +311,14 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
         logical_step_id="step_failed_stat",
     )
 
-    monkeypatch.setattr(worker, "load_configured_release_certificate", lambda: certificate)
     monkeypatch.setattr(
         worker,
-        "TRUSTED_EXPLORATION_RUNTIME_IDENTITY",
-        runtime_identity(bindings=bindings),
+        "resolve_configured_release_trust",
+        lambda: ExplorationReleaseTrust(
+            certificate=certificate,
+            public_keys={},
+            runtime_identity=runtime_identity(bindings=bindings),
+        ),
     )
     monkeypatch.setattr(worker, "_load_and_verify_metadata", lambda *_args: metadata)
     monkeypatch.setattr(worker, "_verify_consumed_approval", lambda *_args: None)
@@ -343,6 +377,14 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
     assert captured["policy"] == policy
     assert captured["code_fingerprint"] == bindings.code_fingerprint
     assert captured["data_state_witness"] == witness
+    facts = captured["dataset_facts"]["ds_orders"]
+    assert facts.row_count == 3
+    assert facts.grain == "One row per order."
+    by_name = {column.name: column for column in facts.columns}
+    assert by_name["region"].role == "categorical"
+    assert by_name["region"].example_values == ("North", "South")
+    # A numeric measure never carries example values into the prompt.
+    assert by_name["amount"].example_values == ()
 
 
 def test_worker_refuses_to_enter_composition_without_release_certificate(
@@ -361,7 +403,13 @@ def test_worker_refuses_to_enter_composition_without_release_certificate(
         entered = True
         return SimpleNamespace(result=SimpleNamespace(status="paused"))
 
-    monkeypatch.setattr(worker, "load_configured_release_certificate", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "resolve_configured_release_trust",
+        lambda: ExplorationReleaseTrust(
+            certificate=None, public_keys={}, runtime_identity=None
+        ),
+    )
     monkeypatch.setattr(worker, "run_composed_shadow_exploration", fake_composition)
     with pytest.raises(RuntimeError, match="certificate is unavailable"):
         worker.run_exploration_worker(

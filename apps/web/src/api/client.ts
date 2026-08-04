@@ -322,6 +322,33 @@ export async function apiFetch<T>(
   return (await response.json()) as T;
 }
 
+/* Text sibling of apiFetch for endpoints that answer with markdown. Errors
+ * still follow the JSON envelope, so failures read the same as everywhere. */
+export async function apiText(
+  path: string,
+  init: RequestInit = {},
+): Promise<string> {
+  const headers = new Headers(init.headers);
+  if (!headers.has(SESSION_HEADER)) headers.set(SESSION_HEADER, sessionId());
+  const url = new URL(`${BASE}${path}`, window.location.origin);
+  const response = await fetch(url, { ...init, headers });
+  if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      /* non-JSON error body */
+    }
+    const parsed = parseErrorEnvelope(body);
+    throw new ApiError(
+      response.status,
+      parsed?.code ?? "http_error",
+      parsed?.message ?? `API request failed with status ${response.status}`,
+    );
+  }
+  return await response.text();
+}
+
 /* Binary sibling of apiFetch: report exports come back as a file stream, not
  * JSON, so the body is read as a Blob and the server-chosen name is taken from
  * Content-Disposition. Error bodies still follow the JSON envelope. */
@@ -475,6 +502,18 @@ export const api = {
   ) =>
     apiFetch<ExplorationViewDto>(
       `/sessions/${enc(sessionId)}/explorations/${enc(explorationId)}`,
+      { signal },
+    ),
+
+  /* Markdown, not JSON: the exploration report is a file in the run directory,
+     never an artifact-store row, so it has no artifact id to link to. */
+  getExplorationReport: (
+    sessionId: string,
+    explorationId: string,
+    signal?: AbortSignal,
+  ) =>
+    apiText(
+      `/sessions/${enc(sessionId)}/explorations/${enc(explorationId)}/report`,
       { signal },
     ),
 

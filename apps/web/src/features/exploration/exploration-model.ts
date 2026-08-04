@@ -45,10 +45,66 @@ export interface ExplorationHypothesisView {
   status: string;
 }
 
+export interface ExplorationFactView {
+  factId: string;
+  name: string;
+  value: number | string | boolean | null;
+  unit: string | null;
+}
+
+export interface ExplorationStatisticsView {
+  testName: string;
+  outcome: "supports" | "contradicts" | null;
+  testStatistic: number | null;
+  pValue: number | null;
+  adjustedPValue: number | null;
+  effectSize: number | null;
+  ciLow: number | null;
+  ciHigh: number | null;
+  sampleSize: number | null;
+}
+
 export interface ExplorationEvidenceView {
   receiptId: string;
+  toolName: string;
   summary: string;
   factIds: readonly string[];
+  facts: readonly ExplorationFactView[];
+  statistics: ExplorationStatisticsView | null;
+}
+
+/** Reported to the reader in this order; the first four are what decides a
+ *  hypothesis, the confidence interval only qualifies the effect. */
+export function statisticEntries(
+  statistics: ExplorationStatisticsView,
+): readonly { label: string; value: string }[] {
+  const numeric = (value: number | null): string | null =>
+    value === null || !Number.isFinite(value) ? null : formatStatistic(value);
+  const rows: { label: string; value: string | null }[] = [
+    { label: "adjusted p", value: numeric(statistics.adjustedPValue) },
+    { label: "p", value: numeric(statistics.pValue) },
+    { label: "effect size", value: numeric(statistics.effectSize) },
+    { label: "n", value: statistics.sampleSize?.toString() ?? null },
+    { label: "statistic", value: numeric(statistics.testStatistic) },
+    {
+      label: "95% CI",
+      value:
+        statistics.ciLow === null || statistics.ciHigh === null
+          ? null
+          : `${formatStatistic(statistics.ciLow)} – ${formatStatistic(statistics.ciHigh)}`,
+    },
+  ];
+  return rows.filter(
+    (row): row is { label: string; value: string } => row.value !== null,
+  );
+}
+
+/** Small p-values are the whole point; fixed decimals would render them 0.00. */
+export function formatStatistic(value: number): string {
+  if (value === 0) return "0";
+  const magnitude = Math.abs(value);
+  if (magnitude < 0.001 || magnitude >= 100_000) return value.toExponential(2);
+  return String(Number(value.toPrecision(4)));
 }
 
 export interface ExplorationBudgetCaps {

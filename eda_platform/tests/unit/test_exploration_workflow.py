@@ -43,15 +43,20 @@ from eda_platform.agents.exploration.supervisor import (
     reduction_outcome_digest,
 )
 from eda_platform.agents.exploration.workflow import (
+    _MAX_SETTLED_FINDINGS,
+    ColumnFact,
+    DatasetFacts,
     DeterministicSchedulerPort,
     ExecutedProbeBatch,
     ExplorationWorkflowState,
     JournaledCandidateGenerator,
+    PriorFinding,
     SupervisorProbeExecutorPort,
     artifact_receipt_decoder,
     candidate_batch_digest,
     final_reduction_state_digest,
     scheduling_decision_digest,
+    settled_findings,
 )
 from eda_platform.agents.receipts import build_receipt
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
@@ -108,7 +113,7 @@ from eda_platform.drivers.exploration_evidence_issuer import (
     verify_e4a_evidence_root,
 )
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
-from eda_platform.schemas.claims import ClaimBundle
+from eda_platform.schemas.claims import Claim, ClaimBundle
 from eda_platform.schemas.datasets import DatasetRecord
 from eda_platform.schemas.exploration import (
     BranchAbandonedEvent,
@@ -126,6 +131,7 @@ from eda_platform.schemas.hypotheses import (
     HypothesisProposal,
     HypothesisProposalBatch,
 )
+from eda_platform.schemas.insights import InsightProof, InsightRecord
 from eda_platform.schemas.receipts import (
     EvidenceReceipt,
     ReceiptExecution,
@@ -2760,6 +2766,177 @@ def test_generate_payload_carries_the_dataset_schema_and_method_vocabulary(
     ]
     assert payload["method_families"] == ["compare_groups", "profile_slice"]
     assert "exact" in payload["instruction"]
+    assert payload["already_settled"] == []
+
+
+class _CapturingProvider(_Provider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.payloads: list[dict[str, Any]] = []
+
+    def structured(self, *, task: str, schema: type[T], payload: dict[str, Any]) -> T:
+        self.payloads.append(payload)
+        return super().structured(task=task, schema=schema, payload=payload)
+
+
+def _generator_with_context(
+    tmp_path: Path,
+    *,
+    dataset_facts: dict[str, DatasetFacts] | None = None,
+    prior_findings: tuple[PriorFinding, ...] = (),
+) -> tuple[_CapturingProvider, JournaledCandidateGenerator]:
+    journal = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-generate",
+        policy=build_exploration_policy(
+            tier="quick",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    journal.claim_recovery()
+    provider = _CapturingProvider()
+    return provider, JournaledCandidateGenerator(
+        provider=provider,
+        journal=journal,
+        recovery=JsonSupervisorRecoveryStore(tmp_path / "responses"),
+        dataset_profiles=(),
+        dataset_columns={"ds-1": ("region", "revenue", "signup_date")},
+        supported_method_families=("profile_slice", "compare_groups"),
+        dataset_facts=dataset_facts or {},
+        prior_findings=lambda: prior_findings,
+    )
+
+
+def test_generate_payload_describes_each_column_when_a_profile_exists(
+    tmp_path: Path,
+) -> None:
+    facts = {
+        "ds-1": DatasetFacts(
+            dataset_id="ds-1",
+            row_count=1086,
+            grain="One row per order.",
+            columns=(
+                ColumnFact(
+                    name="region",
+                    role="categorical",
+                    shape="discrete",
+                    missing_percent=0.0,
+                    distinct_count=4,
+                    example_values=("North", "South"),
+                ),
+                ColumnFact(
+                    name="revenue",
+                    role="numeric",
+                    shape="continuous",
+                    missing_percent=1.25,
+                    distinct_count=1000,
+                ),
+                ColumnFact(
+                    name="signup_date",
+                    role="datetime",
+                    shape="continuous",
+                    missing_percent=0.0,
+                    distinct_count=181,
+                ),
+            ),
+        )
+    }
+    provider, generator = _generator_with_context(tmp_path, dataset_facts=facts)
+
+    generator.generate(
+        _generate_context(), logical_step_id="xpl-generate:round:0:generate"
+    )
+
+    dataset = provider.payloads[0]["datasets"][0]
+    assert dataset["row_count"] == 1086
+    assert dataset["grain"] == "One row per order."
+    by_name = {column["name"]: column for column in dataset["columns"]}
+    assert by_name["region"]["role"] == "categorical"
+    assert by_name["region"]["example_values"] == ["North", "South"]
+    assert by_name["revenue"]["missing_percent"] == 1.25
+    assert by_name["signup_date"]["role"] == "datetime"
+    # A numeric measure carries no example values; only labels do.
+    assert "example_values" not in by_name["revenue"]
+
+
+def test_generate_payload_replays_what_the_run_already_settled(
+    tmp_path: Path,
+) -> None:
+    findings = (
+        PriorFinding(statement="Revenue differs across region.", verdict="supported"),
+        PriorFinding(statement="Revenue has no weekly spike.", verdict="refuted"),
+    )
+    provider, generator = _generator_with_context(tmp_path, prior_findings=findings)
+
+    generator.generate(
+        _generate_context(), logical_step_id="xpl-generate:round:0:generate"
+    )
+
+    payload = provider.payloads[0]
+    assert payload["already_settled"] == [
+        {"finding": "Revenue differs across region.", "verdict": "supported"},
+        {"finding": "Revenue has no weekly spike.", "verdict": "refuted"},
+    ]
+    assert "already_settled" in payload["instruction"]
+
+
+def _bundle_with_text(bundle_id: str, text: str) -> ClaimBundle:
+    return ClaimBundle(
+        claim_bundle_id=bundle_id,
+        hypothesis_id="hypothesis-1",
+        evidence_lane="exploratory",
+        claims=(
+            Claim(
+                claim_id=f"{bundle_id}-claim",
+                claim_type="observation",
+                claim_text=text,
+                support_type="direct",
+                evidence_fact_ids=(f"rcpt_{'a' * 24}:fact-1",),
+            ),
+        ),
+    )
+
+
+def _insight_for(insight_id: str, bundle_id: str) -> InsightRecord:
+    return InsightRecord(
+        insight_id=insight_id,
+        hypothesis_id="hypothesis-1",
+        family=InsightFamily.DIAGNOSTIC,
+        status="new",
+        trust_level="supported",
+        claim_bundle_id=bundle_id,
+        supporting_receipt_ids=(f"rcpt_{'a' * 24}",),
+        proof=(
+            InsightProof(
+                receipt_id=f"rcpt_{'a' * 24}",
+                fact_ids=("fact-1",),
+                comparison="supports",
+            ),
+        ),
+        created_round=0,
+        last_updated_round=0,
+    )
+
+
+def test_settled_findings_are_bounded_and_carry_the_insight_status() -> None:
+    state = ExplorationWorkflowState()
+    for index in range(_MAX_SETTLED_FINDINGS + 5):
+        bundle_id = f"bundle-{index:03d}"
+        state.admitted_bundles[bundle_id] = _bundle_with_text(
+            bundle_id, "x" * 400 if index == 0 else f"finding {index}"
+        )
+        state.insights[f"insight-{index:03d}"] = _insight_for(
+            f"insight-{index:03d}", bundle_id
+        )
+
+    findings = settled_findings(state)
+
+    assert len(findings) == _MAX_SETTLED_FINDINGS
+    assert all(len(finding.statement) <= 240 for finding in findings)
+    assert {finding.verdict for finding in findings} == {"supported"}
 
 
 def test_the_issuer_reads_a_replayed_mandatory_probe_as_one_candidate() -> None:
@@ -2919,6 +3096,55 @@ def test_a_probe_that_uses_up_its_step_budget_is_not_an_invariant_violation(
     batch = outcome.payload
     assert isinstance(batch, ExecutedProbeBatch)
     assert batch.receipts == ()
+
+
+def test_the_probe_prompt_names_the_real_columns(tmp_path: Path) -> None:
+    """seed 9: five tool failures were invented column names (transaction_date,
+    date, created_at). The probe prompt listed only the hypothesis's own
+    columns, so the model had nothing else to go on."""
+    captured: list[str] = []
+
+    class _CapturingExecutor:
+        def run(self, **kwargs: Any) -> Any:
+            captured.append(kwargs["user_message"])
+            return ProbeExecutionResult(status="completed", answer="done")
+
+    journal = JsonlExplorationJournal(tmp_path / "xpl" / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-schema",
+        policy=build_exploration_policy(
+            tier="standard",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    port = SupervisorProbeExecutorPort(
+        executor=cast(Any, _CapturingExecutor()),
+        journal=journal,
+        state=ExplorationWorkflowState(),
+        receipt_decoder=artifact_receipt_decoder,
+        dataset_columns={"ds-1": ("order_date", "region", "revenue", "units")},
+    )
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    port.execute(
+        PhaseContext(
+            exploration_id="xpl-schema",
+            round_index=0,
+            phase=SupervisorPhase.EXECUTE_PROBES,
+            data_state_witness=WITNESS,
+            soft_countdown_context="",
+            completed_step_ids=frozenset(),
+        ),
+        ProbeSelection((FrontierItem("h", 1.0, payload=seed),)),
+    )
+
+    assert captured, "the probe never ran"
+    prompt = captured[0]
+    assert "order_date" in prompt and "units" in prompt
+    # The hypothesis's own columns are a subset, not the whole schema.
+    assert "region" in prompt and "revenue" in prompt
 
 
 def test_concurrent_probe_sessions_overlap_and_keep_result_order(

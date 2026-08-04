@@ -19,12 +19,15 @@ from eda_platform.application.ports import JobCommand, JobRef
 from eda_platform.application.services.approval_service import ApprovalService
 from eda_platform.application.services.exploration_service import (
     EXPLORATION_RELEASE_CERTIFICATE_ENV,
+    EXPLORATION_RELEASE_TRUSTED_KEYS_ENV,
     ExplorationReleaseUnavailableError,
     ExplorationService,
     ExplorationSourceChangedError,
     ExplorationSourceSnapshot,
     assert_certificate_matches_runtime,
     load_configured_release_certificate,
+    operator_pinned_release_public_keys,
+    resolve_configured_release_trust,
 )
 from eda_platform.application.services.job_service import JobService
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
@@ -253,6 +256,55 @@ def test_configured_certificate_loader_requires_a_pinned_release_key(
     assert loaded == certificate
 
 
+def _pinned_keys_value(key_id: str = "test-release-v1") -> str:
+    return f"{key_id}:{TEST_TRUSTED_RELEASE_PUBLIC_KEYS[key_id].hex()}"
+
+
+def test_operator_pinned_key_opens_the_gate_and_derives_the_runtime_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    certificate = release_certificate()
+    path = tmp_path / "release-certificate.json"
+    path.write_text(certificate.model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv(EXPLORATION_RELEASE_CERTIFICATE_ENV, str(path))
+
+    monkeypatch.delenv(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, raising=False)
+    closed = resolve_configured_release_trust()
+    assert closed.certificate is None
+    assert closed.runtime_identity is None
+
+    monkeypatch.setenv(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, _pinned_keys_value())
+    opened = resolve_configured_release_trust()
+    assert opened.certificate == certificate
+    assert opened.runtime_identity == TEST_RUNTIME_IDENTITY
+
+
+def test_operator_pinned_key_must_match_the_certificate_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    certificate = release_certificate()
+    path = tmp_path / "release-certificate.json"
+    path.write_text(certificate.model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv(EXPLORATION_RELEASE_CERTIFICATE_ENV, str(path))
+    monkeypatch.setenv(
+        EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, "test-release-v1:" + "00" * 32
+    )
+
+    assert resolve_configured_release_trust().certificate is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not-a-pair", ":" + "00" * 32, "k:zz", "k:" + "00" * 31],
+)
+def test_malformed_pinned_trust_keys_raise_instead_of_downgrading(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, value)
+    with pytest.raises(ValueError, match=EXPLORATION_RELEASE_TRUSTED_KEYS_ENV):
+        operator_pinned_release_public_keys()
+
+
 @pytest.mark.parametrize(
     "runtime",
     [
@@ -396,3 +448,55 @@ def test_event_projection_uses_composite_journal_identity(
         f"{prepared.exploration_id}:0",
         f"{prepared.exploration_id}:1",
     ]
+
+
+def _write_workflow_state(
+    fixture: _Fixture, exploration_id: str, coverage: list[str]
+) -> None:
+    root = shadow_run_root(fixture.store.root, exploration_id)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "workflow-state.json").write_text(
+        json.dumps(
+            {
+                "committed_receipts": [],
+                "admitted_bundles": [],
+                "insights": [],
+                "coverage_completed": coverage,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_the_workflow_projection_is_reused_only_while_the_file_is_unchanged(
+    exploration: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared, _started = _prepare_and_start(exploration)
+    exploration_id = prepared.exploration_id
+    _write_workflow_state(exploration, exploration_id, ["region_difference"])
+
+    reads = 0
+    original = Path.read_text
+
+    def counting_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        nonlocal reads
+        if self.name == "workflow-state.json":
+            reads += 1
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    first = exploration.service.get(SOURCE_SESSION_ID, exploration_id)
+    assert first.coverage_completed == ("region_difference",)
+    assert reads == 1
+
+    # Every SSE frame refetches this view; an unchanged file must not be
+    # re-parsed and every receipt in it re-verified.
+    second = exploration.service.get(SOURCE_SESSION_ID, exploration_id)
+    assert second.coverage_completed == ("region_difference",)
+    assert reads == 1
+
+    _write_workflow_state(exploration, exploration_id, ["region_difference", "spike_day"])
+    third = exploration.service.get(SOURCE_SESSION_ID, exploration_id)
+    assert third.coverage_completed == ("region_difference", "spike_day")
+    assert reads == 2

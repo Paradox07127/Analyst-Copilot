@@ -1868,6 +1868,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/explorations/{exploration_id}/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Exploration Report
+         * @description Serve the run's own markdown; the report is not an artifact-store row.
+         */
+        get: operations["get_exploration_report_api_v1_sessions__session_id__explorations__exploration_id__report_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/explorations/{exploration_id}/events": {
         parameters: {
             query?: never;
@@ -4422,6 +4442,12 @@ export interface components {
              * @default []
              */
             fact_ids: string[];
+            /**
+             * Facts
+             * @default []
+             */
+            facts: components["schemas"]["ExplorationFactView"][];
+            statistics?: components["schemas"]["ExplorationStatisticsView"] | null;
         };
         /**
          * ExplorationExtendBudgetRequest
@@ -4431,6 +4457,17 @@ export interface components {
             increase: components["schemas"]["BudgetCapIncrease-Input"];
             /** Reason */
             reason: string;
+        };
+        /** ExplorationFactView */
+        ExplorationFactView: {
+            /** Fact Id */
+            fact_id: string;
+            /** Name */
+            name: string;
+            /** Value */
+            value?: number | string | boolean | null;
+            /** Unit */
+            unit?: string | null;
         };
         /** ExplorationHypothesisView */
         ExplorationHypothesisView: {
@@ -4582,6 +4619,30 @@ export interface components {
         ExplorationStarted: {
             exploration: components["schemas"]["ExplorationView"];
             job: components["schemas"]["ExplorationJobView"];
+        };
+        /**
+         * ExplorationStatisticsView
+         * @description The adjudicating numbers, so a reader never has to open the journal.
+         */
+        ExplorationStatisticsView: {
+            /** Test Name */
+            test_name: string;
+            /** Outcome */
+            outcome?: ("supports" | "contradicts") | null;
+            /** Test Statistic */
+            test_statistic?: number | null;
+            /** P Value */
+            p_value?: number | null;
+            /** Adjusted P Value */
+            adjusted_p_value?: number | null;
+            /** Effect Size */
+            effect_size?: number | null;
+            /** Ci Low */
+            ci_low?: number | null;
+            /** Ci High */
+            ci_high?: number | null;
+            /** Sample Size */
+            sample_size?: number | null;
         };
         /** ExplorationView */
         ExplorationView: {
@@ -17121,6 +17182,74 @@ export interface operations {
             };
             /** @description Request body exceeds the global size limit. */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_exploration_report_api_v1_sessions__session_id__explorations__exploration_id__report_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                exploration_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/markdown": unknown;
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
                 headers: {
                     [name: string]: unknown;
                 };

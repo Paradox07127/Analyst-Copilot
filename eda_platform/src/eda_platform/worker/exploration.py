@@ -33,18 +33,21 @@ from eda_platform.agents.exploration.supervisor import (
     SupervisorPhase,
     phase_step_id,
 )
-from eda_platform.agents.exploration.workflow import ExplorationWorkflowState
+from eda_platform.agents.exploration.workflow import (
+    ColumnFact,
+    DatasetFacts,
+    ExplorationWorkflowState,
+)
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
 from eda_platform.application.services.approval_service import ApprovalService
 from eda_platform.application.services.exploration_service import (
     APPROVAL_KIND_EXPLORATION_START,
-    TRUSTED_EXPLORATION_RUNTIME_IDENTITY,
     ExplorationRunMetadata,
     assert_budget_covered_by_certificate,
     assert_certificate_matches_runtime,
     assert_policy_covered_by_certificate,
     assert_policy_matches_runtime,
-    load_configured_release_certificate,
+    resolve_configured_release_trust,
     resolve_exploration_source_snapshot,
 )
 from eda_platform.core.exploration_budget import ToolCallProjection, apply_budget_increase
@@ -68,7 +71,12 @@ from eda_platform.drivers.exploration import (
     exploration_tool_capability_digest,
     run_composed_shadow_exploration,
 )
-from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile
+from eda_platform.schemas.artifacts import (
+    Artifact,
+    ArtifactType,
+    ColumnProfile,
+    DatasetProfile,
+)
 from eda_platform.schemas.exploration import (
     BudgetAmendedEvent,
     ExplorationPolicy,
@@ -207,12 +215,11 @@ def run_exploration_worker(
         raise ValueError("exploration worker operation must be start or resume")
     assert_policy_sealed(params.policy)
 
-    certificate = load_configured_release_certificate()
+    release_trust = resolve_configured_release_trust()
+    certificate = release_trust.certificate
     if certificate is None:
         raise RuntimeError("the E4a production release certificate is unavailable")
-    assert_certificate_matches_runtime(
-        certificate, TRUSTED_EXPLORATION_RUNTIME_IDENTITY
-    )
+    assert_certificate_matches_runtime(certificate, release_trust.runtime_identity)
     if certificate.certificate_digest != params.release_certificate_digest:
         raise RuntimeError("exploration job release certificate digest changed")
     if params.provider.casefold() not in {
@@ -222,9 +229,7 @@ def run_exploration_worker(
     if certificate.bindings.code_fingerprint != params.code_fingerprint:
         raise RuntimeError("exploration code fingerprint is not certified")
     assert_policy_covered_by_certificate(params.policy, certificate)
-    assert_policy_matches_runtime(
-        params.policy, TRUSTED_EXPLORATION_RUNTIME_IDENTITY
-    )
+    assert_policy_matches_runtime(params.policy, release_trust.runtime_identity)
 
     metadata = _load_and_verify_metadata(store, params, certificate.certificate_digest)
     effective_budget = params.policy.budget
@@ -379,6 +384,7 @@ def run_exploration_worker(
         ),
         dataset_columns=dataset_columns,
         supported_method_families=supported_methods,
+        dataset_facts=_dataset_facts(artifacts, params.policy.dataset_scope),
     )
     _checkpoint(cancel_check)
     if result.result.status not in {"paused", "stopped"}:
@@ -448,15 +454,70 @@ def _scoped_source_artifacts(
     ]
 
 
-def _dataset_profiles(
+_MAX_EXAMPLE_VALUES = 5
+_MAX_EXAMPLE_VALUE_CHARS = 40
+_MAX_EXAMPLE_DISTINCT = 20
+
+
+def _example_values(column: ColumnProfile) -> tuple[str, ...]:
+    """Only for low-cardinality labels: an id or a free-text column leaks rows
+    without telling the model anything it can use to pick a probe."""
+    if column.semantic_type not in {"categorical", "boolean"}:
+        return ()
+    if column.unique_count > _MAX_EXAMPLE_DISTINCT:
+        return ()
+    values = []
+    for raw in column.sample_values[:_MAX_EXAMPLE_VALUES]:
+        text = str(raw)
+        values.append(
+            text
+            if len(text) <= _MAX_EXAMPLE_VALUE_CHARS
+            else text[: _MAX_EXAMPLE_VALUE_CHARS - 1] + "…"
+        )
+    return tuple(values)
+
+
+def _dataset_facts(
     artifacts: list[Artifact], dataset_ids: tuple[str, ...]
-) -> tuple[DatasetExplorationProfile, ...]:
+) -> dict[str, DatasetFacts]:
+    """Turn this session's existing EDA profiles into GENERATE prompt context."""
+    facts: dict[str, DatasetFacts] = {}
+    for profile in _profiles_by_id(artifacts).values():
+        if profile.dataset_id not in dataset_ids:
+            continue
+        facts[profile.dataset_id] = DatasetFacts(
+            dataset_id=profile.dataset_id,
+            row_count=profile.rows,
+            grain=profile.grain,
+            columns=tuple(
+                ColumnFact(
+                    name=column.name,
+                    role=column.semantic_type,
+                    shape=column.distribution_kind,
+                    missing_percent=column.missing_percent,
+                    distinct_count=column.unique_count,
+                    example_values=_example_values(column),
+                )
+                for column in profile.columns_detail
+            ),
+        )
+    return facts
+
+
+def _profiles_by_id(artifacts: list[Artifact]) -> dict[str, DatasetProfile]:
     by_id: dict[str, DatasetProfile] = {}
     for artifact in artifacts:
         if artifact.type is not ArtifactType.DATASET_PROFILE:
             continue
         profile = DatasetProfile.model_validate(artifact.payload)
         by_id[profile.dataset_id] = profile
+    return by_id
+
+
+def _dataset_profiles(
+    artifacts: list[Artifact], dataset_ids: tuple[str, ...]
+) -> tuple[DatasetExplorationProfile, ...]:
+    by_id = _profiles_by_id(artifacts)
     profiles: list[DatasetExplorationProfile] = []
     for dataset_id in dataset_ids:
         profile = by_id.get(dataset_id)

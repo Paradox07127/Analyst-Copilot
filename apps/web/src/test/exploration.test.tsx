@@ -38,8 +38,24 @@ function runView(overrides: Partial<ExplorationRunView> = {}): ExplorationRunVie
     currentEvidence: [
       {
         receiptId: "rcpt_region",
+        toolName: "run_stat_test",
         summary: "North and South revenue comparison",
         factIds: ["fact_north", "fact_south"],
+        facts: [
+          { factId: "fact_north", name: "north_mean", value: 118.4, unit: "usd" },
+          { factId: "fact_south", name: "south_mean", value: 92.1, unit: "usd" },
+        ],
+        statistics: {
+          testName: "welch_t",
+          outcome: "supports",
+          testStatistic: 6.12,
+          pValue: 0.0000000123,
+          adjustedPValue: 0.0000000492,
+          effectSize: 0.1165,
+          ciLow: null,
+          ciHigh: null,
+          sampleSize: 1086,
+        },
       },
     ],
     insights: [
@@ -183,6 +199,18 @@ describe("E5 exploration report contract", () => {
 });
 
 describe("E5 exploration run component", () => {
+  it("shows the adjudicating numbers, not just a receipt id", () => {
+    render(<ExplorationRunPanel run={runView()} />);
+
+    // A tiny p-value must survive formatting; fixed decimals would show 0.00.
+    expect(screen.getByText("4.92e-8")).toBeInTheDocument();
+    expect(screen.getByText("0.1165")).toBeInTheDocument();
+    expect(screen.getByText("1086")).toBeInTheDocument();
+    expect(screen.getByText("welch_t")).toBeInTheDocument();
+    expect(screen.getAllByText("supports").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rcpt_region").length).toBeGreaterThan(0);
+  });
+
   it("distinguishes paused resumable state from stopped terminal state", () => {
     const paused = runView({ status: "paused", stopReason: null });
     const view = render(<ExplorationRunPanel run={paused} />);
@@ -303,6 +331,8 @@ function explorationDto(
       tool_name: "sql_query",
       summary: "Read-only regional aggregation",
       fact_ids: ["fact_north"],
+      facts: [{ fact_id: "fact_north", name: "north_mean", value: 118.4, unit: "usd" }],
+      statistics: null,
     }],
     insights: [{
       insight_id: "ins_region",
@@ -564,6 +594,10 @@ describe("E5 exploration API workflow", () => {
     });
     server.use(
       http.get("/api/v1/sessions/:sessionId/explorations/:explorationId", () => HttpResponse.json(stopped)),
+      http.get(
+        "/api/v1/sessions/:sessionId/explorations/:explorationId/report",
+        () => HttpResponse.text("# Exploration report\n\n- exploration_id: expl_1"),
+      ),
     );
     renderAppWithRouterAt("/projects/p1/sessions/r1/explorations/expl_1");
     expect(await screen.findByText("Stopped · terminal")).toBeInTheDocument();
@@ -571,7 +605,12 @@ describe("E5 exploration API workflow", () => {
     expect(screen.getAllByText("Confirmatory evidence").length).toBeGreaterThan(0);
     expect(screen.getByText("Exploratory")).toBeInTheDocument();
     expect(screen.getAllByText("Cost $1.25 / $5.00 cap")).toHaveLength(2);
-    expect(screen.getByText("Open report artifact")).toBeInTheDocument();
+    // The report is served as markdown by the run's own endpoint; it has no
+    // artifact id, and the old link pointed at one that never existed.
+    expect(
+      await screen.findByText(/- exploration_id: expl_1/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Open report artifact")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
     expect(document.querySelectorAll("[data-section-id]")).toHaveLength(6);
     expect(FakeEventSource.instances).toHaveLength(0);

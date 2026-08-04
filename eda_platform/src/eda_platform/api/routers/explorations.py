@@ -189,6 +189,23 @@ def extend_exploration_budget(
     )
 
 
+@router.get(
+    "/sessions/{session_id}/explorations/{exploration_id}/report",
+    response_class=Response,
+    responses={200: {"content": {"text/markdown": {}}}},
+)
+def get_exploration_report(
+    session_id: str, exploration_id: str, request: Request
+) -> Response:
+    """Serve the run's own markdown; the report is not an artifact-store row."""
+    markdown = _service(request).read_report(session_id, exploration_id)
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/sessions/{session_id}/explorations/{exploration_id}/events")
 def stream_exploration_events(
     session_id: str,

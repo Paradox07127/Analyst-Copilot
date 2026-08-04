@@ -59,9 +59,8 @@ from eda_platform.application.services.data_operation_service import DataOperati
 from eda_platform.application.services.dataset_service import DatasetService
 from eda_platform.application.services.decision_report_service import DecisionReportService
 from eda_platform.application.services.exploration_service import (
-    TRUSTED_EXPLORATION_RUNTIME_IDENTITY,
     ExplorationService,
-    load_configured_release_certificate,
+    resolve_configured_release_trust,
 )
 from eda_platform.application.services.finding_service import FindingService
 from eda_platform.application.services.insight_service import InsightService
@@ -95,9 +94,6 @@ from eda_platform.core.config import (
     DeploymentConfig,
     deployment_config,
     resolve_workspace_path,
-)
-from eda_platform.core.exploration_release_gate import (
-    TRUSTED_E4A_RELEASE_PUBLIC_KEYS,
 )
 from eda_platform.core.ids import UNFILED_PROJECT_ID
 from eda_platform.core.query import TrustedFileQueryEngine
@@ -155,16 +151,14 @@ def create_app(
     app.state.artifact_service = ArtifactService(store)
     app.state.insight_service = InsightService(store)
     approval_service = ApprovalService(store)
+    release_trust = resolve_configured_release_trust()
     app.state.exploration_service = ExplorationService(
         store,
         approval_service,
         job_service,
-        release_certificate=load_configured_release_certificate(
-            trusted_release_public_keys=TRUSTED_E4A_RELEASE_PUBLIC_KEYS,
-            trusted_runtime_identity=TRUSTED_EXPLORATION_RUNTIME_IDENTITY,
-        ),
-        trusted_release_public_keys=TRUSTED_E4A_RELEASE_PUBLIC_KEYS,
-        trusted_runtime_identity=TRUSTED_EXPLORATION_RUNTIME_IDENTITY,
+        release_certificate=release_trust.certificate,
+        trusted_release_public_keys=release_trust.public_keys,
+        trusted_runtime_identity=release_trust.runtime_identity,
     )
     app.state.cleaning_service = CleaningService(
         store, dataset_service, approval_service, job_service

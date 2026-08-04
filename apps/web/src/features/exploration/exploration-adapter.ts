@@ -54,8 +54,28 @@ export function explorationRunFromDto(dto: ExplorationViewDto): ExplorationRunVi
       : null,
     currentEvidence: dto.current_evidence.map((evidence) => ({
       receiptId: evidence.receipt_id,
+      toolName: evidence.tool_name,
       summary: evidence.summary,
       factIds: evidence.fact_ids,
+      facts: (evidence.facts ?? []).map((fact) => ({
+        factId: fact.fact_id,
+        name: fact.name,
+        value: fact.value ?? null,
+        unit: fact.unit ?? null,
+      })),
+      statistics: evidence.statistics
+        ? {
+            testName: evidence.statistics.test_name,
+            outcome: evidence.statistics.outcome ?? null,
+            testStatistic: evidence.statistics.test_statistic ?? null,
+            pValue: evidence.statistics.p_value ?? null,
+            adjustedPValue: evidence.statistics.adjusted_p_value ?? null,
+            effectSize: evidence.statistics.effect_size ?? null,
+            ciLow: evidence.statistics.ci_low ?? null,
+            ciHigh: evidence.statistics.ci_high ?? null,
+            sampleSize: evidence.statistics.sample_size ?? null,
+          }
+        : null,
     })),
     insights: dto.insights.map((insight) => ({
       insightId: insight.insight_id,
