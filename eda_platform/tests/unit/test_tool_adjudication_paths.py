@@ -283,6 +283,7 @@ def _baseline_binding(
     metric: str = "churn",
     right_operand: str | None = None,
     threshold: float | None = None,
+    columns: tuple[str, ...] = ("churn",),
 ) -> HypothesisExecutionBinding:
     return HypothesisExecutionBinding(
         hypothesis_id="hyp_predictable",
@@ -294,7 +295,7 @@ def _baseline_binding(
         ),
         method_family="run_baseline_model",
         dataset_ids=("ds_observations",),
-        columns=("churn",),
+        columns=columns,
     )
 
 
@@ -305,6 +306,7 @@ def _baseline_receipt(
     accuracy: float | None = None,
     baseline_accuracy: float | None = None,
     r2: float | None = None,
+    cv_accuracy_std: float | None = None,
 ) -> EvidenceReceipt:
     facts = [
         ReceiptFact(fact_id="task_type", name="task_type", value=task_type, value_type="string"),
@@ -336,6 +338,15 @@ def _baseline_receipt(
     if r2 is not None:
         facts.append(
             ReceiptFact(fact_id="metric.r2", name="metric.r2", value=r2, value_type="number")
+        )
+    if cv_accuracy_std is not None:
+        facts.append(
+            ReceiptFact(
+                fact_id="metric.cv_accuracy_std",
+                name="metric.cv_accuracy_std",
+                value=cv_accuracy_std,
+                value_type="number",
+            )
         )
     return build_receipt(
         tool_call_id=f"call-baseline-{task_type}-{accuracy}-{baseline_accuracy}-{r2}",
@@ -592,3 +603,78 @@ def test_unresolvable_named_metrics_stay_honestly_unadjudicated(
     )
     assert adjudicated.statistics is not None
     assert adjudicated.statistics.hypothesis_outcome is None
+
+
+# --- significance and materiality floors (deepseek seed 9 regression) --------
+#
+# Two false "supports" reached a certified report with the real numbers below.
+# Both came from this session's own changes: metric-name resolution let a
+# statistical estimate be compared with a bare ">", and an absent materiality
+# threshold was read as "any nonzero effect counts".
+
+
+def test_a_named_correlation_below_significance_does_not_support() -> None:
+    """seed 9: customer_age~units, r=+0.0246, adjusted_p=0.417 — noise, but
+    "0.0246 > 0.0" is literally true."""
+    receipt = _correlation_receipt(coefficient=0.0246, adjusted_p=0.41713555)
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _numeric_binding(
+            metric="correlation",
+            operator="greater_than",
+            threshold=0.0,
+            method_family="correlate_columns",
+            right_operand="y",
+        ),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome == "contradicts"
+
+
+def test_a_named_correlation_that_is_significant_still_supports() -> None:
+    """Control: the resolution layer must keep working for real associations."""
+    receipt = _correlation_receipt(coefficient=0.62, adjusted_p=0.0001)
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _numeric_binding(
+            metric="correlation",
+            operator="greater_than",
+            threshold=0.0,
+            method_family="correlate_columns",
+            right_operand="y",
+        ),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome == "supports"
+
+
+def test_baseline_skill_inside_its_own_cross_validation_noise_does_not_support() -> None:
+    """seed 9: accuracy 0.2209 vs majority baseline 0.2191 — a 0.0018 gain the
+    card's own cv_accuracy_std of 0.0171 cannot distinguish from noise."""
+    receipt = _baseline_receipt(
+        task_type="classification",
+        accuracy=0.2209,
+        baseline_accuracy=0.219136,
+        cv_accuracy_std=0.0171,
+    )
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _baseline_binding(),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome == "contradicts"
+
+
+def test_baseline_skill_beyond_its_noise_still_supports() -> None:
+    receipt = _baseline_receipt(
+        task_type="classification",
+        accuracy=0.62,
+        baseline_accuracy=0.22,
+        cv_accuracy_std=0.0171,
+    )
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _baseline_binding(),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome == "supports"

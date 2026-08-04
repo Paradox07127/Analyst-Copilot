@@ -59,7 +59,11 @@ package = true
 [tool.pytest.ini_options]
 testpaths = ["eda_platform/tests"]
 pythonpath = ["eda_platform/src"]
-addopts = "-q"
+# -n 8: the suite is ~3560 tests with a long tail (top-15 slowest are only 8%
+# of the total), so parallelism is the only real lever — 9m11s to 1m55s,
+# identical results over three runs. Debug a single failure with `-n 0`:
+# parallel interleaves output and randomizes execution order.
+addopts = "-q -n 8"
 
 [tool.ruff]
 line-length = 100

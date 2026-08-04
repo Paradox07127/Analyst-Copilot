@@ -418,7 +418,8 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
             description=(
                 "Deterministically screen one numeric column for robust outliers "
                 "(robust z-score or IQR) and record an evidence receipt. Use it to "
-                "quantify suspected outliers; do not use it on ids, codes or categories."
+                "quantify suspected outliers; do not use it on ids, codes, categories "
+                "or dates -- the column must hold a numeric measure."
             ),
             args_schema=ScreenAnomaliesArguments,
             execute=lambda args: _screen_anomalies(context, cast(ScreenAnomaliesArguments, args)),
@@ -457,7 +458,12 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 "independence questions; do not use it for correlation screens. "
                 "Multiplicity bookkeeping is automatic: the comparison family is "
                 "derived from the dataset and the columns under test, so repeating a "
-                "comparison always tightens its own Bonferroni-adjusted p-value."
+                "comparison always tightens its own Bonferroni-adjusted p-value. "
+                "group_column and category_column must name categorical columns and "
+                "value_column a numeric one; passing a numeric column as the group is "
+                "rejected. Two-sample tests (independent_t_test, mann_whitney_u) need "
+                "a group column with exactly two distinct values -- use kruskal_wallis "
+                "or anova for more."
             ),
             args_schema=RunStatTestArguments,
             execute=lambda args: _run_stat_test(context, cast(RunStatTestArguments, args)),
@@ -481,8 +487,10 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 "Re-profile a WHERE-filtered subgroup of one dataset: per-column "
                 "missing/unique/distribution plus numeric summaries, with the "
                 "slice's share of the full table. `where_sql` is a bare WHERE "
-                "condition (no SELECT, no semicolons). Use it for conditional or "
-                "stratified exploration; do not use it to fetch raw rows."
+                "condition (no SELECT, no semicolons, no subqueries). Quote string "
+                "literals -- region = 'North', not region = North -- and use only "
+                "column names from the schema you were given. Use it for conditional "
+                "or stratified exploration; do not use it to fetch raw rows."
             ),
             args_schema=ProfileSliceArguments,
             execute=lambda args: _profile_slice(context, cast(ProfileSliceArguments, args)),
@@ -493,7 +501,10 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 "Aggregate one time column into a regular series and report trend "
                 "direction, seasonal strength, Ljung-Box autocorrelation and a "
                 "joint ADF+KPSS stationarity verdict, with gap accounting. Use it "
-                "for trend/seasonality questions; do not use it to forecast."
+                "for trend/seasonality questions; do not use it to forecast. Omit freq "
+                "to let the tool infer it. If you do set it, use current pandas "
+                "aliases -- D, W, ME, QE, YE -- since the old M/Q/Y spellings are "
+                "rejected. A daily spike disappears once you aggregate to ME or QE."
             ),
             args_schema=AnalyzeTimeSeriesArguments,
             execute=lambda args: _analyze_time_series(
@@ -506,7 +517,9 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 "Diagnose observable missingness structure across the dataset: rates, "
                 "missing-indicator correlations, safe group-rate ranges and optional "
                 "target association tests with Holm correction. It always reports that "
-                "observed data cannot rule out MNAR; never use it to label a mechanism."
+                "observed data cannot rule out MNAR; never use it to label a mechanism. "
+                "Group columns must be low-cardinality categories such as channel or "
+                "region; a date or an id has one group per row and is rejected."
             ),
             args_schema=DiagnoseMissingnessArguments,
             execute=lambda args: _diagnose_missingness(
@@ -519,7 +532,10 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
                 "Fit a deterministic leakage-screened classification or regression "
                 "baseline with group/time-aware splitting, cross-validation, calibration "
                 "metrics and signed test-set permutation importance. Use it to establish "
-                "a predictive baseline, never to claim causation or production readiness."
+                "a predictive baseline, never to claim causation or production readiness. "
+                "Leave split_policy at 'auto' unless you have a reason: 'random' is "
+                "rejected outright when the dataset has a time column, because it lets "
+                "the model train on the future."
             ),
             args_schema=RunBaselineModelArguments,
             execute=lambda args: _run_baseline_model(

@@ -292,7 +292,12 @@ def _predicate_outcome(
             skill = r2
         else:
             return None
-        materiality = predicate.threshold or 0.0
+        # An absent threshold is "no materiality stated", not "zero". The card
+        # reports its own fold-to-fold spread, so require the gain to clear it:
+        # deepseek seed 9 called a 0.0018 accuracy gain predictive signal while
+        # the same card reported cv_accuracy_std=0.0171 (2026-08-04).
+        noise = _finite_fact_number(facts.get("metric.cv_accuracy_std")) or 0.0
+        materiality = max(predicate.threshold or 0.0, noise)
         return "supports" if skill > materiality else "contradicts"
 
     if operator in {"exists", "absent"}:
@@ -300,6 +305,7 @@ def _predicate_outcome(
         return "supports" if exists == (operator == "exists") else "contradicts"
 
     value = _predicate_numeric_value(facts, predicate.metric)
+    resolved_estimate = value is None
     if value is None:
         # Metric-name resolution (seed-7): the model's predicates name derived
         # metrics ("pearson_correlation", "r2") while facts are namespaced by
@@ -309,6 +315,11 @@ def _predicate_outcome(
     threshold = predicate.threshold
     if value is None or threshold is None:
         return None
+    if resolved_estimate and not _estimate_is_significant(receipt, predicate, facts):
+        # A named statistical estimate compared with a bare ">" is meaningless
+        # without its own significance: seed 9 supported r=+0.0246 because
+        # "0.0246 > 0.0" is literally true while adjusted_p was 0.417.
+        return "contradicts"
     if operator == "greater_than":
         return "supports" if value > threshold else "contradicts"
     if operator == "less_than":
@@ -365,6 +376,54 @@ def _resolve_named_metric(
                 facts.get(fact_id.removesuffix(".columns") + ".coefficient")
             )
     return None
+
+
+def _correlation_pair_prefix(
+    predicate: HypothesisPredicate,
+    facts: dict[str, float | int | str | bool | None],
+) -> str | None:
+    """The ``pairN`` prefix whose columns are the predicate's two operands."""
+    left = predicate.left_operand or predicate.metric
+    right = predicate.right_operand
+    if not left or not right:
+        return None
+    target_pair = {left.casefold(), right.casefold()}
+    for fact_id, value in facts.items():
+        if not fact_id.startswith("pair") or not fact_id.endswith(".columns"):
+            continue
+        if not isinstance(value, str) or {
+            item.strip().casefold() for item in value.split("~")
+        } != target_pair:
+            continue
+        return fact_id.removesuffix(".columns")
+    return None
+
+
+def _estimate_is_significant(
+    receipt: EvidenceReceipt,
+    predicate: HypothesisPredicate,
+    facts: dict[str, float | int | str | bool | None],
+) -> bool:
+    """Whether the resolved estimate carries its own evidence of being real.
+
+    Absent any p-value the estimate is not established, so this is fail-closed.
+    """
+    statistics = receipt.statistics
+    if statistics is not None:
+        p_value = (
+            statistics.adjusted_p_value
+            if statistics.adjusted_p_value is not None
+            else statistics.p_value
+        )
+        if p_value is not None:
+            return p_value <= 0.05
+    pair = _correlation_pair_prefix(predicate, facts)
+    if pair is not None:
+        adjusted_p = _finite_fact_number(facts.get(pair + ".adjusted_p"))
+        return adjusted_p is not None and adjusted_p <= 0.05
+    # Model skill is judged against its own noise floor by the baseline branch;
+    # anything else offers nothing to establish the estimate with.
+    return receipt.tool_name == "run_baseline_model"
 
 
 def _finite_fact_number(value: float | int | str | bool | None) -> float | None:
