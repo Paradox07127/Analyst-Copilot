@@ -369,7 +369,9 @@ function FindingsPrimer({
 }
 
 /* One banded strip carrying its own scope: the counts are the project's,
- * not this session's. */
+ * not this session's. Rendered only when at least one tile is non-zero — the
+ * primer above already explains an empty page, and five stacked zeroes filled
+ * a screen with nothing. */
 function FindingsMetrics({
   findings,
   records,
@@ -378,6 +380,13 @@ function FindingsMetrics({
   records: InvestigationLogEntry[];
 }) {
   const counts = outcomeCounts(records);
+  if (
+    findings.length === 0 &&
+    (counts["inconclusive"] ?? 0) === 0 &&
+    (counts["needs_data"] ?? 0) === 0
+  ) {
+    return null;
+  }
   const fromThisRun = findings.filter((item) => item.from_current_session).length;
   const eligible = findings.filter(
     (item) => item.report_readiness === "eligible",

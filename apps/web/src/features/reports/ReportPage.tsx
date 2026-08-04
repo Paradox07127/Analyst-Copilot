@@ -31,7 +31,11 @@ import { DecisionStoryPanel } from "./DecisionStoryPanel";
 import { EvidenceInspector } from "./EvidenceInspector";
 import { ReportBody } from "./ReportBody";
 import { ReportContents } from "./ReportContents";
-import { citationsFor, readReportOutline } from "./report-outline";
+import {
+  citationsFor,
+  readReportOutline,
+  type ReportHeading,
+} from "./report-outline";
 import "./report-markdown.css";
 
 const OK_STATUSES = ["validated", "final", "generated"];
@@ -257,6 +261,59 @@ function DownloadButtons({
   );
 }
 
+/* The chart inventory, the claim ledger and the per-figure verification trace
+ * are what make a claim checkable, and together they are about half the
+ * report's words — a reader looking for the findings had to scroll past ~116
+ * chart entries to reach them. Open on demand, never removed. */
+function EvidenceRecord({
+  markdown,
+  headings,
+  inspectableIds,
+  selectedId,
+  onInspect,
+}: {
+  markdown: string;
+  headings: ReportHeading[];
+  inspectableIds: Set<string>;
+  selectedId: string | null;
+  onInspect: (artifactId: string) => void;
+}) {
+  /* Every level, not just h2: the exporter writes Claim Ledger and its
+   * neighbours as h3, and they are the reason to open this. */
+  const names = headings.map((heading) =>
+    heading.text.replace(/^Appendix:\s*/, ""),
+  );
+  return (
+    <details className="group min-w-0 rounded-base border border-border bg-surface">
+      <summary className="flex cursor-pointer list-none flex-wrap items-baseline gap-x-2 gap-y-1 rounded-base px-4 py-3 hover:bg-bg">
+        <span className="text-sm font-semibold">Evidence record</span>
+        <span className="text-xs text-status-neutral">
+          How every figure above was checked
+        </span>
+        <span className="ml-auto text-xs text-primary group-open:hidden">
+          Show
+        </span>
+        <span className="ml-auto hidden text-xs text-primary group-open:inline">
+          Hide
+        </span>
+        {names.length > 0 && (
+          <span className="w-full text-xs text-status-neutral">
+            {names.join(" · ")}
+          </span>
+        )}
+      </summary>
+      <div className="min-w-0 border-t border-hairline p-4 sm:p-6">
+        <ReportBody
+          markdown={markdown}
+          inspectableIds={inspectableIds}
+          selectedId={selectedId}
+          onInspect={onInspect}
+        />
+      </div>
+    </details>
+  );
+}
+
 function GenerateReportControl({
   projectId,
   sessionId,
@@ -467,7 +524,7 @@ export function Component() {
                     />
                     <Card className="min-w-0 p-4 sm:p-6">
                       <ReportBody
-                        markdown={outline.body}
+                        markdown={outline.narrative}
                         inspectableIds={outline.inspectableIds}
                         selectedId={
                           inspecting?.sessionId === sessionId
@@ -479,6 +536,21 @@ export function Component() {
                         }
                       />
                     </Card>
+                    {outline.reference && (
+                      <EvidenceRecord
+                        markdown={outline.reference}
+                        headings={outline.referenceHeadings}
+                        inspectableIds={outline.inspectableIds}
+                        selectedId={
+                          inspecting?.sessionId === sessionId
+                            ? inspecting.artifactId
+                            : null
+                        }
+                        onInspect={(artifactId) =>
+                          setInspecting({ artifactId, sessionId })
+                        }
+                      />
+                    )}
                   </>
                 )
               ))}

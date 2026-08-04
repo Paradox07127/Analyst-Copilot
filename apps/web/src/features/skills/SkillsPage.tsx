@@ -129,25 +129,44 @@ function BindingForm({
     : [];
   return (
     <div className="flex flex-wrap items-end gap-3">
+      {/* One checkbox per table per skill: twelve tables across twelve skills
+        * put 144 checkboxes on this page, so picking a skill meant scrolling
+        * past the target lists of eleven others. The chosen tables stay
+        * visible in the summary; the full list opens only to change them.
+        * <details> rather than the shared Disclosure so the <legend> keeps
+        * naming the fieldset for assistive tech. */}
       <fieldset className="flex flex-col gap-1 text-xs text-status-neutral">
         <legend>{`Replay on datasets — ${datasetIds.length} selected`}</legend>
-        <div className="flex flex-wrap gap-3">
-          {datasets.map((dataset) => (
-            <label
-              key={dataset.dataset_id}
-              className="flex items-center gap-1.5 text-sm text-text"
-            >
-              <input
-                type="checkbox"
-                checked={datasetIds.includes(dataset.dataset_id)}
-                onChange={(event) =>
-                  onDatasetToggle(dataset.dataset_id, event.target.checked)
-                }
-              />
-              {dataset.name}
-            </label>
-          ))}
-        </div>
+        <details className="group">
+          <summary className="w-fit cursor-pointer list-none rounded-base border border-border px-2 py-1 text-sm text-text hover:bg-surface">
+            <span className="group-open:hidden">
+              {datasetIds.length === 0
+                ? "Choose tables"
+                : datasets
+                    .filter((dataset) => datasetIds.includes(dataset.dataset_id))
+                    .map((dataset) => dataset.name)
+                    .join(", ")}
+            </span>
+            <span className="hidden group-open:inline">Done choosing</span>
+          </summary>
+          <div className="mt-1.5 flex flex-wrap gap-3">
+            {datasets.map((dataset) => (
+              <label
+                key={dataset.dataset_id}
+                className="flex items-center gap-1.5 text-sm text-text"
+              >
+                <input
+                  type="checkbox"
+                  checked={datasetIds.includes(dataset.dataset_id)}
+                  onChange={(event) =>
+                    onDatasetToggle(dataset.dataset_id, event.target.checked)
+                  }
+                />
+                {dataset.name}
+              </label>
+            ))}
+          </div>
+        </details>
       </fieldset>
       {(skill.params ?? []).map((param) => (
         <label

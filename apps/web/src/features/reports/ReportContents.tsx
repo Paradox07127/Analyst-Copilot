@@ -13,11 +13,24 @@ export function ReportContents({
   hasEvidence: boolean;
 }) {
   if (outline.headings.length < 2) return null;
-  const sections = outline.headings.filter((heading) => heading.level === 2);
+  const referenceIds = new Set(outline.referenceHeadings.map((h) => h.id));
+  const sections = outline.headings.filter(
+    (heading) => heading.level === 2 && !referenceIds.has(heading.id),
+  );
 
+  /* Reference sections live inside a closed <details>, so a jump has to open it
+   * first or scrollIntoView lands on the collapsed summary. */
   const jump = (id: string) => {
     const target = document.getElementById(id);
-    target?.scrollIntoView?.({ block: "start" });
+    if (!target) return;
+    for (
+      let node = target.parentElement;
+      node;
+      node = node.parentElement
+    ) {
+      if (node instanceof HTMLDetailsElement) node.open = true;
+    }
+    target.scrollIntoView?.({ block: "start" });
   };
 
   return (
@@ -25,7 +38,7 @@ export function ReportContents({
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h2 className="text-sm font-semibold">Contents</h2>
         <span className="tabular text-xs text-status-neutral">
-          {`${sections.length} sections · ≈${formatCompact(outline.words)} words`}
+          {`${sections.length} sections · ≈${formatCompact(outline.narrativeWords)} words to read`}
         </span>
       </div>
       <nav aria-label="Report sections" className="flex flex-wrap gap-1.5">
@@ -34,10 +47,17 @@ export function ReportContents({
             key={heading.id}
             type="button"
             onClick={() => jump(heading.id)}
+            title={
+              referenceIds.has(heading.id)
+                ? "In the evidence record below the report"
+                : undefined
+            }
             className={
-              heading.level === 2
-                ? "rounded-base border border-border px-2 py-0.5 text-xs hover:border-primary hover:text-primary"
-                : "rounded-base px-2 py-0.5 text-xs text-status-neutral hover:text-primary"
+              referenceIds.has(heading.id)
+                ? "rounded-base border border-dashed border-border px-2 py-0.5 text-xs text-status-neutral hover:border-primary hover:text-primary"
+                : heading.level === 2
+                  ? "rounded-base border border-border px-2 py-0.5 text-xs hover:border-primary hover:text-primary"
+                  : "rounded-base px-2 py-0.5 text-xs text-status-neutral hover:text-primary"
             }
           >
             {heading.text}

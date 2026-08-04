@@ -17,6 +17,7 @@ import {
   LoadingSkeleton,
   PartialState,
 } from "../../components/async-states";
+import { qualityCodeLabel } from "../../api/quality-codes";
 import { DataWorkspacePage } from "../../components/data-workspace";
 import {
   Badge,
@@ -102,7 +103,7 @@ function ReadinessBadge({ gate }: { gate: DatasetGate }) {
   }
   const conditions =
     gate.materialCodes.length > 0
-      ? `Open conditions: ${gate.materialCodes.join(", ")}`
+      ? `Open conditions: ${gate.materialCodes.map(qualityCodeLabel).join(", ")}`
       : "Critical quality flags are open.";
   return (
     <Badge

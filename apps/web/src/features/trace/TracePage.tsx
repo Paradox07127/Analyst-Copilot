@@ -99,15 +99,34 @@ function CostCards({ metrics }: { metrics: SessionMetricsView }) {
   );
 }
 
+/* The task cut is keyed by the internal task id the agent tags each call with
+ * (`m2_report_claim_plan`, `di8_semantic_bootstrap`). The prefixes are
+ * milestone codes with no meaning outside this repository, so the panel that
+ * answers "what did the run spend its calls on" was unreadable. Unknown ids
+ * fall through to the raw name — a new task shows up honestly rather than
+ * silently mislabelled. */
+const TASK_LABELS: Record<string, string> = {
+  di4_l1_interpretation: "Interpreting results",
+  di8_semantic_bootstrap: "Learning column meanings",
+  m2_report_claim_plan: "Planning report claims",
+  m3_build_plan: "Planning the analysis",
+  m4_question_discovery: "Proposing questions",
+  session_title: "Naming the session",
+};
+
+function taskLabel(name: string): string {
+  return TASK_LABELS[name] ?? name;
+}
+
 /* Four cuts of the same call set. Which model actually served a request and
  * which transport carried it are the two that most often explain a cost
  * surprise, so they lead. */
 function LlmBreakdowns({ metrics }: { metrics: SessionMetricsView }) {
   const groups = [
-    ["Model", metrics.llm_calls_by_model],
-    ["Transport", metrics.llm_calls_by_kind],
-    ["Status", metrics.llm_calls_by_status],
-    ["Task", metrics.llm_calls_by_task],
+    ["Model", metrics.llm_calls_by_model, false],
+    ["Transport", metrics.llm_calls_by_kind, false],
+    ["Status", metrics.llm_calls_by_status, false],
+    ["What the calls were for", metrics.llm_calls_by_task, true],
   ] as const;
   if (groups.every(([, values]) => Object.keys(values ?? {}).length === 0)) {
     return null;
@@ -116,7 +135,7 @@ function LlmBreakdowns({ metrics }: { metrics: SessionMetricsView }) {
     <section className="flex flex-col gap-2">
       <SectionHeader title="LLM request breakdown" level={3} />
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {groups.map(([label, values]) => (
+        {groups.map(([label, values, humanize]) => (
           <div key={label} className="rounded-base border border-border p-3">
             <h4 className="mb-2 text-xs font-medium text-status-neutral">{label}</h4>
             <dl className="flex flex-col gap-1 text-sm">
@@ -124,8 +143,12 @@ function LlmBreakdowns({ metrics }: { metrics: SessionMetricsView }) {
                 .sort((a, b) => b[1] - a[1])
                 .map(([name, count]) => (
                   <div key={name} className="flex justify-between gap-3">
-                    <dt className="min-w-0 font-mono text-xs">
-                      <Marquee title={name}>{name}</Marquee>
+                    <dt
+                      className={`min-w-0 text-xs ${humanize ? "" : "font-mono"}`}
+                    >
+                      <Marquee title={name}>
+                        {humanize ? taskLabel(name) : name}
+                      </Marquee>
                     </dt>
                     <dd className="tabular">{count}</dd>
                   </div>

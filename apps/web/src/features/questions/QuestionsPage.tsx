@@ -2,7 +2,7 @@
  * review one card -> approve its prepared content -> execute it.
  * Editing an existing card and drafting one from free text live here too. */
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Link, useParams } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -89,27 +89,83 @@ function ExecutionBadge({
     return (
       <Badge caps>
         <Dot tone="neutral" />
-        Not executed
+        Not run yet
       </Badge>
     );
   }
   const outcome = execution.outcome;
   const tone = OUTCOME_TONE[outcome] ?? "neutral";
+  const count = execution.findings_count ?? 0;
   return (
     <span className="flex items-center gap-2">
       <Badge tone={tone} caps>
         <Dot tone={tone} />
         {outcome.replace("_", " ")}
       </Badge>
-      <Link
-        to={sessionSectionPath(projectId, execution.execution_session_id, "artifacts")}
-        className="text-xs text-primary underline-offset-2 hover:underline"
-      >
-        {(execution.findings_count ?? 0) === 1
-          ? "1 finding"
-          : `${execution.findings_count ?? 0} findings`}
-      </Link>
+      {count > 0 && (
+        <Link
+          to={sessionSectionPath(
+            projectId,
+            execution.execution_session_id,
+            "artifacts",
+          )}
+          className="text-xs text-primary underline-offset-2 hover:underline"
+          /* "Finding" on the Findings page means a validated conclusion; this
+           * count is the run's raw result rows. Naming it "result" keeps a
+           * card that reports 1 from contradicting a Findings page reporting 0. */
+        >
+          {count === 1 ? "1 result" : `${count} results`}
+        </Link>
+      )}
     </span>
+  );
+}
+
+/* A failed run already carries a specific, actionable diagnosis — the tool
+ * guard's rejection. It used to stop at the backend, leaving the card saying
+ * only "failed · 0 findings". */
+function ExecutionOutcomeNote({
+  projectId,
+  question,
+}: {
+  projectId: string;
+  question: QuestionSummary;
+}) {
+  const execution = question.execution;
+  if (!execution) return null;
+  const { outcome, failure_reason, abstention_code, qexec_artifact_id } =
+    execution;
+  if (outcome !== "failed" && outcome !== "abstained") return null;
+
+  const evidenceHref = `${sessionSectionPath(
+    projectId,
+    execution.execution_session_id,
+    "artifacts",
+  )}?artifact=${encodeURIComponent(qexec_artifact_id)}`;
+
+  return (
+    <Card
+      tone={outcome === "failed" ? "warn" : "quiet"}
+      className="flex flex-col gap-1 p-3"
+    >
+      <p className="text-xs font-medium">
+        {outcome === "failed"
+          ? "This run stopped before it produced a result"
+          : "The agent declined to answer"}
+      </p>
+      <p className="text-sm">
+        {failure_reason ??
+          (abstention_code
+            ? abstention_code.replaceAll("_", " ")
+            : "No reason was recorded with the execution.")}
+      </p>
+      <Link
+        to={evidenceHref}
+        className="self-start text-xs text-primary underline-offset-2 hover:underline"
+      >
+        Read the full execution record
+      </Link>
+    </Card>
   );
 }
 
@@ -536,17 +592,22 @@ function QuestionCard({
   projectId,
   sessionId,
   question,
+  llmMode,
+  sharedDecisions,
 }: {
   projectId: string;
   sessionId: string;
   question: QuestionSummary;
+  llmMode: "env" | "offline";
+  /** Decision texts that more than one card carries, so they are a template
+   *  default rather than this question's own reasoning. */
+  sharedDecisions: Set<string>;
 }) {
   const { startTracking } = useJobActivity();
   const queryClient = useQueryClient();
   /* One idempotency key per prepared approval: Confirm retries replay the
    * same key (and job), while a fresh prepare binds a fresh key. */
   const [executeKey, setExecuteKey] = useState("");
-  const [llmMode, setLlmMode] = useState<"env" | "offline">("env");
 
   const prepare = useMutation({
     mutationFn: () =>
@@ -603,18 +664,39 @@ function QuestionCard({
 
         <p className="text-sm font-medium">{question.question}</p>
 
-        {question.business_decision && (
-          <p className="text-sm">
-            <span className="mr-1.5 text-xs text-status-neutral">Decision</span>
-            {question.business_decision}
-          </p>
-        )}
-        {(question.risks ?? []).length > 0 && (
-          <p className="text-sm">
-            <span className="mr-1.5 text-xs text-status-neutral">Risks</span>
-            {(question.risks ?? []).join(" | ")}
-          </p>
-        )}
+        <ExecutionOutcomeNote projectId={projectId} question={question} />
+
+        {question.business_decision &&
+          (sharedDecisions.has(question.business_decision) ? (
+            /* Five template cards carried this identical sentence. Repeating it
+             * per card taught the reader nothing and buried the questions. */
+            <p className="text-xs text-status-neutral">
+              Standard framing
+              <Hint label="Standard framing">
+                {question.business_decision}
+              </Hint>
+            </p>
+          ) : (
+            <p className="text-sm">
+              <span className="mr-1.5 text-xs text-status-neutral">
+                Decision
+              </span>
+              {question.business_decision}
+            </p>
+          ))}
+        {!sharedDecisions.has(question.business_decision ?? "") &&
+          (question.risks ?? []).length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="text-xs text-status-neutral">
+                Risks to the answer
+              </span>
+              <ul className="ml-4 list-disc text-sm marker:text-status-neutral">
+                {(question.risks ?? []).map((risk) => (
+                  <li key={risk}>{risk}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
         <GenreLine question={question} />
 
@@ -663,40 +745,36 @@ function QuestionCard({
               />
             )
           ) : (
-            <Card tone="quiet" className="flex flex-col gap-2 p-3">
-              <StepChain
-                label="Run this question"
-                steps={RUN_ONE_STEPS}
-                current={0}
-              />
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => prepare.mutate()}
-                  disabled={prepare.isPending}
-                  className="rounded-base border border-border bg-bg px-3 py-1.5 text-sm font-medium hover:bg-surface disabled:opacity-50"
+            /* The step chain, the LLM-mode select and the "nothing runs until
+             * you confirm" note used to repeat on all 14 cards. They say the
+             * same thing every time, so they now live once above the list and
+             * each card keeps only its own action. */
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => prepare.mutate()}
+                disabled={prepare.isPending}
+                className="rounded-base border border-border bg-bg px-3 py-1.5 text-sm font-medium hover:bg-surface disabled:opacity-50"
+              >
+                {prepare.isPending
+                  ? "Preparing…"
+                  : question.execution
+                    ? "Approve & run again"
+                    : "Approve & run"}
+              </button>
+              {question.execution?.outcome === "answered" && (
+                <Link
+                  to={sessionSectionPath(
+                    projectId,
+                    question.execution.execution_session_id,
+                    "deep-analysis",
+                  )}
+                  className="rounded-base px-2 py-1.5 text-sm text-primary underline-offset-2 hover:underline"
                 >
-                  {prepare.isPending ? "Preparing…" : "Approve & run"}
-                </button>
-                <label className="flex items-center gap-1 text-xs text-status-neutral">
-                  LLM mode
-                  <select
-                    value={llmMode}
-                    onChange={(event) =>
-                      setLlmMode(event.target.value as "env" | "offline")
-                    }
-                    className="rounded-base border border-border bg-bg px-1.5 py-1 text-xs"
-                  >
-                    <option value="env">env (autonomous agent)</option>
-                    <option value="offline">offline (fixed SQL only)</option>
-                  </select>
-                </label>
-                <span className="text-xs text-status-neutral">
-                  Step 2 shows the approved scope and capabilities. Nothing
-                  runs until you confirm there.
-                </span>
-              </div>
-            </Card>
+                  See what it produced
+                </Link>
+              )}
+            </div>
           )
         ) : (
           <Card tone="quiet" className="flex items-center gap-2 p-3">
@@ -731,9 +809,62 @@ function QuestionCard({
   );
 }
 
+/* Answered, failed and never-run cards used to interleave, so returning to the
+ * page meant re-reading all 14 to find where the work stood. */
+const PROGRESS_GROUPS = [
+  {
+    key: "todo",
+    title: "Not run yet",
+    description: "Approve one to run it.",
+  },
+  {
+    key: "failed",
+    title: "Stopped before an answer",
+    description: "Each says what blocked it. Fix the card or run it again.",
+  },
+  {
+    key: "done",
+    title: "Already run",
+    description: "Their output is on Deep analysis and in the Report.",
+  },
+] as const;
+
+type ProgressKey = (typeof PROGRESS_GROUPS)[number]["key"];
+
+function progressOf(question: QuestionSummary): ProgressKey {
+  const outcome = question.execution?.outcome;
+  if (!outcome || outcome === "awaiting_approval") return "todo";
+  return outcome === "answered" ? "done" : "failed";
+}
+
+function groupByProgress(
+  items: QuestionSummary[],
+): Record<ProgressKey, QuestionSummary[]> {
+  const groups: Record<ProgressKey, QuestionSummary[]> = {
+    todo: [],
+    failed: [],
+    done: [],
+  };
+  for (const question of items) groups[progressOf(question)].push(question);
+  return groups;
+}
+
+/** Decision sentences carried by two or more cards: a template default. */
+function sharedDecisionTexts(items: QuestionSummary[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const question of items) {
+    const decision = question.business_decision;
+    if (decision) counts.set(decision, (counts.get(decision) ?? 0) + 1);
+  }
+  return new Set(
+    [...counts.entries()].filter(([, count]) => count > 1).map(([text]) => text),
+  );
+}
+
 export function Component() {
   const { projectId = "", sessionId = "" } = useParams();
   const questions = useQuestions(sessionId);
+  const [llmMode, setLlmMode] = useState<"env" | "offline">("env");
 
   if (questions.isPending) {
     return <LoadingSkeleton lines={4} label="Loading questions" />;
@@ -750,6 +881,8 @@ export function Component() {
   }
   const items = questions.data.questions ?? [];
   const hasSuggestions = items.length > 0;
+  const groups = groupByProgress(items);
+  const sharedDecisions = sharedDecisionTexts(items);
 
   return (
     <div className="mx-auto flex w-[95%] max-w-data flex-col gap-5 p-6">
@@ -784,16 +917,70 @@ export function Component() {
           }
         />
         {hasSuggestions ? (
-          <ul aria-label="Question candidates" className="flex flex-col gap-3">
-            {items.map((question) => (
-              <QuestionCard
-                key={question.question_id}
-                projectId={projectId}
-                sessionId={sessionId}
-                question={question}
+          <>
+            <Card
+              tone="quiet"
+              className="flex flex-col gap-2 p-3"
+              aria-label="How running a question works"
+            >
+              <StepChain
+                label="Run this question"
+                steps={RUN_ONE_STEPS}
+                current={0}
               />
-            ))}
-          </ul>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                <label className="flex items-center gap-1.5 text-xs text-status-neutral">
+                  LLM mode
+                  <select
+                    value={llmMode}
+                    onChange={(event) =>
+                      setLlmMode(event.target.value as "env" | "offline")
+                    }
+                    className="rounded-base border border-border bg-bg px-1.5 py-1 text-xs"
+                  >
+                    <option value="env">env (autonomous agent)</option>
+                    <option value="offline">offline (fixed SQL only)</option>
+                  </select>
+                </label>
+                <span className="text-xs text-status-neutral">
+                  Applies to every card below. Step 2 shows the approved scope
+                  and capabilities; nothing runs until you confirm there.
+                </span>
+              </div>
+            </Card>
+            {/* One list, not one per group: the progress headings are
+              * role="presentation" separators inside it, so grouping the cards
+              * by what happened to them does not split the list every reader
+              * and test navigates by name. */}
+            <ul
+              aria-label="Question candidates"
+              className="flex flex-col gap-3"
+            >
+              {PROGRESS_GROUPS.filter(
+                (group) => groups[group.key].length > 0,
+              ).map((group) => (
+                <Fragment key={group.key}>
+                  <li role="presentation" className="mt-2 first:mt-0">
+                    <SectionHeader
+                      level={3}
+                      title={`${group.title} (${groups[group.key].length})`}
+                      description={group.description}
+                    />
+                  </li>
+                  {groups[group.key].map((question) => (
+                    <QuestionCard
+                      key={question.question_id}
+                      projectId={projectId}
+                      sessionId={sessionId}
+                      question={question}
+                      llmMode={llmMode}
+                      sharedDecisions={sharedDecisions}
+                    />
+                  ))}
+                </Fragment>
+              ))}
+            </ul>
+          </>
         ) : (
           <EmptyState
             title="No suggested questions yet"

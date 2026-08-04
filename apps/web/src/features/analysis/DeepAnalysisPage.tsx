@@ -73,6 +73,48 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
+/* A column holding one value in every row is a property of the table, not of
+ * any row. Analysis frames carry several — `dataset`, `missing_policy`,
+ * `selection_method`, `analysis_population_rows` — and leaving them in made a
+ * five-signal table ten columns wide and pushed the numbers off-screen. Needs
+ * two rows to be a claim about the table, and never hides the last column. */
+export function splitConstantColumns(
+  columns: string[],
+  rows: Record<string, unknown>[],
+): { columns: string[]; constants: { column: string; value: string }[] } {
+  if (rows.length < 2) return { columns, constants: [] };
+  const constants: { column: string; value: string }[] = [];
+  const varying: string[] = [];
+  for (const column of columns) {
+    const first = cellText(rows[0]?.[column]);
+    const uniform =
+      first !== "" && rows.every((row) => cellText(row[column]) === first);
+    if (uniform) constants.push({ column, value: first });
+    else varying.push(column);
+  }
+  if (varying.length === 0) return { columns, constants: [] };
+  return { columns: varying, constants };
+}
+
+function ConstantColumnNote({
+  constants,
+}: {
+  constants: { column: string; value: string }[];
+}) {
+  return (
+    <p className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-xs text-status-neutral">
+      <span>Same for every row:</span>
+      {constants.map(({ column, value }) => (
+        <span key={column}>
+          <span className="font-mono">{column}</span>
+          <span aria-hidden> = </span>
+          <span className="font-medium text-text">{value}</span>
+        </span>
+      ))}
+    </p>
+  );
+}
+
 function RowTable({
   label,
   columns,
@@ -169,13 +211,17 @@ function AnalysisTableCard({
   const rows = (table.rows ?? []) as Record<string, unknown>[];
   const trivial = (table.trivial_rows ?? []) as Record<string, unknown>[];
   const shown = showTrivial ? [...rows, ...trivial] : rows;
+  const { columns: varyingColumns, constants: constantColumns } =
+    splitConstantColumns(columns, shown);
+  /* The title already opens with the dataset name ("match_events.csv -
+   * Categorical associations"), so repeating it on the right said it twice. */
+  const meta = table.title.startsWith(table.dataset_name)
+    ? `${rows.length + trivial.length} row(s)`
+    : `${table.dataset_name} · ${rows.length + trivial.length} row(s)`;
 
   return (
     <Card className="px-4 py-3">
-      <Disclosure
-        summary={table.title}
-        meta={`${table.dataset_name} · ${rows.length + trivial.length} row(s)`}
-      >
+      <Disclosure summary={table.title} meta={meta}>
         <div className="flex flex-col gap-3">
           <p className="text-sm text-status-neutral">{table.description}</p>
           <p className="text-xs text-status-neutral">
@@ -190,12 +236,17 @@ function AnalysisTableCard({
             <SmallSampleNote sample={table.min_sample_size} />
           )}
           {shown.length > 0 ? (
-            <RowTable
-              label={table.title}
-              columns={columns}
-              rows={shown}
-              markTrivialFrom={showTrivial ? rows.length : undefined}
-            />
+            <>
+              {constantColumns.length > 0 && (
+                <ConstantColumnNote constants={constantColumns} />
+              )}
+              <RowTable
+                label={table.title}
+                columns={varyingColumns}
+                rows={shown}
+                markTrivialFrom={showTrivial ? rows.length : undefined}
+              />
+            </>
           ) : (
             <p className="text-sm text-status-neutral">
               {trivial.length > 0

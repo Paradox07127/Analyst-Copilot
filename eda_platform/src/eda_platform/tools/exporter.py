@@ -68,9 +68,14 @@ _QUALITY_CODE_AGGREGATE_PHRASES = {
     ),
 }
 _QUALITY_AGGREGATE_FALLBACK_PHRASE = (
-    "The observed {code} condition affects {scope}; interpret related results with care"
+    "A profiler data-quality flag affects {scope}; interpret related results with care"
 )
 _QUALITY_AGGREGATE_SUFFIX = " (full list on the Quality page)."
+
+# Codes whose per-dataset footer below already names every affected column in
+# one sentence. Emitting the per-column context line as well stated the same
+# fact twice in the same section — once per column, once grouped.
+_FOOTER_OWNED_CODES = {"empty_column", "constant_column"}
 
 # Internal artifact-id hygiene: narrative prose and limitations must not leak
 # run-internal ids; full provenance stays in the Claim Ledger and the Appendix.
@@ -893,7 +898,7 @@ def _limitations_body(
             context_set,
             name=name,
             column_total=total,
-            exclude_codes=globally_aggregated,
+            exclude_codes=globally_aggregated | _FOOTER_OWNED_CODES,
         ):
             if line in seen:
                 continue
@@ -936,13 +941,17 @@ def _limitations_body(
                 f"- {name}: high-risk columns for analysis: {_join_columns(high_risk_columns)}."
             )
         if empty_columns:
+            one = len(empty_columns) == 1
             candidates.append(
-                f"- {name}: columns that are 100% missing: {_join_columns(empty_columns)}."
+                f"- {name}: {_join_columns(empty_columns)} {'is' if one else 'are'} "
+                f"entirely missing, so nothing here can rest on {'it' if one else 'them'}."
             )
         if constant_columns:
+            one = len(constant_columns) == 1
             candidates.append(
-                f"- {name}: constant columns (single value across rows): "
-                f"{_join_columns(constant_columns)}."
+                f"- {name}: {_join_columns(constant_columns)} {'holds' if one else 'hold'} "
+                f"one value in every row, so {'it' if one else 'they'} cannot explain any "
+                "difference between rows."
             )
         for note in sampling_notes:
             candidates.append(f"- {name}: sampling note: {note}")
@@ -966,12 +975,17 @@ def _quality_context_lines(
     itemized: list[QualityContext] = []
     by_code: dict[str, list[QualityContext]] = {}
     for context in context_set.contexts:
+        # An excluded code is not dropped information: either a report-wide
+        # aggregate or a grouped per-dataset footer already states it, naming
+        # the same columns. Checked before the critical branch, or a critical
+        # column condition (empty_column) prints once per column here and once
+        # more in its footer.
+        if context.column and context.issue_code in exclude_codes:
+            continue
         # Critical conditions and dataset-level (columnless) conditions are
         # never aggregated away.
         if context.severity == "critical" or not context.column:
             itemized.append(context)
-        elif context.issue_code in exclude_codes:
-            continue
         else:
             by_code.setdefault(context.issue_code, []).append(context)
 

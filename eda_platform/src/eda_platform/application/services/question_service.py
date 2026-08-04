@@ -16,6 +16,7 @@ goes through the same prepare → approve → job path as execution, on a derive
 from __future__ import annotations
 
 import json
+import re
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -57,6 +58,36 @@ BATCH_SESSION_PREFIX = "qsess_"
 DRAFT_SESSION_PREFIX = "qdsess_"
 MAX_DRAFT_QUESTION_CHARS = 500
 _DERIVED_SESSION_SCAN_LIMIT = 1000
+# A tool-guard rejection is a paragraph: a generic first line ("Tool guard
+# rejected parameters for `x`."), then "What was wrong:", "Allowed:", "How to
+# fix:". The first line names the mechanism, the first "What was wrong" bullet
+# names the actual cause — that is the one the card shows. Full text stays on
+# the QuestionExecutionResult artifact.
+_MAX_FAILURE_HEADLINE_CHARS = 240
+_FAILURE_CAUSE_MARKER = "what was wrong:"
+# Guard bullets read "`plan.sql` got 'internal rule name': <the readable cause>".
+_GUARD_BULLET = re.compile(r"^-\s*`[^`]+`\s+got\s+'[^']*':\s*(?P<cause>.+)$")
+
+
+def _failure_headline(error: object) -> str | None:
+    """The most specific sentence in an execution error, for the question card."""
+    if not isinstance(error, str):
+        return None
+    lines = [line.strip() for line in error.splitlines()]
+    populated = [line for line in lines if line]
+    if not populated:
+        return None
+    for index, line in enumerate(lines):
+        if line.lower() != _FAILURE_CAUSE_MARKER:
+            continue
+        for candidate in lines[index + 1 :]:
+            if not candidate.startswith("-"):
+                break
+            match = _GUARD_BULLET.match(candidate)
+            cause = match.group("cause") if match else candidate.lstrip("- ").strip()
+            if cause:
+                return cause[:_MAX_FAILURE_HEADLINE_CHARS]
+    return populated[0][:_MAX_FAILURE_HEADLINE_CHARS]
 
 
 def generate_draft_session_id(source_session_id: str, question: str) -> str:
@@ -761,6 +792,7 @@ class QuestionService:
                     qexec_artifact_id=artifact.id,
                     execution_session_id=execution_session_id,
                     abstention_code=str(abstention) if abstention else None,
+                    failure_reason=_failure_headline(payload.get("error")),
                 )
         return executions
 

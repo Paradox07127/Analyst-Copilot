@@ -272,10 +272,67 @@ def _validation_steps(issue: QualityIssue, column: str) -> list[str]:
     return [issue.recommendation]
 
 
+# One sentence per scanner code. The previous single fallback spliced the raw
+# code into prose ("the observed constant_column condition"), which put an
+# internal enum in front of the reader and made every limitation read alike.
+_LIMITATION_BY_CODE: dict[str, str] = {
+    "empty_column": "{column} is entirely missing, so nothing here can rest on it.",
+    "constant_column": (
+        "{column} holds one value in every row, so it cannot explain any difference "
+        "between rows."
+    ),
+    "high_missing": (
+        "{column} is missing often enough that results using it describe the rows "
+        "that have it, not the dataset as a whole."
+    ),
+    "outlier_detected": (
+        "{column} contains extreme values; means and totals over it move with those "
+        "few rows."
+    ),
+    "duplicate_rows": (
+        "This table repeats rows, so counts and totals over it may be inflated."
+    ),
+    "id_not_unique": (
+        "{column} repeats, so it does not identify a row on its own — joining or "
+        "counting on it will multiply rows."
+    ),
+    "id_missing": "{column} is blank on some rows, so those rows cannot be joined or traced.",
+    "likely_id_column": (
+        "{column} looks like an identifier; its averages and correlations carry no "
+        "meaning."
+    ),
+    "high_cardinality_category": (
+        "{column} has almost as many distinct values as rows, so grouping by it "
+        "produces mostly single-row groups."
+    ),
+    "numeric_parse_failure": (
+        "Some {column} values are not numbers, so they drop out of any calculation "
+        "over it."
+    ),
+    "date_parse_failure": (
+        "Some {column} values are not readable dates, so they drop out of any "
+        "time-based view."
+    ),
+    "mixed_type_string": (
+        "{column} mixes value formats, so it needs a stated normalization rule "
+        "before it is compared or aggregated."
+    ),
+    "non_finite_numeric": (
+        "{column} contains infinite or undefined values that distort any statistic "
+        "computed over it."
+    ),
+    "surrounding_whitespace": (
+        "{column} has values that differ only by leading or trailing spaces, so "
+        "grouping splits what should be one category."
+    ),
+}
+
+_LIMITATION_FALLBACK = (
+    "{column} carries a data-quality flag from the profiler; check it on the Quality "
+    "page before relying on results that use it."
+)
+
+
 def _report_limitation(issue: QualityIssue, column: str) -> str:
-    if issue.code == "empty_column":
-        return f"{column} is entirely missing and cannot support this analysis."
-    return (
-        f"Interpretation involving {column} should account for the observed "
-        f"{issue.code} condition; its business cause remains unconfirmed."
-    )
+    template = _LIMITATION_BY_CODE.get(issue.code, _LIMITATION_FALLBACK)
+    return template.format(column=column)

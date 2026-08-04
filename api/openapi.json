@@ -23708,6 +23708,17 @@
               }
             ],
             "title": "Abstention Code"
+          },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Reason"
           }
         },
         "type": "object",

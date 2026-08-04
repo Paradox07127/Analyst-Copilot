@@ -47,13 +47,19 @@ describe("Questions page", () => {
     expect(within(trendCard).getByText("descriptive")).toBeInTheDocument();
     expect(within(trendCard).getByText("High priority")).toBeInTheDocument();
     expect(within(trendCard).getByText("answered")).toBeInTheDocument();
-    const findingsLink = within(trendCard).getByRole("link", {
-      name: "2 findings",
+    /* "Results", not "findings": the Findings page counts only validated
+     * conclusions, so a card claiming 2 findings next to a Findings page
+     * reporting 0 read as a contradiction. */
+    const resultsLink = within(trendCard).getByRole("link", {
+      name: "2 results",
     });
-    expect(findingsLink).toHaveAttribute(
+    expect(resultsLink).toHaveAttribute(
       "href",
       "/projects/p1/sessions/qsess_1/artifacts",
     );
+    expect(
+      within(trendCard).queryByRole("link", { name: /finding/i }),
+    ).not.toBeInTheDocument();
 
     /* Feasibility-blocked cards expose no approve control. */
     const blockedCard = cards.find((card) =>
@@ -79,10 +85,14 @@ describe("Questions page", () => {
       )!;
 
     /* Before any click: the whole sequence is on screen, so "Approve & run"
-     * cannot read as the point of no return. */
-    const chain = within(trendCard).getByRole("list", {
-      name: "Run this question",
-    });
+     * cannot read as the point of no return. It sits above the list rather
+     * than inside each card — repeating it per card said the same thing 14
+     * times and buried the questions themselves. */
+    const chains = screen.getAllByRole("list", { name: "Run this question" });
+    expect(chains).toHaveLength(1);
+    const chain = chains[0]!;
+    expect(within(trendCard).queryByRole("list", { name: "Run this question" }))
+      .not.toBeInTheDocument();
     expect(within(chain).getAllByRole("listitem")).toHaveLength(3);
     expect(within(chain).getByText("Approve")).toHaveAttribute(
       "aria-current",
@@ -91,8 +101,11 @@ describe("Questions page", () => {
     expect(within(chain).getByText("Review what will run")).toBeInTheDocument();
     expect(within(chain).getByText("Execute")).toBeInTheDocument();
 
+    /* This card already ran, so its action says so — an already-answered
+     * question offering a bare "Approve & run" hid that clicking it spends a
+     * second execution. */
     await user.click(
-      within(trendCard).getByRole("button", { name: "Approve & run" }),
+      within(trendCard).getByRole("button", { name: "Approve & run again" }),
     );
     const dialog = await screen.findByRole("alertdialog", {
       name: "Confirm question execution",

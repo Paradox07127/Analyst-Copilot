@@ -833,7 +833,14 @@ export function Component() {
         onDragCancel={() => setActiveId(null)}
         onDragEnd={onDragEnd}
       >
-        <div className="grid w-full grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-3">
+        {/* Container query, not a viewport one: this pane's width is set by the
+          * session rail, the inspector and the split workspace, so a viewport
+          * breakpoint gets it wrong. auto-fit produced a 2-then-1 wrap at pane
+          * widths around 700px, which reads as two boards rather than one
+          * left-to-right pipeline — a lane order is the whole point of a board,
+          * so it goes all-across or fully stacked, never half. */}
+        <div className="@container w-full">
+        <div className="grid w-full grid-cols-1 gap-3 @2xl:grid-cols-3">
           {state.columns.map((column) => (
             <Column
               key={column.id}
@@ -848,6 +855,7 @@ export function Component() {
               onRemove={removeCard}
             />
           ))}
+        </div>
         </div>
         <DragOverlay>
           {draggedCard ? (

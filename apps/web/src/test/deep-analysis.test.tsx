@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "./msw/server";
 import { renderAppAt } from "./render";
+import { splitConstantColumns } from "../features/analysis/DeepAnalysisPage";
 
 const PATH = "/projects/p1/sessions/r1/deep-analysis";
 
@@ -163,5 +164,45 @@ describe("Deep analysis page", () => {
     expect(
       screen.queryByText("No deterministic analysis artifacts"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("splitConstantColumns", () => {
+  const rows = [
+    { dataset: "a.csv", policy: "pairwise", column: "x", value: 1 },
+    { dataset: "a.csv", policy: "pairwise", column: "y", value: 2 },
+  ];
+  const columns = ["dataset", "policy", "column", "value"];
+
+  it("hoists columns whose value never changes", () => {
+    const result = splitConstantColumns(columns, rows);
+    expect(result.columns).toEqual(["column", "value"]);
+    expect(result.constants).toEqual([
+      { column: "dataset", value: "a.csv" },
+      { column: "policy", value: "pairwise" },
+    ]);
+  });
+
+  it("keeps every column when a single row cannot prove uniformity", () => {
+    const result = splitConstantColumns(columns, rows.slice(0, 1));
+    expect(result.columns).toEqual(columns);
+    expect(result.constants).toEqual([]);
+  });
+
+  it("never empties the table when every column is uniform", () => {
+    const uniform = [{ a: 1 }, { a: 1 }];
+    const result = splitConstantColumns(["a"], uniform);
+    expect(result.columns).toEqual(["a"]);
+    expect(result.constants).toEqual([]);
+  });
+
+  it("treats an all-blank column as varying rather than hoisting an empty value", () => {
+    const blanks = [
+      { note: null, value: 1 },
+      { note: null, value: 2 },
+    ];
+    const result = splitConstantColumns(["note", "value"], blanks);
+    expect(result.columns).toEqual(["note", "value"]);
+    expect(result.constants).toEqual([]);
   });
 });
