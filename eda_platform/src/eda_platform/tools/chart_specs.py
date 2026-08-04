@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, cast
 
 import numpy as np
@@ -36,6 +37,8 @@ _MAX_NUMERIC_DISTRIBUTIONS = 4
 _MAX_CATEGORICAL_DISTRIBUTIONS = 4
 _MAX_TIME_SERIES = 2
 _MAX_MISSING_COLUMNS = 20
+# Trailing name token of a key column; mirrors core.column_roles._ID_NAME_TOKENS.
+_KEY_NAME_TOKENS = frozenset({"id", "uuid", "guid", "key"})
 
 
 def create_chart_specs(
@@ -48,6 +51,7 @@ def create_chart_specs(
     """Build chart specs whose ``data`` is a full-column deterministic aggregate."""
     profile = DatasetProfile.model_validate(profile_artifact.payload)
     frame = loaded.frame
+    key_columns = _key_columns(profile)
     # Each entry pairs the spec with its provenance: (spec, code_ref, plain_language).
     specs: list[tuple[ChartSpec, str, str]] = []
 
@@ -114,6 +118,7 @@ def create_chart_specs(
         {"numeric"},
         limit=_MAX_NUMERIC_DISTRIBUTIONS,
         distribution_kinds={"continuous"},
+        excluded=key_columns,
     ):
         if numeric_column.name not in frame.columns:
             continue
@@ -168,6 +173,7 @@ def create_chart_specs(
         {"categorical", "boolean", "numeric"},
         limit=_MAX_CATEGORICAL_DISTRIBUTIONS,
         distribution_kinds={"binary", "discrete"},
+        excluded=key_columns,
     ):
         if categorical_column.name not in frame.columns:
             continue
@@ -478,12 +484,38 @@ def _scatter_rows(frame: pd.DataFrame, column_a: str, column_b: str) -> list[dic
     ]
 
 
+def _key_columns(profile: DatasetProfile) -> set[str]:
+    """Columns whose distribution says nothing: primary and foreign keys.
+
+    A foreign key repeats, so the profiler's id heuristic declines it and types
+    it ``numeric``; that put 13 histograms of match_id/team_id/player_id into
+    the 2026-08-04 World Cup run, in a report that separately warned those
+    columns had "limited analytical meaning".
+
+    The test is the name, not uniqueness or the inferred role. Uniqueness is
+    exactly what a foreign key lacks, and role inference over small tables
+    calls short near-unique strings identifiers -- it drops
+    fifa_ranking_pre_tournament and country, which are the charts worth having.
+    """
+    keys = {
+        column.name for column in profile.columns_detail if column.semantic_type == "id"
+    }
+    for column in profile.columns_detail:
+        if column.semantic_type != "numeric":
+            continue
+        tokens = re.split(r"[^0-9a-z]+", column.name.strip().casefold())
+        if tokens and tokens[-1] in _KEY_NAME_TOKENS:
+            keys.add(column.name)
+    return keys
+
+
 def _selected_columns(
     profile: DatasetProfile,
     semantic_types: set[str],
     *,
     limit: int,
     distribution_kinds: set[str] | None = None,
+    excluded: set[str] = frozenset(),  # type: ignore[assignment]
 ) -> list[ColumnProfile]:
     # Fully empty columns render nothing; letting them occupy slots left whole
     # tables without a single distribution chart (World Cup teams/players).
@@ -492,6 +524,7 @@ def _selected_columns(
         for column in profile.columns_detail
         if column.semantic_type in semantic_types
         and column.missing_percent < 100.0
+        and column.name not in excluded
         and (distribution_kinds is None or column.distribution_kind in distribution_kinds)
     ]
     return sorted(

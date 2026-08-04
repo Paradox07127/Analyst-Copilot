@@ -137,6 +137,8 @@ def profile_dataset(
 _MAX_COMPOSITE_KEY_WIDTH = 3
 _MAX_COMPOSITE_KEY_COLUMNS = 12
 _MAX_COMPOSITE_KEY_RESULTS = 3
+# One surviving column cannot distinguish rows; two already can.
+_MIN_DUPLICATE_SCOPE_COLUMNS = 2
 
 
 def _composite_key_candidates(
@@ -204,10 +206,22 @@ def _duplicate_row_summary(
     exact_duplicate_rows: int,
 ) -> tuple[int, list[str]]:
     """Count duplicates over non-id columns: a surrogate key differs on every
-    row and would otherwise mask true payload duplicates."""
+    row and would otherwise mask true payload duplicates.
+
+    A single surviving column is not a duplicate signal: a 7-row table whose
+    only non-id column is a boolean reports 5 "duplicate rows", which is the
+    definition of a boolean rather than a defect. Three such false alarms
+    reached the Limitations section of the 2026-08-04 World Cup report. The
+    floor is two columns and no higher -- ``(region, amount)`` and
+    ``(amount, category)`` are the two-column scopes that catch the real
+    payload duplicates these tests encode.
+    """
     id_names = {column.name for column in columns_detail if column.semantic_type == "id"}
     payload_columns = [column for column in frame.columns if str(column) not in id_names]
-    if not payload_columns or len(payload_columns) == len(frame.columns):
+    if (
+        len(payload_columns) < _MIN_DUPLICATE_SCOPE_COLUMNS
+        or len(payload_columns) == len(frame.columns)
+    ):
         return exact_duplicate_rows, [str(column) for column in frame.columns]
     return (
         _exact_duplicate_count(frame, subset=payload_columns),

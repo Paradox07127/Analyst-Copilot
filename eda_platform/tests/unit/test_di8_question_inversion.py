@@ -17,6 +17,7 @@ from typing import Any, TypeVar, cast
 from pydantic import BaseModel
 
 from eda_platform.agents.question_agent import (
+    _join_instruction,
     build_data_summary,
     propose_llm_question_candidates,
 )
@@ -326,6 +327,31 @@ def test_build_data_summary_compresses_roles_samples_and_cardinality(
         role_sets={profile.name: role_set},
         confirmed_joins=["order_items.csv.order_id -> orders.csv.order_id"],
     )
+
+
+def test_multi_table_summary_states_that_no_join_is_confirmed(tmp_path: Path) -> None:
+    # A silent Relationships section read as permission: the model proposed
+    # cross-table questions that the executor rejected against an empty
+    # whitelist, burning two of seven question slots on the FIFA run.
+    loaded, profile_artifact = _loaded_with_profile(_order_items_csv(tmp_path))
+    profile = DatasetProfile.model_validate(profile_artifact.payload)
+    second = profile.model_copy(update={"name": "orders.csv", "dataset_id": "ds_orders"})
+
+    summary = build_data_summary([profile, second], confirmed_joins=[])
+
+    assert "Relationships:" in summary
+    assert "No join between these tables is confirmed" in summary
+    assert "required_relations empty" in summary
+
+
+def test_the_join_instruction_forbids_joins_when_none_are_confirmed() -> None:
+    forbidding = _join_instruction([])
+    assert "NO joins are confirmed" in forbidding
+    assert "rejected before it runs" in forbidding
+
+    permitting = _join_instruction(["a.csv.id -> b.csv.id"])
+    assert "confirmed_join_whitelist" in permitting
+    assert "NO joins are confirmed" not in permitting
 
 
 def test_llm_payload_carries_data_summary_and_join_whitelist(tmp_path: Path) -> None:

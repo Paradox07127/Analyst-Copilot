@@ -77,3 +77,56 @@ def test_chart_specs_build_histogram_from_full_numeric_column(tmp_path: Path) ->
     assert rows
     assert set(rows[0].keys()) == {"bin_start", "bin_end", "bin_label", "count"}
     assert sum(row["count"] for row in rows) == 40
+
+
+def test_foreign_key_columns_are_never_charted(tmp_path: Path) -> None:
+    # A foreign key repeats, so the profiler types it numeric rather than id;
+    # the 2026-08-04 World Cup run drew 12 histograms of match_id/team_id/
+    # player_id while its own report warned those columns meant little.
+    csv_path = tmp_path / "events.csv"
+    rows = ["event_id,match_id,team_id,minute,event_type"]
+    for index in range(60):
+        rows.append(
+            f"{index},{index % 12},{index % 4},{(index * 7) % 45 + 1},"
+            f"{'goal' if index % 3 == 0 else 'foul'}"
+        )
+    csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    loaded = load_csv(csv_path, dataset_id="ds_events")
+    profile = profile_dataset(loaded, project_id="project_demo", session_id="run_demo")
+
+    titles = {
+        ChartSpec.model_validate(artifact.payload).title
+        for artifact in create_chart_specs(
+            loaded, profile, project_id="project_demo", session_id="run_demo"
+        )
+    }
+
+    assert not any("match_id" in title for title in titles)
+    assert not any("team_id" in title for title in titles)
+    assert not any("event_id" in title for title in titles)
+    # The measure and the category in the same table are still charted.
+    assert "Distribution of minute" in titles
+    assert "Top values in event_type" in titles
+
+
+def test_a_measure_whose_name_merely_contains_id_is_still_charted(tmp_path: Path) -> None:
+    # Only the trailing name token counts: `bid_amount` and `humidity` are
+    # measures, and dropping them would cost the chart that matters.
+    csv_path = tmp_path / "bids.csv"
+    rows = ["row_key,bid_amount,humidity"]
+    for index in range(40):
+        rows.append(f"{index},{100 + index * 7.3:.2f},{30 + index * 1.1:.1f}")
+    csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    loaded = load_csv(csv_path, dataset_id="ds_bids")
+    profile = profile_dataset(loaded, project_id="project_demo", session_id="run_demo")
+
+    titles = {
+        ChartSpec.model_validate(artifact.payload).title
+        for artifact in create_chart_specs(
+            loaded, profile, project_id="project_demo", session_id="run_demo"
+        )
+    }
+
+    assert "Distribution of bid_amount" in titles
+    assert "Distribution of humidity" in titles
+    assert not any("row_key" in title for title in titles)

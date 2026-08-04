@@ -525,9 +525,21 @@ def build_data_summary(
         relation_lines.append(f"- {label} [{cardinality}; {status}]")
     for label in sorted(set(confirmed_joins) - seen_labels):
         relation_lines.append(f"- {label} [confirmed join]")
+    lines.append("Relationships:")
     if relation_lines:
-        lines.append("Relationships:")
         lines.extend(relation_lines)
+    elif len(profiles) > 1:
+        # Saying nothing read as permission: given several tables that share
+        # obvious key names, the model proposed joins that the executor then
+        # rejected against an empty whitelist, spending question slots on
+        # work that could never run.
+        lines.append(
+            "- none. No join between these tables is confirmed, so every "
+            "question must stay inside a single table and leave "
+            "required_relations empty."
+        )
+    else:
+        lines.append("- none (single table).")
     return "\n".join(lines)
 
 
@@ -749,6 +761,27 @@ def _replace_dataset_names(text: str, display_names: Mapping[str, str]) -> str:
     return text
 
 
+def _join_instruction(confirmed_joins: Collection[str]) -> str:
+    """State the actual join situation, not the general policy.
+
+    An empty ``confirmed_join_whitelist`` alongside a policy sentence was read
+    as "joins are allowed in principle"; the executor then rejected the SQL.
+    """
+    if not confirmed_joins:
+        return (
+            "NO joins are confirmed for this session. Every question must read a "
+            "single table and leave required_relations empty. Do not write a "
+            "question that needs two tables combined -- it will be rejected "
+            "before it runs. Ask the single-table version instead."
+        )
+    return (
+        "Cross-table questions are welcome ONLY over joins listed in "
+        "confirmed_join_whitelist: declare each used join verbatim in "
+        "required_relations. If a useful join is not confirmed, ask the "
+        "single-table version instead."
+    )
+
+
 def _manifest(
     artifacts: list[Artifact],
     *,
@@ -813,10 +846,7 @@ def _manifest(
             "LLM scores are for display ordering only and cannot override deterministic risk. "
             "Use the data_summary (column roles, sample values, relationships) to ask "
             "diverse, decision-relevant questions; never aggregate identifier or "
-            "sequence columns. Cross-table questions are welcome ONLY over joins "
-            "listed in confirmed_join_whitelist: declare each used join verbatim in "
-            "required_relations. If a useful join is not confirmed, ask the "
-            "single-table version instead."
+            "sequence columns. " + _join_instruction(confirmed_joins)
         ),
         "business_context": business_context.strip(),
         "datasets": [

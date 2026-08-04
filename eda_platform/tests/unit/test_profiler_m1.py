@@ -58,6 +58,56 @@ def test_profiler_counts_duplicate_rows(tmp_path: Path) -> None:
     assert profile.duplicate_rows == 1
 
 
+def test_a_collapsed_duplicate_scope_reports_exact_rows_instead(tmp_path: Path) -> None:
+    # Stripping id columns left tournament_stages.csv with one boolean column,
+    # so 7 rows were reported as "5 duplicate rows" -- the definition of a
+    # boolean, published as a data-quality limitation.
+    csv_path = tmp_path / "stages.csv"
+    csv_path.write_text(
+        "stage_id,stage_name,is_knockout\n"
+        "1,Group A,false\n2,Group B,false\n3,Group C,false\n"
+        "4,Round of 32,true\n5,Round of 16,true\n6,Quarter,true\n7,Final,true\n",
+        encoding="utf-8",
+    )
+
+    profile = DatasetProfile.model_validate(
+        profile_dataset(
+            load_csv(csv_path, dataset_id="ds_stages"),
+            project_id="project_demo",
+            session_id="run_demo",
+        ).payload
+    )
+
+    assert profile.exact_duplicate_rows == 0
+    assert profile.duplicate_rows == 0
+    assert profile.duplicate_scope_columns == list(profile.column_names)
+
+
+def test_a_wide_payload_scope_still_ignores_surrogate_keys(tmp_path: Path) -> None:
+    # The floor must not disable the original behaviour: two rows that differ
+    # only by their surrogate key are still payload duplicates.
+    csv_path = tmp_path / "wide.csv"
+    csv_path.write_text(
+        "row_id,region,channel,amount,units\n"
+        "1,North,web,10.5,3\n"
+        "2,North,web,10.5,3\n"
+        "3,South,store,20.0,4\n",
+        encoding="utf-8",
+    )
+
+    profile = DatasetProfile.model_validate(
+        profile_dataset(
+            load_csv(csv_path, dataset_id="ds_wide"),
+            project_id="project_demo",
+            session_id="run_demo",
+        ).payload
+    )
+
+    assert profile.exact_duplicate_rows == 0
+    assert profile.duplicate_rows == 1
+    assert "row_id" not in profile.duplicate_scope_columns
+
+
 def test_exact_duplicate_count_resolves_hash_collisions(monkeypatch) -> None:
     frame = pd.DataFrame({"value": [10, 20, 20, 30], "label": ["a", "b", "b", "c"]})
 

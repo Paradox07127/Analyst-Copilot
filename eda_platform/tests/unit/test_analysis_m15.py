@@ -86,3 +86,81 @@ def test_ultra_wide_correlation_uses_bounded_screening_and_exact_values(
     assert strongest["pairwise_complete_n"] == 600
     assert strongest["selection_is_approximate"] is True
     assert strongest["selection_method"] == "sparse_random_projection_then_exact"
+
+
+def _correlation_rows(tmp_path: Path, name: str, frame: pd.DataFrame) -> list[dict]:
+    csv_path = tmp_path / name
+    frame.to_csv(csv_path, index=False)
+    loaded = load_csv(csv_path, dataset_id=f"ds_{csv_path.stem}")
+    profile = profile_dataset(loaded, project_id="project_demo", session_id="run_demo")
+    for artifact in create_analysis_tables(
+        loaded, profile, project_id="project_demo", session_id="run_demo"
+    ):
+        if artifact.payload.get("kind") == "correlation":
+            return artifact.payload["rows"]
+    return []
+
+
+def _flag(rows: list[dict], left: str, right: str) -> bool:
+    for row in rows:
+        if {row["column_a"], row["column_b"]} == {left, right}:
+            return bool(row["is_trivial_pair"])
+    raise AssertionError(f"no correlation row for {left} ~ {right}")
+
+
+def _pearson(rows: list[dict], left: str, right: str) -> float:
+    for row in rows:
+        if {row["column_a"], row["column_b"]} == {left, right}:
+            return float(row["pearson"])
+    raise AssertionError(f"no correlation row for {left} ~ {right}")
+
+
+def test_a_part_of_a_whole_is_not_a_correlation_finding(tmp_path: Path) -> None:
+    # The 2026-08-04 World Cup report led with "total_shots and shots_on_target
+    # show a strong positive association (r=0.802)". Shots on target are a
+    # subset of shots, so the number is arithmetic; at r<0.97 it slipped past
+    # the rescale/complement rules entirely.
+    total = np.array([(index * 5) % 17 + 4 for index in range(60)])
+    on_target = (total * 0.42).astype(int)
+    # Correlated with shots AND always larger, so only the shared subject
+    # separates it from the nested pair.
+    possession = 45.0 + total * 0.9 + np.array([(index % 5) - 2 for index in range(60)])
+    frame = pd.DataFrame(
+        {
+            "total_shots": total,
+            "shots_on_target": on_target,
+            "possession_pct": possession,
+        }
+    )
+
+    rows = _correlation_rows(tmp_path, "team_stats.csv", frame)
+
+    # Guard the fixture: both pairs must clear the correlation floor, or the
+    # assertions below would pass without reaching the rule at all.
+    assert _pearson(rows, "total_shots", "shots_on_target") > 0.9
+    assert _pearson(rows, "possession_pct", "total_shots") > 0.9
+    assert frame["total_shots"].le(frame["possession_pct"]).all()
+
+    assert _flag(rows, "total_shots", "shots_on_target") is True
+    # A different quantity that merely happens to be larger is a real finding:
+    # "more possession, more shots" must survive.
+    assert _flag(rows, "possession_pct", "total_shots") is False
+
+
+def test_sibling_slices_of_one_measure_stay_real_correlations(tmp_path: Path) -> None:
+    # striker_shots and midfield_shots share a subject but neither contains the
+    # other; a name-only rule would silence a genuine relationship. Home/away
+    # pairs cannot test this -- _complement_names already handles those.
+    base = np.array([(index * 7) % 23 + 6 for index in range(60)])
+    striker = base + np.array([(index % 7) - 3 for index in range(60)])
+    midfield = base + np.array([3 - (index % 7) for index in range(60)])
+    frame = pd.DataFrame({"striker_shots": striker, "midfield_shots": midfield})
+
+    rows = _correlation_rows(tmp_path, "shots_by_line.csv", frame)
+
+    # Below the 0.97 gate the older rescale/complement rules never run, so the
+    # component rule is the only thing that could reject this pair.
+    assert 0.5 < _pearson(rows, "striker_shots", "midfield_shots") < 0.97
+    assert bool((striker > midfield).any()) and bool((midfield > striker).any())
+
+    assert _flag(rows, "striker_shots", "midfield_shots") is False

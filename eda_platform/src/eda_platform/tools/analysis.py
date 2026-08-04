@@ -608,6 +608,14 @@ def _is_trivial_pair(
     abs_r = abs(pearson)
     if abs_r >= 0.999:
         return True
+    if _is_component_pair(
+        column_a,
+        column_b,
+        cast(pd.Series, numeric_frame[column_a]),
+        cast(pd.Series, numeric_frame[column_b]),
+        pearson=pearson,
+    ):
+        return True
     if abs_r < 0.97:
         return False
     if _complement_names(column_a, column_b):
@@ -618,6 +626,61 @@ def _is_trivial_pair(
     ):
         return True
     return _same_stem_rescale(column_a, column_b)
+
+
+# A part-of-a-whole pair correlates around 0.7-0.9, well under the 0.97 gate
+# the rescale/complement rules use, so it was published as a finding: the
+# 2026-08-04 World Cup report led with "total_shots and shots_on_target show a
+# strong positive association (r=0.802)", which is arithmetic, not evidence.
+_COMPONENT_MIN_ABS_R = 0.5
+_COMPONENT_MIN_ROWS = 8
+# Qualifiers describe how a quantity was sliced, not what was counted; the
+# shared subject is what remains once they are dropped.
+_MEASURE_QUALIFIER_TOKENS = frozenset(
+    {
+        "total", "sum", "avg", "average", "mean", "median", "count", "num", "number",
+        "prev", "previous", "last", "recent", "home", "away", "team", "opponent",
+        "pct", "percent", "percentage", "rate", "ratio", "per", "90", "90s", "p90",
+        "min", "max", "overall", "all", "cum", "cumulative", "n",
+    }
+)
+
+
+def _measure_subject_tokens(column: str) -> set[str]:
+    return {token for token in _name_tokens(column) if token not in _MEASURE_QUALIFIER_TOKENS}
+
+
+def _is_component_pair(
+    column_a: str,
+    column_b: str,
+    series_a: pd.Series,
+    series_b: pd.Series,
+    *,
+    pearson: float,
+) -> bool:
+    """Whether one column counts a part of what the other counts.
+
+    Two independent conditions, because either alone is wrong. Containment on
+    its own flags any small-scale column against a large one -- possession_pct
+    never exceeds nothing, yet shots fit under it, and "more possession, more
+    shots" is a real finding. A shared name on its own flags sibling slices
+    (home_shots vs away_shots) that are not nested at all. Requiring both
+    leaves the arithmetic pairs: shots_on_target under total_shots,
+    matches_started under matches_played.
+    """
+    if pearson < _COMPONENT_MIN_ABS_R:
+        return False
+    if not (_measure_subject_tokens(column_a) & _measure_subject_tokens(column_b)):
+        return False
+    paired = pd.DataFrame({"a": series_a, "b": series_b}).dropna()
+    if len(paired) < _COMPONENT_MIN_ROWS:
+        return False
+    smaller, larger = ("a", "b") if paired["a"].sum() <= paired["b"].sum() else ("b", "a")
+    part = paired[smaller]
+    whole = paired[larger]
+    if float(part.min()) < 0 or float(whole.min()) < 0:
+        return False
+    return bool((part <= whole).all()) and bool((part < whole).any())
 
 
 def _complement_names(column_a: str, column_b: str) -> bool:
