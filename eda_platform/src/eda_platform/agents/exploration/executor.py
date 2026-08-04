@@ -15,9 +15,9 @@ converted into model observations.
 
 from __future__ import annotations
 
-import threading
 import json
 import re
+import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field

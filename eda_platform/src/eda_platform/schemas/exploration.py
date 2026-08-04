@@ -216,6 +216,14 @@ class RoundSettledEvent(ExplorationEventBase):
     # None on pre-plan-B journals; treated as movement so legacy runs never
     # soft-stop retroactively.
     adjudicated_transitions: int | None = Field(default=None, ge=0)
+    # Observation only, no rule reads these yet. luna seed 8 kept adjudicating
+    # for eight rounds after finding every planted structure, so "did anything
+    # adjudicate" is a weak value signal. Raw counts are recorded (not a ratio)
+    # so any window or denominator can be evaluated offline once the
+    # release-gate runs supply a distribution.
+    supported_transitions: int | None = Field(default=None, ge=0)
+    llm_calls_at_settle: int | None = Field(default=None, ge=0)
+    tool_calls_at_settle: int | None = Field(default=None, ge=0)
     terminal_reason: ExplorationGracefulStopReason | None = None
     terminal_has_reduction: bool = False
 

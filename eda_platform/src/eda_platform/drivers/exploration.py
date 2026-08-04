@@ -82,13 +82,13 @@ from eda_platform.core.exploration_budget import (
     apply_budget_increase,
 )
 from eda_platform.core.exploration_journal import JsonlExplorationJournal, RecoveredToolCommit
-from eda_platform.core.file_lock import lock_exclusive, unlock
 from eda_platform.core.exploration_report import render_exploration_report
 from eda_platform.core.exploration_shadow_store import (
     ShadowExplorationStore,
     shadow_run_root,
     validate_shadow_run_path,
 )
+from eda_platform.core.file_lock import lock_exclusive, unlock
 from eda_platform.core.fs import BINARY_FLAG
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.llm import LLMClient, LLMToolResponse
@@ -911,6 +911,9 @@ class JsonlSupervisorJournalAdapter:
         terminal_reason: ExplorationGracefulStopReason | None,
         frontier_empty: bool = False,
         adjudicated_transitions: int = 0,
+        supported_transitions: int = 0,
+        llm_calls_at_settle: int = 0,
+        tool_calls_at_settle: int = 0,
     ) -> SupervisorJournalState:
         state = self.journal.rebuild()
         if state is None:
@@ -925,6 +928,9 @@ class JsonlSupervisorJournalAdapter:
                 terminal_reason and state.current_round_reduction_committed
             ),
             adjudicated_transitions=adjudicated_transitions,
+            supported_transitions=supported_transitions,
+            llm_calls_at_settle=llm_calls_at_settle,
+            tool_calls_at_settle=tool_calls_at_settle,
         )
         return self.snapshot()
 
@@ -1435,6 +1441,8 @@ def _supervisor_projection(
         consecutive_no_progress=state.consecutive_no_progress,
         consecutive_empty_frontier=state.consecutive_empty_frontier,
         consecutive_no_adjudication=state.consecutive_no_adjudication,
+        llm_calls_settled=state.llm_calls_settled,
+        tool_calls_committed=state.tool_calls_committed,
         completed_step_ids=frozenset(state.completed_step_ids),
         completed_probe_fingerprints=frozenset(state.completed_probe_fingerprints),
         uncertain_call_ids=frozenset(state.uncertain_call_ids),

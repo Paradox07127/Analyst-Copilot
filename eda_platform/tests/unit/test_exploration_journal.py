@@ -357,6 +357,41 @@ def test_round_settled_tracks_the_no_adjudication_streak(tmp_path: Path) -> None
     assert journal.rebuild().consecutive_no_adjudication == 0
 
 
+def test_round_settled_carries_the_productivity_observations(tmp_path: Path) -> None:
+    """Recorded, replayable, and optional: pre-existing journals have None and
+    must still rebuild."""
+    journal = _journal(tmp_path)
+    journal.append_new("round_started", round_index=0)
+    journal.append_new(
+        "round_settled",
+        round_index=0,
+        progress=True,
+        adjudicated_transitions=3,
+        supported_transitions=2,
+        llm_calls_at_settle=11,
+        tool_calls_at_settle=7,
+    )
+    settled = [
+        event for event in journal.events() if event.event_type == "round_settled"
+    ]
+    assert [
+        (
+            event.supported_transitions,
+            event.llm_calls_at_settle,
+            event.tool_calls_at_settle,
+        )
+        for event in settled
+    ] == [(2, 11, 7)]
+
+    # A legacy settle carries none of them and still replays.
+    journal.append_new("round_started", round_index=1)
+    journal.append_new("round_settled", round_index=1, progress=True)
+    legacy = journal.events()[-1]
+    assert legacy.supported_transitions is None
+    assert legacy.llm_calls_at_settle is None
+    assert journal.rebuild() is not None
+
+
 def test_budget_counters_decrement_and_reject_at_zero(tmp_path: Path) -> None:
     policy = _policy(
         budget=_budget(

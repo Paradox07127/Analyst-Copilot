@@ -8,12 +8,12 @@ SessionSummary — showed 45-60% of real spend.
 
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-import threading
 from threading import Lock
 from typing import Any, cast
 

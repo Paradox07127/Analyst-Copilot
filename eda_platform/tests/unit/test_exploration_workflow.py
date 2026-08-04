@@ -2774,6 +2774,44 @@ def test_the_issuer_reads_a_replayed_mandatory_probe_as_one_candidate() -> None:
     assert _candidate_identity(first) == _candidate_identity(replayed)
 
 
+def test_the_issuer_reads_a_reworded_proposal_as_the_same_hypothesis() -> None:
+    """luna seed 8: the model restated one hypothesis in round 6 with different
+    prose. hypothesis_id covers only execution-relevant semantic fields, so both
+    rounds carried the SAME id — but the issuer compared whole proposals and
+    called one id with two bodies a forgery. Identity must be defined once."""
+    original = candidate_seed(_proposal(), sequence_index=1)
+    reworded_proposal = _proposal().model_copy(
+        update={
+            "statement": "Put a different way, does revenue differ by region?",
+            "rationale": "Reworded in a later round.",
+            "expected_evidence": "The same comparison, described differently.",
+            "falsification_conditions": ("Worded differently too.",),
+        }
+    )
+    reworded = candidate_seed(reworded_proposal, sequence_index=42)
+
+    # The system already treats them as one hypothesis.
+    assert reworded.hypothesis_id == original.hypothesis_id
+    assert reworded.hypothesis_fingerprint == original.hypothesis_fingerprint
+    assert _candidate_identity(original) == _candidate_identity(reworded)
+
+
+def test_a_different_predicate_is_still_a_different_hypothesis() -> None:
+    """Control: identity may not collapse to the id alone."""
+    original = candidate_seed(_proposal(), sequence_index=1)
+    other = candidate_seed(
+        _proposal().model_copy(
+            update={
+                "predicate": HypothesisPredicate(
+                    metric="units", operator="differs", left_operand="region"
+                )
+            }
+        ),
+        sequence_index=1,
+    )
+    assert _candidate_identity(original) != _candidate_identity(other)
+
+
 def test_every_round_replays_the_mandatory_probes_coverage_still_misses(
     tmp_path: Path,
 ) -> None:

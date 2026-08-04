@@ -92,7 +92,9 @@ def _insight_fields(receipts: tuple[EvidenceReceipt, ...]) -> dict[str, object]:
     }
 
 
-def _state(insight: InsightRecord, receipts: tuple[EvidenceReceipt, ...]) -> ExplorationWorkflowState:
+def _state(
+    insight: InsightRecord, receipts: tuple[EvidenceReceipt, ...]
+) -> ExplorationWorkflowState:
     bundle = ClaimBundle(
         claim_bundle_id="cb_1",
         hypothesis_id="hyp_1",

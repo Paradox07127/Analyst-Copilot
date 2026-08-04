@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from eda_platform.agents.tool_context import HypothesisExecutionBinding
 from eda_platform.core.ids import stable_hash
+from eda_platform.schemas.hypotheses import HypothesisPredicate
 from eda_platform.schemas.receipts import (
     EvidenceReceipt,
     ReceiptDerivation,
@@ -256,9 +257,11 @@ def _predicate_outcome(
     if operator == "has_spike" and receipt.tool_name == "screen_anomalies":
         # The scanned column must be the predicate's target; binding.columns
         # may be empty and the subset gate above would then pass vacuously.
-        if receipt.scope.scope_resolution != "whole_dataset" and predicate.metric.casefold() not in {
-            column.casefold() for column in receipt.scope.columns
-        }:
+        scoped_columns = {column.casefold() for column in receipt.scope.columns}
+        if (
+            receipt.scope.scope_resolution != "whole_dataset"
+            and predicate.metric.casefold() not in scoped_columns
+        ):
             return None
         outlier_count = _finite_fact_number(facts.get("outlier_count"))
         if outlier_count is None:
@@ -365,7 +368,11 @@ def _resolve_named_metric(
 
 
 def _finite_fact_number(value: float | int | str | bool | None) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    ):
         return float(value)
     return None
 

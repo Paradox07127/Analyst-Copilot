@@ -36,6 +36,7 @@ JournalStatus = Literal["running", "pause_requested", "paused", "stopped"]
 InsightTransition = Literal["new", "reinforced", "refuted", "inconclusive"]
 
 _PROGRESS_TRANSITIONS = frozenset({"new", "reinforced", "refuted"})
+_SUPPORTED_TRANSITIONS = frozenset({"new", "reinforced"})
 
 
 class SupervisorPhase(StrEnum):
@@ -84,6 +85,10 @@ class SupervisorJournalState:
     consecutive_no_progress: int = 0
     consecutive_empty_frontier: int = 0
     consecutive_no_adjudication: int = 0
+    # Cumulative spend counters, recorded on each settle so per-round
+    # productivity is derivable offline by differencing.
+    llm_calls_settled: int = 0
+    tool_calls_committed: int = 0
     completed_step_ids: frozenset[str] = field(default_factory=frozenset)
     completed_probe_fingerprints: frozenset[str] = field(default_factory=frozenset)
     uncertain_call_ids: frozenset[str] = field(default_factory=frozenset)
@@ -322,6 +327,9 @@ class SupervisorJournalPort(Protocol):
         terminal_reason: ExplorationGracefulStopReason | None,
         frontier_empty: bool = False,
         adjudicated_transitions: int = 0,
+        supported_transitions: int = 0,
+        llm_calls_at_settle: int = 0,
+        tool_calls_at_settle: int = 0,
     ) -> SupervisorJournalState: ...
 
     def mark_paused(self) -> SupervisorJournalState: ...
@@ -760,6 +768,13 @@ class ExplorationSupervisor:
             for transition in reduction.transitions
             if transition in _PROGRESS_TRANSITIONS
         )
+        # A refutation is real work but not a finding; kept separate so the two
+        # can be compared as value signals.
+        supported_transitions = sum(
+            1
+            for transition in reduction.transitions
+            if transition in _SUPPORTED_TRANSITIONS
+        )
         progress = bool(
             before_settle.current_round_receipt_ids
             and (adjudicated_transitions > 0 or reduction.admitted_bundle_count > 0)
@@ -779,6 +794,9 @@ class ExplorationSupervisor:
             terminal_reason=terminal_reason,
             frontier_empty=not reduction.frontier.items,
             adjudicated_transitions=adjudicated_transitions,
+            supported_transitions=supported_transitions,
+            llm_calls_at_settle=before_settle.llm_calls_settled,
+            tool_calls_at_settle=before_settle.tool_calls_committed,
         )
 
         if terminal_reason is not None:

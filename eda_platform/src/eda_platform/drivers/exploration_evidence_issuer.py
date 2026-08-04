@@ -28,7 +28,10 @@ from eda_platform.agents.exploration.branching import (
     bundle_hypotheses_from_events,
     derive_branch_constraints,
 )
-from eda_platform.agents.exploration.candidates import CandidateSeed
+from eda_platform.agents.exploration.candidates import (
+    CandidateSeed,
+    hypothesis_semantic_signature,
+)
 from eda_platform.agents.exploration.executor import (
     canonical_probe_fingerprint,
     durable_tool_result_digest,
@@ -1201,13 +1204,19 @@ def _has_canonical_confirmatory_statistics(receipt: EvidenceReceipt) -> bool:
 def _candidate_identity(candidate: CandidateSeed) -> tuple[object, ...]:
     """Semantic identity of a candidate across rounds.
 
+    Read from the same signature that mints ``hypothesis_id``, never from the
+    whole proposal: prose fields (statement, rationale, expected_evidence,
+    falsification_conditions) do not affect execution and are deliberately
+    outside the identity. Comparing them made a model that restated one
+    hypothesis in a later round look like a forged body (luna seed 8) —
+    identity has to be defined in exactly one place.
+
     ``sequence_index``, ``status``, ``origin``, ``mandatory`` and ``priority``
-    are excluded: a mandatory probe replayed into a later round is the same
-    hypothesis carrying a new batch position and control-plane state, not a
-    conflicting body.
+    are excluded for the same reason: a mandatory probe replayed into a later
+    round is the same hypothesis carrying a new batch position.
     """
     return (
-        candidate.proposal,
+        hypothesis_semantic_signature(candidate.proposal),
         candidate.hypothesis_id,
         candidate.hypothesis_fingerprint,
         candidate.canonical_group_key,

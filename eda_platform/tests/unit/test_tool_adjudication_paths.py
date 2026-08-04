@@ -393,11 +393,23 @@ def test_run_baseline_model_real_classification_supports() -> None:
     ("kwargs", "threshold", "expected"),
     (
         # Above the majority baseline.
-        ({"task_type": "classification", "accuracy": 0.9, "baseline_accuracy": 0.55}, None, "supports"),
+        (
+            {"task_type": "classification", "accuracy": 0.9, "baseline_accuracy": 0.55},
+            None,
+            "supports",
+        ),
         # Below the majority baseline.
-        ({"task_type": "classification", "accuracy": 0.6, "baseline_accuracy": 0.7}, None, "contradicts"),
+        (
+            {"task_type": "classification", "accuracy": 0.6, "baseline_accuracy": 0.7},
+            None,
+            "contradicts",
+        ),
         # Above baseline but below the required materiality margin.
-        ({"task_type": "classification", "accuracy": 0.72, "baseline_accuracy": 0.7}, 0.05, "contradicts"),
+        (
+            {"task_type": "classification", "accuracy": 0.72, "baseline_accuracy": 0.7},
+            0.05,
+            "contradicts",
+        ),
         # The majority baseline is missing: nothing to compare against.
         ({"task_type": "classification", "accuracy": 0.9}, None, None),
         # R^2 is skill over the mean-predictor baseline.

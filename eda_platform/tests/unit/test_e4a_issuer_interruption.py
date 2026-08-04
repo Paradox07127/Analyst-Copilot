@@ -198,9 +198,8 @@ def test_gate_verdicts_match_by_content_not_by_commit_order() -> None:
         _canonical_claim_bundle,
         _rebuild_canonical_bundles,
     )
-    from eda_platform.schemas.exploration import GateVerdictEvent
+    from eda_platform.schemas.exploration import GateVerdictEvent, InsightFamily
     from eda_platform.schemas.hypotheses import HypothesisPredicate, HypothesisProposal
-    from eda_platform.schemas.exploration import InsightFamily
 
     def _proposal(name: str) -> HypothesisProposal:
         return HypothesisProposal(

@@ -8,9 +8,8 @@ doubles; the driver supplies only environment-specific LLM/tools/storage.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 

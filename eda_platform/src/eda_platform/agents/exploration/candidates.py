@@ -392,6 +392,17 @@ def with_priority(candidate: CandidateSeed, priority: float) -> CandidateSeed:
     return replace(candidate, priority=priority)
 
 
+def hypothesis_semantic_signature(proposal: HypothesisProposal) -> dict[str, object]:
+    """The one definition of "same hypothesis".
+
+    Public because identity must not be re-derived anywhere else: the issuer
+    compares candidates across rounds with it, and hypothesis_id/fingerprint/
+    coverage_key are all minted from it. Prose fields are deliberately absent —
+    restating a hypothesis does not make it a different one.
+    """
+    return _semantic_signature(proposal)
+
+
 def _semantic_signature(proposal: HypothesisProposal) -> dict[str, object]:
     return {
         "family": proposal.family.value,

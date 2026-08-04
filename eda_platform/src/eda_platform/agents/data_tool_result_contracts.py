@@ -10,14 +10,24 @@ the E4a issuer invokes it again over the durable executor body.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from eda_platform.agents.runtime import AgentToolResult, canonical_json_sha256
 from eda_platform.core.ids import make_artifact_id
+from eda_platform.schemas.anomaly import AnomalyScreenResult
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
+from eda_platform.schemas.model_card import ModelCard
 from eda_platform.schemas.receipts import EvidenceReceipt, ReceiptFact
 from eda_platform.schemas.stats import StatTestResult
 from eda_platform.tools.missingness import MissingnessDiagnosticResult
+
+# Each tool mints its primary artifact id under its own prefix; the contract
+# must recompute the same one or a legitimate receipt reads as unaddressed.
+_ARTIFACT_ID_PREFIX = {
+    ArtifactType.STAT_TEST_RESULT: "stat",
+    ArtifactType.ANOMALY_SCREEN_RESULT: "anomaly",
+    ArtifactType.MODEL_CARD: "model",
+}
 
 _MAX_FACT_COLUMNS = 8
 _MAX_FACT_PAIRS = 5
@@ -37,6 +47,12 @@ def verify_data_tool_result_contract(
         _verify_missingness(receipt, result, primary, canonical_arguments)
     elif receipt.tool_name == "analyze_time_series":
         _verify_time_series(receipt, result, primary, canonical_arguments)
+    elif receipt.tool_name == "correlate_columns":
+        _verify_correlate_columns(receipt, result, primary, canonical_arguments)
+    elif receipt.tool_name == "screen_anomalies":
+        _verify_screen_anomalies(receipt, result, primary, canonical_arguments)
+    elif receipt.tool_name == "run_baseline_model":
+        _verify_baseline_model(receipt, result, primary, canonical_arguments)
     else:
         raise ValueError(
             f"release evidence has no durable result contract for {receipt.tool_name!r}"
@@ -47,7 +63,7 @@ def _primary_artifact(receipt: EvidenceReceipt, result: AgentToolResult) -> Arti
     if len(result.artifacts) != 1 or not isinstance(result.artifacts[0], Artifact):
         raise ValueError("release-grade tool result requires one primary artifact")
     primary = result.artifacts[0]
-    prefix = "stat" if primary.type is ArtifactType.STAT_TEST_RESULT else "table"
+    prefix = _ARTIFACT_ID_PREFIX.get(primary.type, "table")
     if (
         primary.id != make_artifact_id(prefix, primary.payload)
         or receipt.artifact_ids != (primary.id,)
@@ -342,6 +358,239 @@ def _verify_missingness(
     _verify_fact_manifest(receipt, rows)
 
 
+def _verify_correlate_columns(
+    receipt: EvidenceReceipt,
+    result: AgentToolResult,
+    primary: Artifact,
+    arguments: Mapping[str, object],
+) -> None:
+    """Rebuild the screen from the published pair table, never from the receipt."""
+    if primary.type is not ArtifactType.TABLE:
+        raise ValueError("correlate_columns primary artifact has the wrong type")
+    payload = primary.payload
+    rows = _rows(payload)
+    tested_rows = [row for row in rows if not row.get("insufficient_n")]
+    significant = sum(
+        1
+        for row in tested_rows
+        if row["adjusted_p"] is not None and float(row["adjusted_p"]) < 0.05
+    )
+    facts: list[ReceiptFact] = [
+        _fact("pairs_tested", payload.get("pairs_tested"), "count"),
+        _fact("pairs_insufficient_n", payload.get("pairs_insufficient_n"), "count"),
+        _fact("correlation_method", payload.get("correlation_method"), "string"),
+        _fact("correction_method", payload.get("correction_method"), "string"),
+        _fact("min_pairwise_n", payload.get("min_pairwise_n"), "count"),
+        _fact("significant_adjusted_pairs", significant, "count"),
+    ]
+    # Published rows are ordered tested-first, so an evaluated entry can never
+    # land on an insufficient_n row.
+    evaluated_count = min(_MAX_FACT_PAIRS, len(tested_rows))
+    for index, row in enumerate(rows[:evaluated_count]):
+        facts.extend(
+            (
+                _fact(f"pair{index}.coefficient", row["coefficient"], "number"),
+                _fact(f"pair{index}.adjusted_p", row["adjusted_p"], "number"),
+                _fact(
+                    f"pair{index}.columns",
+                    f"{row['column_a']}~{row['column_b']}",
+                    "string",
+                ),
+            )
+        )
+    trivial = sum(1 for row in rows if row.get("is_trivial_pair"))
+    expected_parameters = {
+        "correlation_method": payload.get("correlation_method"),
+        "correction_method": payload.get("correction_method"),
+        "min_pairwise_n": payload.get("min_pairwise_n"),
+        "pairs_tested": payload.get("pairs_tested"),
+        "pairs_insufficient_n": payload.get("pairs_insufficient_n"),
+        "pairs_degenerate": payload.get("pairs_degenerate"),
+    }
+    expected_content = {
+        "artifact_id": primary.id,
+        "receipt_id": receipt.receipt_id,
+        "pairs_tested": payload.get("pairs_tested"),
+        "pairs_insufficient_n": payload.get("pairs_insufficient_n"),
+        "correlation_method": payload.get("correlation_method"),
+        "correction_method": payload.get("correction_method"),
+        "significant_adjusted_pairs": significant,
+        "top_pairs": rows[:10],
+    }
+    if (
+        receipt.facts != tuple(facts)
+        or receipt.output_digest != canonical_json_sha256(payload)
+        or receipt.result_count != payload.get("pairs_tested")
+        or receipt.scope.dataset_ids != (arguments.get("dataset_id"),)
+        or receipt.method.family
+        != f"{payload.get('correlation_method')}_correlation_screen"
+        or dict(receipt.method.parameters) != expected_parameters
+        or receipt.method.warnings
+        != (
+            (f"{trivial} published pair(s) look trivially coupled (is_trivial_pair).",)
+            if trivial
+            else ()
+        )
+        or _clipped(_content(result)) != _clipped(expected_content)
+    ):
+        raise ValueError("correlate_columns receipt is not reconstructed by its durable result")
+    _verify_pair_manifest(receipt, rows, evaluated_count=evaluated_count)
+
+
+def _verify_screen_anomalies(
+    receipt: EvidenceReceipt,
+    result: AgentToolResult,
+    primary: Artifact,
+    arguments: Mapping[str, object],
+) -> None:
+    """Rebuild the screen from the published anomaly result."""
+    if primary.type is not ArtifactType.ANOMALY_SCREEN_RESULT:
+        raise ValueError("screen_anomalies primary artifact has the wrong type")
+    screen = AnomalyScreenResult.model_validate(primary.payload)
+    facts = (
+        _fact("outlier_count", screen.outlier_count, "count"),
+        _fact("outlier_percent", round(screen.outlier_percent, 6), "percent", unit="percent"),
+        _fact("median", screen.median, "number"),
+        _fact("mad", screen.mad, "number"),
+        _fact("q1", screen.q1, "number"),
+        _fact("q3", screen.q3, "number"),
+    )
+    expected_content = {
+        "artifact_id": primary.id,
+        "receipt_id": receipt.receipt_id,
+        "facts": {fact.fact_id: fact.value for fact in facts},
+        "method": screen.method,
+        "notes": screen.notes,
+    }
+    if (
+        receipt.facts != facts
+        or receipt.output_digest != canonical_json_sha256(screen.model_dump(mode="json"))
+        or receipt.result_count != screen.outlier_count
+        or receipt.scope.dataset_ids != (arguments.get("dataset_id"),)
+        or receipt.scope.columns != (arguments.get("column"),)
+        # The screen records the method it actually ran, which falls back to
+        # iqr when the MAD collapses — never merely what was requested.
+        or receipt.method.family != screen.method
+        or dict(receipt.method.parameters)
+        != {
+            "requested_method": arguments.get("method"),
+            "threshold": screen.threshold,
+        }
+        or receipt.method.warnings != tuple(screen.notes)
+        or _content(result) != expected_content
+    ):
+        raise ValueError("screen_anomalies receipt is not reconstructed by its durable result")
+
+
+def _verify_baseline_model(
+    receipt: EvidenceReceipt,
+    result: AgentToolResult,
+    primary: Artifact,
+    arguments: Mapping[str, object],
+) -> None:
+    """Rebuild the model card's facts from the published card."""
+    if primary.type is not ArtifactType.MODEL_CARD:
+        raise ValueError("run_baseline_model primary artifact has the wrong type")
+    card = ModelCard.model_validate(primary.payload)
+    facts: list[ReceiptFact] = [
+        _fact("task_type", card.task_type, "string"),
+        _fact("target_column", card.target_column, "string"),
+        _fact("split_strategy", card.split_strategy, "string"),
+        _fact("model_type", card.model_type, "string"),
+        _fact("train_rows", card.train_rows, "count"),
+        _fact("test_rows", card.test_rows, "count"),
+        _fact("feature_count", len(card.feature_columns), "count"),
+        _fact("excluded_feature_count", len(card.excluded_features), "count"),
+    ]
+    if card.baseline_accuracy is not None:
+        facts.append(_fact("baseline_accuracy", card.baseline_accuracy, "number"))
+    for metric, value in sorted(card.metrics.items()):
+        facts.append(_fact(f"metric.{metric}", value, "number"))
+    for index, item in enumerate(card.feature_importance[:10]):
+        facts.extend(
+            (
+                _fact(f"feature{index}.name", item.feature, "string"),
+                _fact(f"feature{index}.importance", item.importance, "number"),
+            )
+        )
+        if item.signed_importance is not None:
+            facts.append(
+                _fact(f"feature{index}.signed_importance", item.signed_importance, "number")
+            )
+        if item.importance_std is not None:
+            facts.append(
+                _fact(f"feature{index}.importance_std", item.importance_std, "number")
+            )
+    leakage_warnings = tuple(
+        check.message
+        for check in card.leakage_checks
+        if check.severity in {"warn", "critical"}
+    )
+    expected_parameters = {
+        "target_column": arguments.get("target_column"),
+        "time_column": arguments.get("time_column"),
+        "group_column": arguments.get("group_column"),
+        "split_policy": arguments.get("split_policy"),
+        "actual_split_strategy": card.split_strategy,
+        "cv_folds": arguments.get("cv_folds"),
+        "random_state": arguments.get("random_state"),
+    }
+    expected_content = {
+        "artifact_id": primary.id,
+        "receipt_id": receipt.receipt_id,
+        **card.model_dump(mode="json"),
+    }
+    if (
+        receipt.facts != tuple(facts)
+        or receipt.output_digest != canonical_json_sha256(card.model_dump(mode="json"))
+        or receipt.result_count != 1
+        or receipt.scope.dataset_ids != (arguments.get("dataset_id"),)
+        or receipt.scope.scope_resolution != "resolved"
+        or receipt.method.family != "ml_baseline"
+        or dict(receipt.method.parameters) != expected_parameters
+        or receipt.method.assumptions
+        != (
+            f"split_strategy={card.split_strategy}",
+            f"cross_validation_folds={arguments.get('cv_folds')}",
+            "performance is predictive association, not causal evidence",
+        )
+        or receipt.method.warnings != tuple([*card.limitations, *leakage_warnings])
+        or _clipped(_content(result)) != _clipped(expected_content)
+    ):
+        raise ValueError(
+            "run_baseline_model receipt is not reconstructed by its durable result"
+        )
+
+
+def _verify_pair_manifest(
+    receipt: EvidenceReceipt,
+    rows: list[dict[str, Any]],
+    *,
+    evaluated_count: int,
+) -> None:
+    manifest = receipt.fact_manifest
+    listed = rows[:_MAX_MANIFEST_ENTRIES]
+    if manifest is None or manifest.unlisted_rows != len(rows) - len(listed):
+        raise ValueError("correlate_columns receipt fact manifest is incomplete")
+    if len(manifest.entries) != len(listed):
+        raise ValueError(
+            "correlate_columns receipt fact manifest does not cover artifact rows"
+        )
+    for index, (entry, row) in enumerate(zip(manifest.entries, listed, strict=True)):
+        expected_id = (
+            f"pair{index}.insufficient_n" if row.get("insufficient_n") else f"pair{index}"
+        )
+        expected_status = "evaluated" if index < evaluated_count else "unevaluated"
+        if (
+            entry.fact_id != expected_id
+            or entry.row_index != index
+            or entry.status != expected_status
+        ):
+            raise ValueError(
+                "correlate_columns receipt manifest diverges from artifact rows"
+            )
+
+
 def _verify_fact_manifest(receipt: EvidenceReceipt, rows: list[dict[str, Any]]) -> None:
     manifest = receipt.fact_manifest
     listed = rows[:_MAX_MANIFEST_ENTRIES]
@@ -362,6 +611,13 @@ def _verify_fact_manifest(receipt: EvidenceReceipt, rows: list[dict[str, Any]]) 
             or entry.row_digest != canonical_json_sha256(row)
         ):
             raise ValueError("missingness receipt manifest diverges from artifact rows")
+
+
+def _clipped(content: dict[str, Any]) -> dict[str, Any]:
+    """Compare provider-facing content after the same clipping the tool applies."""
+    from eda_platform.agents.data_tools import _clip_json
+
+    return cast(dict[str, Any], _clip_json(content))
 
 
 def _content(result: AgentToolResult) -> dict[str, Any]:

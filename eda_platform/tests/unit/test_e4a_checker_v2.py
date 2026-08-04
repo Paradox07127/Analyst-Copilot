@@ -15,12 +15,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from evals.exploration_baseline.run_e4a_trials import (  # noqa: E402
-    DATASET_ID,
-    load_planted_bundle,
-    seed_profile_artifacts,
-)
-
 from eda_platform.agents.data_tools import (  # noqa: E402
     DataToolContext,
     RecommendCleaningArguments,
@@ -61,6 +55,11 @@ from eda_platform.schemas.receipts import (  # noqa: E402
     ReceiptStatistics,
 )
 from eda_platform.tools.sql_runner import build_catalog  # noqa: E402
+from evals.exploration_baseline.run_e4a_trials import (  # noqa: E402
+    DATASET_ID,
+    load_planted_bundle,
+    seed_profile_artifacts,
+)
 
 _XPL = "xpl-checker-v2"
 _WITNESS = "witness-checker-v2"

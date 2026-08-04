@@ -157,11 +157,11 @@ def test_provider_unavailable_is_a_probe_local_outcome() -> None:
     """Seed-8: the first 503 raised SupervisorInvariantError and the whole run
     ended `failed` with no report, discarding two committed receipts. A busy
     provider is an external condition, like a truncated response."""
+    from eda_platform.agents.exploration.executor import ProbeExecutionResult
     from eda_platform.agents.exploration.workflow import (
         PROBE_LOCAL_ERROR_CODES,
         _probe_outcome_is_usable,
     )
-    from eda_platform.agents.exploration.executor import ProbeExecutionResult
 
     assert "provider_unavailable" in PROBE_LOCAL_ERROR_CODES
     assert _probe_outcome_is_usable(

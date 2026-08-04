@@ -110,8 +110,9 @@ from eda_platform.drivers.exploration_evidence_issuer import (
 )
 from eda_platform.schemas.artifacts import ArtifactType
 from eda_platform.schemas.datasets import DatasetRecord
-from eda_platform.schemas.hypotheses import HypothesisPredicate
+from eda_platform.schemas.exploration import RoundSettledEvent
 from eda_platform.schemas.exploration_budget import ExplorationBudgetPolicy
+from eda_platform.schemas.hypotheses import HypothesisPredicate
 from eda_platform.schemas.receipts import data_state_witness_digest
 from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.profiler import profile_dataset
@@ -407,6 +408,37 @@ def scaled_budget(tier: str, scale: int) -> ExplorationBudgetPolicy:
             },
         }
     )
+
+
+def round_productivity_report(root: Path) -> list[str]:
+    """Per-round value against spend, differenced from the cumulative counters."""
+    events = JsonlExplorationJournal(Path(root) / "journal.jsonl").events()
+    lines = [
+        f"{'round':>5} {'adjudicated':>11} {'supported':>9} "
+        f"{'llm':>5} {'tools':>6} {'sup/llm':>8}"
+    ]
+    prev_llm = prev_tools = 0
+    for event in events:
+        if not isinstance(event, RoundSettledEvent):
+            continue
+        llm = event.llm_calls_at_settle
+        tools = event.tool_calls_at_settle
+        if llm is None or tools is None:
+            lines.append(
+                f"{event.round_index:>5} {str(event.adjudicated_transitions):>11} "
+                f"{'—':>9} {'—':>5} {'—':>6} {'—':>8}   (pre-observation journal)"
+            )
+            continue
+        round_llm = llm - prev_llm
+        round_tools = tools - prev_tools
+        prev_llm, prev_tools = llm, tools
+        supported = event.supported_transitions or 0
+        rate = f"{supported / round_llm:.3f}" if round_llm else "—"
+        lines.append(
+            f"{event.round_index:>5} {str(event.adjudicated_transitions):>11} "
+            f"{supported:>9} {round_llm:>5} {round_tools:>6} {rate:>8}"
+        )
+    return lines
 
 
 def ledger_usage_report(root: Path) -> list[str]:
@@ -777,7 +809,9 @@ def _unverified_projection(root: Path, exploration_id: str) -> dict[str, Any]:
     }
 
 
-def _recovered_candidates(root: Path, exploration_id: str, rounds_started: int) -> dict[str, CandidateSeed]:
+def _recovered_candidates(
+    root: Path, exploration_id: str, rounds_started: int
+) -> dict[str, CandidateSeed]:
     recovery = JsonSupervisorRecoveryStore(root / "phase-responses")
     candidates: dict[str, CandidateSeed] = {}
     for round_index in range(rounds_started):
@@ -951,6 +985,17 @@ def main() -> int:
     parser.add_argument("--seeds", default=None, help="comma-separated, e.g. 1,2,3")
     parser.add_argument("--results-dir", type=Path, default=None)
     parser.add_argument(
+        "--round-productivity",
+        type=Path,
+        default=None,
+        help=(
+            "print each round's value-per-spend from an existing run root. "
+            "Observation only: no rule reads these numbers yet, and the "
+            "release-gate runs are meant to supply the distribution a stopping "
+            "rule would need."
+        ),
+    )
+    parser.add_argument(
         "--rescore",
         type=Path,
         default=None,
@@ -1019,6 +1064,10 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    if args.round_productivity is not None:
+        for line in round_productivity_report(args.round_productivity):
+            print(line)
+        return 0
     if args.rescore is not None:
         checker = rescore_run_root(args.rescore)
         print(json.dumps(checker.scores, indent=2, sort_keys=True))

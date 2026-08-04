@@ -40,6 +40,7 @@ class FakeJournal:
         self.round_branch_ids: list[str | None] = []
         self.abandonments: list[tuple[str, int, tuple[object, ...]]] = []
         self.settled: list[tuple[int, bool]] = []
+        self.settled_observations: list[dict[str, int]] = []
         self.settled_frontier_empty: list[bool] = []
         self.reductions: list[tuple[str, str]] = []
         self.stops: list[str] = []
@@ -116,9 +117,19 @@ class FakeJournal:
         terminal_reason: str | None,
         frontier_empty: bool = False,
         adjudicated_transitions: int = 0,
+        supported_transitions: int = 0,
+        llm_calls_at_settle: int = 0,
+        tool_calls_at_settle: int = 0,
     ) -> SupervisorJournalState:
         assert round_index == self.state.current_round_index
         self.settled.append((round_index, progress))
+        self.settled_observations.append(
+            {
+                "supported_transitions": supported_transitions,
+                "llm_calls_at_settle": llm_calls_at_settle,
+                "tool_calls_at_settle": tool_calls_at_settle,
+            }
+        )
         self.settled_frontier_empty.append(frontier_empty)
         terminal_has_reduction = bool(
             terminal_reason and self.state.current_round_reduction_committed
@@ -762,6 +773,33 @@ def test_one_empty_frontier_round_is_not_exhaustion() -> None:
     # Plan-B soft stop: after the probe round also adjudicated nothing, two
     # zero-adjudication rounds end the run instead of coasting to the budget.
     assert result.stop_reason == "no_new_information"
+
+
+def test_settle_records_the_round_productivity_observations() -> None:
+    """Observation only (no behavior change): luna seed 8 kept adjudicating at
+    0.04-0.06 per call for eight rounds after it had already found every
+    planted structure, so "did anything adjudicate" is a weak value signal.
+    Record the raw counts and let a rule be chosen once the release-gate runs
+    supply a distribution."""
+    journal = FakeJournal(
+        _state(remaining_round_budget=1, llm_calls_settled=9, tool_calls_committed=4)
+    )
+    supervisor, _, _, _, _ = _supervisor(
+        journal,
+        reducer=FakeReducer(
+            transitions=("new", "refuted", "reinforced"),
+            goal_satisfied=True,
+        ),
+    )
+
+    supervisor.run()
+
+    assert journal.settled_observations == [
+        # new + reinforced only: a refutation is real work but not a finding.
+        # The spend counters are cumulative, so per-round rates come from
+        # differencing successive settles.
+        {"supported_transitions": 2, "llm_calls_at_settle": 9, "tool_calls_at_settle": 4}
+    ]
 
 
 def test_zero_adjudication_streak_stops_softly() -> None:
