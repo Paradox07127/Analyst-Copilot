@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable
 from copy import deepcopy
@@ -61,6 +62,20 @@ _TOOL_REJECTION_MARKERS = (
     "function calling",
     "functions",
 )
+
+
+class ProviderUnavailableError(RuntimeError):
+    """The provider stated it did not serve the request (busy, rate limited,
+    gateway). Distinct from an unknown outcome: nothing was generated, so it
+    owes no spend and a resend cannot duplicate a generation."""
+
+
+# Statuses that mean "not served". 500 is deliberately absent: an internal
+# error can follow a request the provider already processed and billed.
+_UNAVAILABLE_HTTP_STATUS = frozenset({429, 502, 503, 504})
+# Longer than the transport ladder: a retry here cannot duplicate a generation,
+# so the only cost of trying again is the wait.
+_UNAVAILABLE_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0)
 
 
 class MalformedProviderResponseError(RuntimeError):
@@ -282,6 +297,54 @@ class OfflineLLMClient:
         return self._last
 
 
+class _ThreadLocalCallState:
+    """Per-thread last-call metadata: concurrent probe sessions each read the
+    usage of their own call, never a sibling thread's (speedup plan P4)."""
+
+    def _init_call_state(self) -> None:
+        self._call_state = threading.local()
+
+    @property
+    def _last(self) -> LLMResultMetadata | None:
+        return getattr(self._call_state, "last", None)
+
+    @_last.setter
+    def _last(self, value: LLMResultMetadata | None) -> None:
+        self._call_state.last = value
+
+    @property
+    def _last_request_id(self) -> str:
+        return getattr(self._call_state, "request_id", "")
+
+    @_last_request_id.setter
+    def _last_request_id(self, value: str) -> None:
+        self._call_state.request_id = value
+
+    @property
+    def _last_request_bytes(self) -> int:
+        return getattr(self._call_state, "request_bytes", 0)
+
+    @_last_request_bytes.setter
+    def _last_request_bytes(self, value: int) -> None:
+        self._call_state.request_bytes = value
+
+    @property
+    def _last_response_bytes(self) -> int:
+        return getattr(self._call_state, "response_bytes", 0)
+
+    @_last_response_bytes.setter
+    def _last_response_bytes(self, value: int) -> None:
+        self._call_state.response_bytes = value
+
+    @property
+    def _last_param_repairs(self) -> list[str]:
+        return getattr(self._call_state, "param_repairs", [])
+
+    @_last_param_repairs.setter
+    def _last_param_repairs(self, value: list[str]) -> None:
+        self._call_state.param_repairs = value
+
+
 StructuredMode = str  # "auto" | "json_schema" | "json_object"
 
 
@@ -320,7 +383,7 @@ class LLMSettings(BaseModel):
         return default_structured_mode(self.provider)
 
 
-class OpenAICompatibleLLMClient:
+class OpenAICompatibleLLMClient(_ThreadLocalCallState):
     # urllib exposes no supported primitive for aborting an in-flight blocking
     # request from another thread. Worker jobs therefore rely on cooperative
     # post-call checkpoints followed by the durable grace-timeout process fence.
@@ -335,11 +398,7 @@ class OpenAICompatibleLLMClient:
             raise ValueError("Base URL could not be resolved for this provider.")
         self.settings = settings
         self.base_url = settings.resolved_base_url
-        self._last: LLMResultMetadata | None = None
-        self._last_request_id = ""
-        self._last_request_bytes = 0
-        self._last_response_bytes = 0
-        self._last_param_repairs: list[str] = []
+        self._init_call_state()
 
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
         body = build_structured_chat_payload(
@@ -466,7 +525,10 @@ class OpenAICompatibleLLMClient:
         # risks one duplicate generation. HTTP responses are served answers and
         # are never retried here.
         attempts = len(_TRANSPORT_RETRY_BACKOFF_SECONDS) + 1
-        for attempt in range(1, attempts + 1):
+        unavailable_attempts = 0
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 with request.urlopen(req, timeout=self.settings.timeout_seconds) as response:
                     self._last_request_id = _response_request_id(
@@ -477,12 +539,25 @@ class OpenAICompatibleLLMClient:
                     return json.loads(raw.decode("utf-8"))
             except error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code in _UNAVAILABLE_HTTP_STATUS:
+                    # "Not served" is the one HTTP answer a resend cannot
+                    # duplicate, so it gets its own longer ladder.
+                    if unavailable_attempts < len(_UNAVAILABLE_RETRY_BACKOFF_SECONDS):
+                        time.sleep(
+                            _UNAVAILABLE_RETRY_BACKOFF_SECONDS[unavailable_attempts]
+                        )
+                        unavailable_attempts += 1
+                        attempt -= 1  # a refused request never used a transport try
+                        continue
+                    raise ProviderUnavailableError(
+                        f"LLM provider is unavailable (HTTP {exc.code}) after "
+                        f"{unavailable_attempts + 1} attempts: {detail}"
+                    ) from exc
                 raise _RejectedRequest(code=exc.code, detail=detail, cause=exc) from exc
             except (TimeoutError, error.URLError) as exc:
-                if attempt == attempts:
+                if attempt >= attempts:
                     raise self._transport_error(exc, attempts=attempts) from exc
                 time.sleep(_TRANSPORT_RETRY_BACKOFF_SECONDS[attempt - 1])
-        raise AssertionError("unreachable")  # pragma: no cover
 
     def _transport_error(self, exc: BaseException, *, attempts: int) -> RuntimeError:
         reason = getattr(exc, "reason", exc)
@@ -545,7 +620,7 @@ _ANTHROPIC_SYSTEM = (
 )
 
 
-class AnthropicLLMClient:
+class AnthropicLLMClient(_ThreadLocalCallState):
     """Native Anthropic Messages client. Structured output is forced via a single
     tool call (the compat endpoint ignores response_format), so json_schema holds."""
 
@@ -556,10 +631,7 @@ class AnthropicLLMClient:
             raise ValueError("API key is required for Anthropic.")
         self.settings = settings
         self.base_url = settings.resolved_base_url
-        self._last: LLMResultMetadata | None = None
-        self._last_request_id = ""
-        self._last_request_bytes = 0
-        self._last_response_bytes = 0
+        self._init_call_state()
 
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
         strict_schema = to_strict_json_schema(schema.model_json_schema())

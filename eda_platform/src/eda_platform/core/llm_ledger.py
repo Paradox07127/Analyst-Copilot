@@ -15,7 +15,6 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from threading import RLock
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import uuid4
@@ -29,7 +28,7 @@ from eda_platform.core.budget import (
     SessionBudgetState,
 )
 from eda_platform.core.ids import stable_hash
-from eda_platform.core.llm import is_offline_client
+from eda_platform.core.llm import ProviderUnavailableError, is_offline_client
 from eda_platform.core.provider_registry import pricing_per_1m
 from eda_platform.schemas.sessions import TraceEvent
 
@@ -93,10 +92,6 @@ class LedgerLLMClient:
         self._session_id = session_id
         self._emit = emit
         self._budget = None if is_offline_client(inner) else budget
-        # The adapter contract exposes mutable client-wide ``last_usage`` state.
-        # Serialize provider execution through settlement until metadata becomes
-        # call-scoped.
-        self._call_lock = RLock()
 
     @property
     def inner(self) -> LLMClient:
@@ -187,13 +182,15 @@ class LedgerLLMClient:
         self._budget.release(reservation.call_id)
 
     def _call(self, kind: str, *, task: str, payload: dict, schema: type | None) -> Any:
-        with self._call_lock:
-            return self._call_serialized(
-                kind,
-                task=task,
-                payload=payload,
-                schema=schema,
-            )
+        # Concurrent calls are safe: reservations/settlements are lock-guarded
+        # in SessionBudgetState, the ledger store append is atomic, and adapter
+        # last_usage() is thread-local — so the network wait runs unlocked.
+        return self._call_serialized(
+            kind,
+            task=task,
+            payload=payload,
+            schema=schema,
+        )
 
     def _call_serialized(
         self,
@@ -216,6 +213,7 @@ class LedgerLLMClient:
         # otherwise be billed the previous call's tokens.
         usage_before = self._safe_usage()
         status = "success"
+        unserved = False
         try:
             if kind == "structured":
                 assert schema is not None
@@ -227,6 +225,10 @@ class LedgerLLMClient:
                     tools=list(payload.get("tools", [])),
                 )
             return self._inner.text(task=task, payload=payload)
+        except ProviderUnavailableError as exc:
+            status = type(exc).__name__
+            unserved = True
+            raise
         except Exception as exc:
             status = type(exc).__name__
             raise
@@ -235,7 +237,9 @@ class LedgerLLMClient:
             settlement_error: Exception | None = None
             settled_reservation: BudgetReservation | None = None
             try:
-                settled_reservation = self._settle(reservation, usage=usage)
+                settled_reservation = self._settle(
+                    reservation, usage=usage, unserved=unserved
+                )
             except Exception as exc:  # budget terminal state must remain visible
                 settlement_error = exc
                 if self._budget is not None and reservation is not None:
@@ -249,6 +253,7 @@ class LedgerLLMClient:
                     started_at=started_at,
                     usage=usage,
                     reservation=reservation,
+                    unserved=unserved,
                 )
                 self._record_budget_terminal(task, settled_reservation)
             if settlement_error is not None:
@@ -359,8 +364,15 @@ class LedgerLLMClient:
         reservation: BudgetReservation | None,
         *,
         usage: LLMResultMetadata | None,
+        unserved: bool = False,
     ) -> BudgetReservation | None:
         if self._budget is None or reservation is None:
+            return None
+        if unserved:
+            # The provider stated it never processed the request, so there is
+            # nothing to bill and the request slot goes back (seed-8: six 503s
+            # each consumed a full 12k-token reservation for zero output).
+            self._budget.release(reservation.call_id)
             return None
         if usage is None or not usage.usage_reported:
             return self._budget.mark_uncertain(reservation.call_id)
@@ -420,6 +432,7 @@ class LedgerLLMClient:
         started_at: datetime,
         usage: LLMResultMetadata | None,
         reservation: BudgetReservation | None,
+        unserved: bool = False,
     ) -> None:
         summary: dict[str, Any] = {
             "task": task,
@@ -461,6 +474,20 @@ class LedgerLLMClient:
                     "endpoint_host": usage.endpoint_host,
                     "request_bytes": usage.request_bytes,
                     "response_bytes": usage.response_bytes,
+                }
+            )
+        elif unserved:
+            # The provider refused to process the request, so the reservation
+            # was released rather than consumed; recording it would inflate the
+            # run's spend with tokens that were never generated.
+            summary.update(
+                {
+                    "provider": "",
+                    "model": "",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0.0,
                 }
             )
         else:

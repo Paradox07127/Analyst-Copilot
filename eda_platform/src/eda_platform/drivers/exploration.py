@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +82,7 @@ from eda_platform.core.exploration_budget import (
     apply_budget_increase,
 )
 from eda_platform.core.exploration_journal import JsonlExplorationJournal, RecoveredToolCommit
+from eda_platform.core.file_lock import lock_exclusive, unlock
 from eda_platform.core.exploration_report import render_exploration_report
 from eda_platform.core.exploration_shadow_store import (
     ShadowExplorationStore,
@@ -187,6 +190,10 @@ class JsonlShadowBudgetStore:
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        # Reservation/settlement events arrive from concurrent probe threads;
+        # the thread lock plus a sidecar flock make tail-check + append one
+        # atomic step in-process and across processes.
+        self._append_lock = threading.Lock()
 
     def events(self) -> list[TraceEvent]:
         try:
@@ -212,23 +219,40 @@ class JsonlShadowBudgetStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.is_symlink():
             raise ValueError("shadow budget event path cannot be a symlink.")
-        self._truncate_unterminated_tail()
-        body = event.model_dump_json().encode("utf-8") + b"\n"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | BINARY_FLAG
+        with self._append_lock, self._file_locked():
+            self._truncate_unterminated_tail()
+            body = event.model_dump_json().encode("utf-8") + b"\n"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | BINARY_FLAG
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(self.path, flags, 0o600)
+            try:
+                view = memoryview(body)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:  # pragma: no cover - defensive OS contract
+                        raise OSError("failed to append the shadow budget event.")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _fsync_directory(self.path.parent)
+
+    @contextmanager
+    def _file_locked(self) -> Iterator[None]:
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        flags = os.O_WRONLY | os.O_CREAT | BINARY_FLAG
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(self.path, flags, 0o600)
+        descriptor = os.open(lock_path, flags, 0o600)
         try:
-            view = memoryview(body)
-            while view:
-                written = os.write(descriptor, view)
-                if written <= 0:  # pragma: no cover - defensive OS contract
-                    raise OSError("failed to append the shadow budget event.")
-                view = view[written:]
-            os.fsync(descriptor)
+            lock_exclusive(descriptor)
+            try:
+                yield
+            finally:
+                unlock(descriptor)
         finally:
             os.close(descriptor)
-        _fsync_directory(self.path.parent)
 
     def _truncate_unterminated_tail(self) -> None:
         flags = os.O_RDWR | os.O_CREAT | BINARY_FLAG
@@ -572,6 +596,7 @@ def run_composed_shadow_exploration(
     admission_score_threshold: float | None = None,
     dataset_columns: Mapping[str, Iterable[str]] | None = None,
     supported_method_families: Iterable[str] = (),
+    probe_concurrency: int = 1,
 ) -> ShadowExplorationRunResult:
     """Official E4a composition root: real ports, durable ledgers, shadow-only sinks."""
     workspace_path = require_absolute_workspace(Path(workspace))
@@ -737,6 +762,7 @@ def run_composed_shadow_exploration(
             goal=policy.goal,
             dataset_columns=dataset_columns,
             supported_method_families=supported_method_families,
+            probe_concurrency=probe_concurrency,
         )
 
         def report_budget_summary() -> Mapping[str, object]:

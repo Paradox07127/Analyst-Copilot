@@ -15,6 +15,7 @@ converted into model observations.
 
 from __future__ import annotations
 
+import threading
 import json
 import re
 import uuid
@@ -44,7 +45,12 @@ from eda_platform.core.exploration_budget import (
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.kernel import SessionCancelled
-from eda_platform.core.llm import LLMToolCall, LLMToolResponse, MalformedProviderResponseError
+from eda_platform.core.llm import (
+    LLMToolCall,
+    LLMToolResponse,
+    MalformedProviderResponseError,
+    ProviderUnavailableError,
+)
 from eda_platform.core.llm_ledger import logical_llm_call
 
 type ProbeExecutionStatus = Literal[
@@ -91,8 +97,43 @@ _EMPTY_RESPONSE_RETRY_BUDGET = 3
 # Integrity codes (digest mismatch, unavailable durable body, uncertain
 # provider outcome) are deliberately absent.
 PROBE_LOCAL_ERROR_CODES = frozenset(
-    {"finish_reason_length", "content_filtered", "empty_response"}
+    {
+        "finish_reason_length",
+        "content_filtered",
+        "empty_response",
+        # The provider stated it did not serve the request (seed-8: six 503s
+        # ended the run as `failed`, discarding committed receipts).
+        "provider_unavailable",
+    }
 )
+# W1 (speedup plan section 4): a (tool, canonical error) fingerprint seen this many
+# times disables the tool for the rest of the run.  Runtime-only: the policy
+# fingerprint and the tool capability digest are deliberately untouched.
+FAILURE_FINGERPRINT_DISABLE_THRESHOLD = 2
+_CANONICAL_ERROR_MAX_CHARS = 120
+_DISABLED_TOOL_NOTE = (
+    "tool {tool} is disabled for this run after repeated failure: {error}"
+)
+# W3: session wind-down once typed adjudicating evidence is held.
+_WIND_DOWN_SAME_DIRECTION_RECEIPTS = 2
+_ADJUDICATING_OUTCOMES = frozenset({"supports", "contradicts"})
+_ADJUDICATION_GUIDANCE = (
+    "You already hold adjudicating evidence for this hypothesis. "
+    "Corroborate once at most, then conclude."
+)
+_WIND_DOWN_NOTE = (
+    "You hold two same-direction adjudicating receipts for this hypothesis. "
+    "The tool inventory is closed for this session; conclude now with your "
+    "final answer."
+)
+# W4: from the Nth call whose filter family already produced N-1 zero-row
+# slices, reject locally instead of executing another value variant.
+ZERO_ROW_FILTER_FAMILY_THRESHOLD = 3
+_ZERO_ROW_FAMILY_NOTE = (
+    "this filter family has matched zero rows twice; revise the plan instead "
+    "of the value"
+)
+_PROFILE_SLICE_TOOL_NAME = "profile_slice"
 
 
 class NativeToolProvider(Protocol):
@@ -431,8 +472,8 @@ class JsonlProbeJournalHooks:
     def llm_started(self, *, call_id: str, step_id: str) -> None:
         with self.journal.fenced_side_effect():
             state = self.journal.rebuild()
-            if state is not None and state.pending_call_id == call_id:
-                if state.pending_call_step_id not in {None, step_id}:
+            if state is not None and call_id in state.pending_call_ids:
+                if state.pending_call_steps.get(call_id) not in {None, step_id}:
                     raise ValueError("pending LLM call is bound to another logical step.")
                 return
             self.journal.append_new(
@@ -482,12 +523,13 @@ class JsonlProbeJournalHooks:
     ) -> None:
         with self.journal.fenced_side_effect():
             state = self.journal.rebuild()
-            if state is not None and state.pending_logical_step_id == logical_step_id:
+            slot = None if state is None else state.pending_tool_steps.get(logical_step_id)
+            if slot is not None:
                 expected = (
-                    state.pending_tool_kind,
-                    state.pending_tool_input_fingerprint,
-                    state.pending_projected_rows_scanned,
-                    state.pending_projected_result_cells,
+                    slot.tool_kind,
+                    slot.input_fingerprint,
+                    slot.projected_rows_scanned,
+                    slot.projected_result_cells,
                 )
                 actual = (
                     tool_kind,
@@ -573,6 +615,24 @@ class ProbeExecutionResult:
     probe_fingerprints: tuple[str, ...] = ()
 
 
+@dataclass(slots=True)
+class _SessionGuardState:
+    """Per-session W3/W4 state, derived purely from observed tool results."""
+
+    hypothesis: HypothesisExecutionBinding | None
+    adjudications: list[str] = field(default_factory=list)
+    zero_row_families: dict[str, int] = field(default_factory=dict)
+
+    def wind_down(self) -> bool:
+        return (
+            max(
+                self.adjudications.count("supports"),
+                self.adjudications.count("contradicts"),
+            )
+            >= _WIND_DOWN_SAME_DIRECTION_RECEIPTS
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedCall:
     call: LLMToolCall
@@ -602,6 +662,7 @@ class ProbeExecutor:
         max_observation_chars: int = 12_000,
         cancel_check: Callable[[], object] | None = None,
         task: str = "exploration_probe_loop",
+        prior_failure_events: Sequence[Any] = (),
     ) -> None:
         if max_steps < 1 or max_tool_calls < 1:
             raise ValueError("Probe executor limits must be positive.")
@@ -626,6 +687,15 @@ class ProbeExecutor:
         self._max_observation_chars = max_observation_chars
         self._cancel_check = cancel_check
         self._task = task
+        # W1 run-level ledger: the executor instance lives for the whole run,
+        # so the counters survive across probe sessions.  On resume, the
+        # composition passes the journal's prior events to rebuild them.
+        self._failure_fingerprints: dict[tuple[str, str], int] = {}
+        self._disabled_tools: dict[str, str] = {}
+        # Concurrent probe sessions (speedup plan P4) mutate the run-level
+        # ledger from worker threads.
+        self._breaker_lock = threading.Lock()
+        self._absorb_failure_events(prior_failure_events)
 
     def run(
         self,
@@ -661,16 +731,52 @@ class ProbeExecutor:
         ]
         failures = failures[-_FAILURE_HISTORY_LIMIT:]
         empty_response_retries = 0
+        guards = _SessionGuardState(hypothesis=hypothesis)
+        # W1: snapshot at session start -- a breaker tripped mid-session takes
+        # effect from the next session, matching the journal-rebuilt view a
+        # resumed run would compute.
+        with self._breaker_lock:
+            disabled_tools = dict(self._disabled_tools)
+        for name in sorted(disabled_tools):
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _DISABLED_TOOL_NOTE.format(
+                        tool=name, error=disabled_tools[name]
+                    ),
+                }
+            )
 
         for step in range(1, self._max_steps + 1):
             self._checkpoint()
-            phase_names = self._select_phase_tools(phase=phase, step=step)
+            # W3: after two same-direction adjudicating receipts the session
+            # only gets the conclusion exit -- an empty tool inventory.  The
+            # trigger is a pure function of observed receipts, so crash-replay
+            # recomputes the same inventory at the same step.
+            wind_down = guards.wind_down()
+            phase_names = (
+                ()
+                if wind_down
+                else self._select_phase_tools(phase=phase, step=step)
+            )
             phase_registry = {name: self._tools[name] for name in phase_names}
+            # W1: disabled tools stay in the local registry (committed steps
+            # must still be adoptable on resume) but leave the offered
+            # inventory; fresh calls to them are rejected before execution.
+            offered_names = tuple(
+                name for name in phase_names if name not in disabled_tools
+            )
             call_id = "llm_" + stable_hash(
                 {"run_id": execution_run_id, "step": step}, length=24
             )
             llm_step_id = make_executor_llm_step_id(execution_run_id, step)
             request_messages = _with_failure_history(messages, failures)
+            if wind_down:
+                request_messages.append({"role": "user", "content": _WIND_DOWN_NOTE})
+            elif guards.adjudications:
+                request_messages.append(
+                    {"role": "user", "content": _ADJUDICATION_GUIDANCE}
+                )
             if call_id in blocked_calls:
                 return self._result(
                     status="failed",
@@ -724,7 +830,7 @@ class ProbeExecutor:
                         messages=request_messages,
                         tools=[
                             phase_registry[name].provider_schema()
-                            for name in phase_names
+                            for name in offered_names
                         ],
                     )
                 self._journal.llm_started(call_id=call_id, step_id=llm_step_id)
@@ -735,7 +841,7 @@ class ProbeExecutor:
                             messages=request_messages,
                             tools=[
                                 phase_registry[name].provider_schema()
-                                for name in phase_names
+                                for name in offered_names
                             ],
                         )
                 except BudgetExceeded as exc:
@@ -754,6 +860,27 @@ class ProbeExecutor:
                         error=_safe_error(exc),
                     )
                     raise
+                except ProviderUnavailableError as exc:
+                    # Nothing was generated, so the logical step is not
+                    # uncertain; the probe ends locally and the round keeps the
+                    # receipts it already committed.
+                    error = _safe_error(exc)
+                    self._journal.llm_terminal(
+                        call_id=call_id,
+                        step_id=llm_step_id,
+                        outcome="rejected",
+                        error=error,
+                    )
+                    return self._result(
+                        status="failed",
+                        artifacts=artifacts,
+                        tool_calls=tool_calls,
+                        tool_names=tool_names,
+                        failures=_add_failure(failures, call_id, error),
+                        seen=seen,
+                        error=error,
+                        error_code="provider_unavailable",
+                    )
                 except (
                     ProviderCallRejectedError,
                     MalformedProviderResponseError,
@@ -878,9 +1005,10 @@ class ProbeExecutor:
             prepared, immediate_messages, failures = self._prepare_batch(
                 calls=response.tool_calls,
                 phase_registry=phase_registry,
-                phase_names=phase_names,
+                phase_names=offered_names,
                 seen=seen,
                 failures=failures,
+                guards=guards,
             )
             messages.extend(immediate_messages)
 
@@ -905,8 +1033,6 @@ class ProbeExecutor:
 
             for item in prepared:
                 self._checkpoint()
-                tool_calls += 1
-                tool_names.append(item.tool.name)
                 sequence_index = make_tool_sequence_index(
                     step,
                     item.action_index,
@@ -917,6 +1043,24 @@ class ProbeExecutor:
                     item.call.call_id,
                     sequence_index,
                 )
+                if (
+                    item.tool.name in disabled_tools
+                    and logical_step_id not in completed
+                ):
+                    error = _DISABLED_TOOL_NOTE.format(
+                        tool=item.tool.name, error=disabled_tools[item.tool.name]
+                    )
+                    failures = _add_failure(failures, item.fingerprint, error)
+                    messages.append(
+                        _tool_message(
+                            item.call,
+                            {"ok": False, "error": error},
+                            limit=self._max_observation_chars,
+                        )
+                    )
+                    continue
+                tool_calls += 1
+                tool_names.append(item.tool.name)
                 if logical_step_id in completed:
                     try:
                         durable = self._tool_result_store.load_required(logical_step_id)
@@ -938,6 +1082,7 @@ class ProbeExecutor:
                         result=durable.result,
                         artifacts=artifacts,
                         messages=messages,
+                        guards=guards,
                     )
                     continue
                 self._journal.tool_started(
@@ -1073,6 +1218,7 @@ class ProbeExecutor:
                     result=result,
                     artifacts=artifacts,
                     messages=messages,
+                    guards=guards,
                 )
 
         return self._result(
@@ -1094,6 +1240,7 @@ class ProbeExecutor:
         phase_names: tuple[str, ...],
         seen: set[str],
         failures: list[str],
+        guards: _SessionGuardState,
     ) -> tuple[list[_PreparedCall], list[dict[str, Any]], list[str]]:
         prepared_parts: list[tuple[LLMToolCall, AgentTool, BaseModel, str, int]] = []
         observations: list[dict[str, Any]] = []
@@ -1160,6 +1307,32 @@ class ProbeExecutor:
                     )
                 )
                 continue
+            if call.name == _PROFILE_SLICE_TOOL_NAME:
+                where_sql = getattr(arguments, "where_sql", None)
+                family = (
+                    zero_row_filter_family(where_sql)
+                    if isinstance(where_sql, str)
+                    else None
+                )
+                if (
+                    family is not None
+                    and guards.zero_row_families.get(family, 0)
+                    >= ZERO_ROW_FILTER_FAMILY_THRESHOLD - 1
+                ):
+                    error = _ZERO_ROW_FAMILY_NOTE
+                    failures = _add_failure(failures, fingerprint, error)
+                    observations.append(
+                        _tool_message(
+                            call,
+                            {
+                                "ok": False,
+                                "error": error,
+                                "zero_row_filter_family": family,
+                            },
+                            limit=self._max_observation_chars,
+                        )
+                    )
+                    continue
             if action_index > self._max_tool_calls:
                 # make_tool_sequence_index cannot encode this position. Catching
                 # it only at execution time meant the calls before it had
@@ -1228,6 +1401,9 @@ class ProbeExecutor:
         logical_step_id: str,
         error: BaseException,
     ) -> None:
+        # W1: mirrors the journal's tool_call_failed record, so the live
+        # counter and a journal-rebuilt counter agree.
+        self._record_tool_failure(item.tool.name, _safe_error(error))
         try:
             usage = self._usage_meter.failure(
                 call=item.call,
@@ -1272,7 +1448,24 @@ class ProbeExecutor:
         result: AgentToolResult,
         artifacts: list[Any],
         messages: list[dict[str, Any]],
+        guards: _SessionGuardState,
     ) -> None:
+        outcome = _receipt_hypothesis_outcome(result, guards.hypothesis)
+        if outcome is not None:
+            guards.adjudications.append(outcome)
+        if item.tool.name == _PROFILE_SLICE_TOOL_NAME:
+            content = result.content
+            where_sql = getattr(item.arguments, "where_sql", None)
+            if (
+                isinstance(content, Mapping)
+                and content.get("rows_in_slice") == 0
+                and isinstance(where_sql, str)
+            ):
+                family = zero_row_filter_family(where_sql)
+                if family is not None:
+                    guards.zero_row_families[family] = (
+                        guards.zero_row_families.get(family, 0) + 1
+                    )
         call_artifacts = list(result.artifacts)
         if result.receipt_artifact is not None:
             call_artifacts.append(result.receipt_artifact)
@@ -1289,6 +1482,36 @@ class ProbeExecutor:
                 limit=self._max_observation_chars,
             )
         )
+
+    def _record_tool_failure(self, tool_name: str, error: str) -> None:
+        canonical = canonical_error_fingerprint(error)
+        key = (tool_name, canonical)
+        with self._breaker_lock:
+            count = self._failure_fingerprints.get(key, 0) + 1
+            self._failure_fingerprints[key] = count
+            if count >= FAILURE_FINGERPRINT_DISABLE_THRESHOLD:
+                self._disabled_tools.setdefault(tool_name, canonical)
+
+    def _absorb_failure_events(self, events: Sequence[Any]) -> None:
+        """Rebuild the W1 counter from journal events after a resume.
+
+        ``tool_call_failed`` carries only the logical step and error, so the
+        step-to-tool mapping comes from the ``tool_call_started`` events.
+        """
+        step_tool: dict[str, str] = {}
+        for event in events:
+            event_type = _event_field(event, "event_type")
+            if event_type == "tool_call_started":
+                step_id = _event_field(event, "logical_step_id")
+                tool_kind = _event_field(event, "tool_kind")
+                if isinstance(step_id, str) and isinstance(tool_kind, str):
+                    step_tool[step_id] = tool_kind
+            elif event_type == "tool_call_failed":
+                step_id = _event_field(event, "logical_step_id")
+                error = _event_field(event, "error")
+                tool_name = step_tool.get(step_id) if isinstance(step_id, str) else None
+                if tool_name and isinstance(error, str) and error:
+                    self._record_tool_failure(tool_name, error)
 
     def _select_phase_tools(self, *, phase: str, step: int) -> tuple[str, ...]:
         if self._phase_tools is None:
@@ -1358,6 +1581,87 @@ def canonical_probe_fingerprint(tool_name: str, arguments: Mapping[str, Any]) ->
             "arguments": _canonical_value(arguments),
         }
     return stable_hash(payload, length=16)
+
+
+def canonical_error_fingerprint(error: str) -> str:
+    """Digit runs collapse to ``N`` so the same failure at different values
+    (row counts, ids, metric numbers) shares one fingerprint."""
+    collapsed = re.sub(r"\d+", "N", " ".join(error.split()))
+    return collapsed[:_CANONICAL_ERROR_MAX_CHARS]
+
+
+_WHERE_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
+_WHERE_QUOTED_IDENTIFIER = re.compile(r'"([^"]+)"')
+_WHERE_OPERATOR = re.compile(
+    r"<=|>=|<>|!=|=|<|>"
+    r"|\bis\s+not\s+null\b|\bis\s+null\b"
+    r"|\bnot\s+(?:like|ilike|in|between)\b|\b(?:like|ilike|in|between)\b"
+)
+_WHERE_IDENTIFIER = re.compile(r"\b[a-z_][a-z0-9_.$]*\b")
+_WHERE_NON_COLUMN_WORDS = frozenset(
+    {
+        "and", "or", "not", "like", "ilike", "in", "between", "is", "null",
+        "true", "false", "case", "when", "then", "else", "end", "cast", "as",
+        "exists", "escape", "distinct", "interval", "date", "timestamp",
+    }
+)
+
+
+def zero_row_filter_family(where_sql: str) -> str | None:
+    """Value-free family identity of a profile_slice WHERE clause.
+
+    Only the sorted column-ish identifiers and sorted comparison operators
+    participate; literal values never do, so value variants of one filter
+    share a family.
+    """
+    text = " ".join(where_sql.split()).lower()
+    text = _WHERE_STRING_LITERAL.sub(" ", text)
+    text = _WHERE_QUOTED_IDENTIFIER.sub(lambda match: f" {match.group(1)} ", text)
+    operators = sorted(
+        {
+            "!=" if op == "<>" else op
+            for op in (
+                " ".join(match.group(0).split())
+                for match in _WHERE_OPERATOR.finditer(text)
+            )
+        }
+    )
+    columns = sorted(
+        {
+            token
+            for token in _WHERE_IDENTIFIER.findall(text)
+            if token not in _WHERE_NON_COLUMN_WORDS
+        }
+    )
+    if not columns and not operators:
+        return None
+    return stable_hash({"columns": columns, "operators": operators}, length=16)
+
+
+def _receipt_hypothesis_outcome(
+    result: AgentToolResult,
+    hypothesis: HypothesisExecutionBinding | None,
+) -> str | None:
+    payload = getattr(result.receipt_artifact, "payload", None)
+    if not isinstance(payload, Mapping):
+        return None
+    statistics = payload.get("statistics")
+    if not isinstance(statistics, Mapping):
+        return None
+    outcome = statistics.get("hypothesis_outcome")
+    if outcome not in _ADJUDICATING_OUTCOMES:
+        return None
+    if hypothesis is not None:
+        hypothesis_id = statistics.get("hypothesis_id")
+        if isinstance(hypothesis_id, str) and hypothesis_id != hypothesis.hypothesis_id:
+            return None
+    return str(outcome)
+
+
+def _event_field(event: Any, name: str) -> Any:
+    if isinstance(event, Mapping):
+        return event.get(name)
+    return getattr(event, name, None)
 
 
 def make_executor_llm_step_id(run_id: str, step: int) -> str:
@@ -1549,6 +1853,7 @@ def _require_matching_kind(
 
 __all__ = [
     "DefaultToolUsageMeter",
+    "FAILURE_FINGERPRINT_DISABLE_THRESHOLD",
     "JsonlProbeJournalHooks",
     "NativeToolProvider",
     "NullProbeJournalHooks",
@@ -1561,5 +1866,8 @@ __all__ = [
     "ProviderCallRejectedError",
     "ProviderOutcomeUncertainError",
     "ToolUsageMeter",
+    "ZERO_ROW_FILTER_FAMILY_THRESHOLD",
+    "canonical_error_fingerprint",
     "canonical_probe_fingerprint",
+    "zero_row_filter_family",
 ]

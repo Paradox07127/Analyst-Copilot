@@ -195,6 +195,40 @@ describe("E5 exploration run component", () => {
     expect(screen.getByText("No new information")).toBeInTheDocument();
   });
 
+  it("raises an alert when a run stopped because something went wrong", () => {
+    // A failed run used to render the same quiet grey line as a healthy one,
+    // so the seed-8 provider outage was indistinguishable from convergence.
+    const failed = runView({ status: "stopped", stopReason: "failed" });
+    const view = render(<ExplorationRunPanel run={failed} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Failed");
+    expect(alert).toHaveTextContent(/evidence.*kept|already committed/i);
+
+    view.rerender(
+      <ExplorationRunPanel
+        run={runView({ status: "stopped", stopReason: "state_witness_changed" })}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(/data changed/i);
+  });
+
+  it("flags an incomplete run without calling it an error", () => {
+    render(
+      <ExplorationRunPanel
+        run={runView({ status: "stopped", stopReason: "budget_exhausted" })}
+      />,
+    );
+    const notice = screen.getByRole("status", { name: /stop/i });
+    expect(notice).toHaveTextContent("Budget exhausted");
+    expect(notice).toHaveTextContent(/incomplete/i);
+  });
+
+  it("keeps a healthy stop quiet", () => {
+    render(<ExplorationRunPanel run={runView()} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("No new information")).toBeInTheDocument();
+  });
+
   it("shows the current hypothesis, committed evidence, base plus amended budget, cost, and proof", () => {
     render(<ExplorationRunPanel run={runView()} />);
     expect(screen.getByText("Revenue differs by region")).toBeInTheDocument();

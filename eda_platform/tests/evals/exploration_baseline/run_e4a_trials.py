@@ -247,12 +247,16 @@ class ScriptedProvider:
     )
 
     def __init__(self) -> None:
+        import threading
+
         self.calls = 0
-        self._last: LLMResultMetadata | None = None
+        self._calls_lock = threading.Lock()
+        self._local = threading.local()
 
     def _record(self) -> None:
-        self.calls += 1
-        self._last = LLMResultMetadata(
+        with self._calls_lock:
+            self.calls += 1
+        self._local.value = LLMResultMetadata(
             provider="scripted",
             model="scripted-v0",
             usage=LLMUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
@@ -261,7 +265,7 @@ class ScriptedProvider:
         )
 
     def last_usage(self) -> LLMResultMetadata | None:
-        return self._last
+        return getattr(self._local, "value", None)
 
     def structured(self, *, task: str, schema: type, payload: dict) -> Any:
         del task, payload
@@ -485,6 +489,7 @@ def run_trial(
     require_issuance: bool = True,
     max_batch_size: int | None = None,
     explore_until_exhausted: bool = False,
+    probe_concurrency: int = 1,
 ) -> dict[str, Any]:
     exploration_id = trial_run_id(tier, seed, budget_scale)
     run_root = shadow_run_root(workspace, exploration_id)
@@ -608,6 +613,7 @@ def run_trial(
         witness=CallableWitnessPort(lambda expected: expected == run_witness),
         usage_meter=DatasetToolUsageMeter([bundle.dataset]),
         stat_attempt_counts=lambda: _stat_attempt_counts(stat_registry),
+        probe_concurrency=probe_concurrency,
         coverage_target_met=(
             (lambda _state: False)
             if explore_until_exhausted
@@ -994,6 +1000,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--probe-concurrency",
+        type=int,
+        default=1,
+        help=(
+            "run a round's chosen probe sessions in this many worker threads "
+            "(speedup plan P4). 1 keeps the serial loop; raise only after "
+            "checking the provider's account-level rate limits."
+        ),
+    )
+    parser.add_argument(
         "--budget-scale",
         type=int,
         default=1,
@@ -1060,6 +1076,7 @@ def main() -> int:
                 require_issuance=args.require_issuance,
                 max_batch_size=args.max_batch_size,
                 explore_until_exhausted=args.explore_until_exhausted,
+                probe_concurrency=args.probe_concurrency,
             )
         except Exception as exc:  # noqa: BLE001 - one failure must not kill the sweep
             failures += 1

@@ -49,6 +49,7 @@ from eda_platform.agents.exploration.workflow import (
     JournaledCandidateGenerator,
     SupervisorProbeExecutorPort,
     artifact_receipt_decoder,
+    candidate_batch_digest,
     final_reduction_state_digest,
     scheduling_decision_digest,
 )
@@ -224,8 +225,12 @@ class _UsageMeter:
     def __init__(self, kind: str = "profile_slice") -> None:
         self.kind = kind
 
-    def project(self, **_kwargs: Any) -> ToolCallProjection:
-        return ToolCallProjection(kind=self.kind, rows_scanned=60, result_cells=20)
+    def project(self, **kwargs: Any) -> ToolCallProjection:
+        # tool_kind is bound into the journal's tool_call_started event and the
+        # issuer re-derives it from the receipt, so it must follow the call.
+        call = kwargs.get("call")
+        kind = getattr(call, "name", None) or self.kind
+        return ToolCallProjection(kind=kind, rows_scanned=60, result_cells=20)
 
     def success(self, *, projected: ToolCallProjection, **_kwargs: Any) -> ToolCallProjection:
         return projected
@@ -241,11 +246,13 @@ class _DataProvider(_Provider):
         *,
         tool_name: str,
         arguments: dict[str, Any],
+        extra_calls: tuple[tuple[str, dict[str, Any]], ...] = (),
     ) -> None:
         super().__init__()
         self.proposal = proposal
         self.tool_name = tool_name
         self.arguments = arguments
+        self.extra_calls = extra_calls
 
     def structured(
         self,
@@ -270,7 +277,10 @@ class _DataProvider(_Provider):
         tools: list[dict[str, Any]],
     ) -> LLMToolResponse:
         assert task == "exploration_probe_loop"
-        assert messages and [tool["name"] for tool in tools] == [self.tool_name]
+        assert messages and [tool["name"] for tool in tools] == [
+            self.tool_name,
+            *(name for name, _ in self.extra_calls),
+        ]
         self.tool_calls += 1
         self._record_usage()
         if self.tool_calls == 1:
@@ -280,7 +290,15 @@ class _DataProvider(_Provider):
                         call_id="provider-data-call-1",
                         name=self.tool_name,
                         arguments=self.arguments,
-                    )
+                    ),
+                    *(
+                        LLMToolCall(
+                            call_id=f"provider-data-call-{index + 2}",
+                            name=name,
+                            arguments=arguments,
+                        )
+                        for index, (name, arguments) in enumerate(self.extra_calls)
+                    ),
                 ],
                 finish_reason="tool_calls",
             )
@@ -876,6 +894,8 @@ _ROOT_EVIDENCE_PRIVATE = bytes.fromhex("31" * 32)
 
 def _build_evidence_issuer_root(
     tmp_path: Path,
+    *,
+    with_probe_only_tool: bool = False,
 ) -> tuple[Path, E4aEvidenceIssuerBindings]:
     proposal = HypothesisProposal(
         statement="Revenue differs by region.",
@@ -922,14 +942,23 @@ def _build_evidence_issuer_root(
     )
     assert data_context.stat_registry is not None
     stat_registry = data_context.stat_registry
-    tool = next(item for item in build_data_tools(data_context) if item.name == "run_stat_test")
+    built = {item.name: item for item in build_data_tools(data_context)}
+    tool = built["run_stat_test"]
+    # profile_slice has no durable result contract: as reconnaissance no insight
+    # cites, it must stay issuable (option B).
+    extra_calls: tuple[tuple[str, dict[str, Any]], ...] = (
+        (("profile_slice", {"dataset_id": "ds-1", "columns": ["revenue"]}),)
+        if with_probe_only_tool
+        else ()
+    )
+    tools = (tool, *(built[name] for name, _ in extra_calls))
     run_witness = data_state_witness_digest(
         [("ds-1", None, dataset.record.content_hash)]
     )
     policy = build_exploration_policy(
         tier="quick",
         dataset_scope=("ds-1",),
-        tool_capability_digest=exploration_tool_capability_digest((tool,)),
+        tool_capability_digest=exploration_tool_capability_digest(tools),
     )
     seed = candidate_seed(proposal, sequence_index=1)
 
@@ -983,8 +1012,9 @@ def _build_evidence_issuer_root(
                 "group_column": "region",
                 "value_column": "revenue",
             },
+            extra_calls=extra_calls,
         ),
-        tools=(tool,),
+        tools=tools,
         dataset_profiles=(),
         scheduler_policy=_scheduler_policy(),
         admission_context=admission,
@@ -1064,6 +1094,313 @@ def _build_evidence_issuer_root(
         checker.model_dump_json(indent=2), encoding="utf-8"
     )
     return root, issuer_bindings
+
+
+def _inject_trailing_unsettled_round(root: Path) -> str:
+    """Append a round that never settles, in the real interruption shape.
+
+    A budget latch mid-round (seed-6/seed-7) leaves ALL of: a generate
+    recovery body, persisted scheduling decisions, committed orphan receipts,
+    and a journal ahead of the last reduce. Probes only run on chosen
+    candidates, so a trailing round with receipts but no decisions cannot
+    occur — the fixture writes the full shape.
+    """
+    journal_path = root / "journal.jsonl"
+    lines = journal_path.read_text(encoding="utf-8").splitlines()
+    stopped = json.loads(lines[-1])
+    assert stopped["event_type"] == "exploration_stopped"
+    seq = int(stopped["seq"])
+    exploration_id = stopped["exploration_id"]
+    occurred = stopped["occurred_at"]
+    epoch = stopped["attempt_epoch"]
+    round_index = 1 + max(
+        (
+            int(json.loads(line)["round_index"])
+            for line in lines
+            if json.loads(line)["event_type"] == "round_started"
+        ),
+        default=-1,
+    )
+    orphan = build_receipt(
+        tool_call_id="call-orphan-trailing",
+        tool_name="profile_slice",
+        tool_version="1",
+        arguments={"dataset_id": "ds-1"},
+        raw_output={"rows": []},
+        artifact_ids=(),
+        result_count=1,
+        scope=ReceiptScope(
+            dataset_ids=("ds-1",), columns=("region",), scope_resolution="explicit"
+        ),
+        facts=(
+            ReceiptFact(
+                fact_id="rows_in_slice",
+                name="rows_in_slice",
+                value=60,
+                value_type="count",
+                support_type="direct",
+            ),
+        ),
+        method=ReceiptMethod(family="profile_slice"),
+        data_state_witness=json.loads(lines[0])["data_state_witness"],
+        created_at=occurred,
+    )
+    step_id = "step_" + "a" * 24
+    body = {
+        "logical_step_id": step_id,
+        "result": {
+            "content": "orphan slice",
+            "artifacts": [],
+            "receipt_artifact": Artifact(
+                id=make_artifact_id("receipt", orphan.model_dump(mode="json")),
+                type=ArtifactType.EVIDENCE_RECEIPT,
+                payload=orphan.model_dump(mode="json"),
+                created_at=occurred,
+                project_id="shadow-project",
+                session_id="xpl-evidence-root",
+            ).model_dump(mode="json"),
+        },
+        "usage": {"kind": "profile_slice", "rows_scanned": 60, "result_cells": 20},
+    }
+    (root / "tool-results" / f"{stable_hash(step_id, length=32)}.json").write_text(
+        json.dumps(body), encoding="utf-8"
+    )
+
+    def _event(kind: str, index: int, **fields: object) -> str:
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "seq": seq + index,
+                "exploration_id": exploration_id,
+                "attempt_epoch": epoch,
+                "occurred_at": occurred,
+                "event_type": kind,
+                **fields,
+            }
+        )
+
+    body_digest = durable_tool_result_digest(
+        JsonToolResultStore(root / "tool-results").load_required(step_id)
+    )
+    # The trailing round's generate completed and its admission decisions were
+    # persisted before the latch — exactly what seed 7 left behind.
+    trailing_proposal = HypothesisProposal(
+        statement="Does revenue trend upward over the half year?",
+        rationale="Trailing-round candidate the interruption stranded.",
+        expected_evidence="A time-series diagnostic on daily revenue.",
+        falsification_conditions=("No upward trend is detectable.",),
+        family=InsightFamily.EXPLORATORY,
+        method_family="analyze_time_series",
+        dataset_ids=("ds-1",),
+        columns=("region", "revenue"),
+        probe_kind="trend",
+        predicate=HypothesisPredicate(
+            metric="revenue", operator="has_spike", left_operand="region"
+        ),
+    )
+    trailing_seed = candidate_seed(trailing_proposal, sequence_index=90001)
+    trailing_batch = CandidateBatch((trailing_seed,))
+    generate_step = f"{exploration_id}:round:{round_index}:generate"
+    JsonSupervisorRecoveryStore(root / "phase-responses").remember(
+        generate_step, trailing_batch
+    )
+    raw_state = json.loads((root / "workflow-state.json").read_text(encoding="utf-8"))
+    cloned = json.loads(json.dumps(raw_state["decisions"][-1]))
+    cloned["hypothesis_id"] = trailing_seed.hypothesis_id
+    cloned["hypothesis_fingerprint"] = trailing_seed.hypothesis_fingerprint
+    cloned["family"] = trailing_seed.proposal.family.value
+    raw_state["decisions"].append(cloned)
+    (root / "workflow-state.json").write_text(json.dumps(raw_state), encoding="utf-8")
+    # Billing settled before the latch: the ledger carries the trailing
+    # generate's reservation/usage pair like any other call.
+    ledger_path = root / "llm-budget.jsonl"
+    ledger_lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    triple = [
+        json.loads(line)
+        for line in ledger_lines
+        if json.loads(line)["event_type"]
+        in ("budget_reserved", "llm_usage", "budget_settled")
+    ][:3]
+    assert [entry["event_type"] for entry in triple] == [
+        "budget_reserved",
+        "llm_usage",
+        "budget_settled",
+    ]
+    trailing_tokens = 0
+    trailing_cost = 0.0
+    for entry in triple:
+        entry = json.loads(json.dumps(entry))
+        entry["call_id"] = "physical-trailing-generate"
+        entry["summary"]["logical_call_id"] = "llm-trailing-generate"
+        if entry["event_type"] == "llm_usage":
+            trailing_tokens = entry["summary"].get("total_tokens", 0)
+            trailing_cost = entry["summary"].get("estimated_cost_usd", 0.0)
+        ledger_lines.append(json.dumps(entry))
+    ledger_path.write_text("\n".join(ledger_lines) + "\n", encoding="utf-8")
+    injected = [
+        _event("round_started", 0, round_index=round_index),
+        _event("llm_call_started", 1, call_id="llm-trailing-generate"),
+        _event(
+            "llm_call_completed",
+            2,
+            call_id="llm-trailing-generate",
+            step_id=generate_step,
+            response_digest=candidate_batch_digest(trailing_batch),
+        ),
+        _event(
+            "tool_call_started",
+            3,
+            logical_step_id=step_id,
+            tool_kind="profile_slice",
+            input_fingerprint="orphan-input",
+            projected_rows_scanned=60,
+            projected_result_cells=20,
+        ),
+        _event(
+            "receipt_prepared",
+            4,
+            logical_step_id=step_id,
+            receipt_id=orphan.receipt_id,
+            result_digest=body_digest,
+        ),
+        _event(
+            "receipt_committed",
+            5,
+            logical_step_id=step_id,
+            receipt_id=orphan.receipt_id,
+            result_digest=body_digest,
+            rows_scanned=60,
+            result_cells=20,
+        ),
+    ]
+    # A run that already latched "completed" cannot open another round, so the
+    # last settled round becomes an ordinary one and the stop becomes the
+    # budget latch that actually produces this shape.
+    head = list(lines[:-1])
+    for index in range(len(head) - 1, -1, -1):
+        event = json.loads(head[index])
+        if event["event_type"] == "round_settled":
+            event["terminal_reason"] = None
+            event["terminal_has_reduction"] = False
+            head[index] = json.dumps(event)
+            break
+    stopped["seq"] = seq + len(injected)
+    stopped["stop_reason"] = "budget_exhausted"
+    journal_path.write_text(
+        "\n".join([*head, *injected, json.dumps(stopped)]) + "\n",
+        encoding="utf-8",
+    )
+    journal = JsonlExplorationJournal(journal_path)
+    journal.write_snapshot(journal.rebuild())
+    projection_path = root / "projection.json"
+    projection = json.loads(projection_path.read_text(encoding="utf-8"))
+    projection["last_seq"] = seq + len(injected)
+    projection["stop_reason"] = "budget_exhausted"
+    projection_path.write_text(json.dumps(projection), encoding="utf-8")
+    checker_path = root / "e4a-checker-result.json"
+    checker_raw = json.loads(checker_path.read_text(encoding="utf-8"))
+    checker_raw["scores"]["spam_fixture_input_count"] = 2.0
+    checker_raw["scores"]["spam_fixture_canonical_groups"] = 2.0
+    checker_path.write_text(json.dumps(checker_raw, indent=2), encoding="utf-8")
+    report_path = root / "report.md"
+    report = report_path.read_text(encoding="utf-8")
+    old_cost = next(
+        line for line in report.splitlines() if line.startswith("- llm_cost_usd_used: ")
+    )
+    new_cost = "- llm_cost_usd_used: " + json.dumps(
+        float(old_cost.removeprefix("- llm_cost_usd_used: ")) + trailing_cost
+    )
+    for old_line, new_line in (
+        ("- stop_reason: completed", "- stop_reason: budget_exhausted"),
+        ("- successful_tool_calls: 1", "- successful_tool_calls: 2"),
+        ("- rows_scanned: 60", "- rows_scanned: 120"),
+        ("- result_cells: 20", "- result_cells: 40"),
+        ("- rounds_started: 1", f"- rounds_started: {round_index + 1}"),
+        ("- llm_requests_used: 3", "- llm_requests_used: 4"),
+        (
+            "- llm_total_tokens_used: 45",
+            f"- llm_total_tokens_used: {45 + trailing_tokens}",
+        ),
+        (old_cost, new_cost),
+    ):
+        assert old_line in report, old_line
+        report = report.replace(old_line, new_line)
+    report_path.write_text(report, encoding="utf-8")
+    return orphan.receipt_id
+
+
+def test_evidence_root_certifies_a_run_interrupted_mid_round(tmp_path: Path) -> None:
+    """P0-1/P0-2 regression: relaxing _verify_committed_receipts alone left four
+    other exact-set checks that reject the same interrupted root."""
+    root, bindings = _build_evidence_issuer_root(tmp_path)
+    orphan_id = _inject_trailing_unsettled_round(root)
+    workflow = JsonExplorationWorkflowStateStore(root / "workflow-state.json").load()
+    assert orphan_id not in workflow.committed_receipts
+
+    trial, _manifest = verify_e4a_evidence_root(
+        root,
+        issuer_bindings=bindings,
+        evidence_signing_key=_ROOT_EVIDENCE_PRIVATE,
+    )
+
+    # The orphan's spend is real and stays counted; its evidence is not certified.
+    assert trial.usage.tool_calls == 2
+    assert trial.usage.rows_scanned == 120
+
+
+def test_trailing_decisions_not_covered_by_the_batch_still_reject(
+    tmp_path: Path,
+) -> None:
+    """The seed-7 tolerance is not a blank cheque: a leftover decision that the
+    trailing round's recovered candidate batch cannot account for is forgery."""
+    root, bindings = _build_evidence_issuer_root(tmp_path)
+    _inject_trailing_unsettled_round(root)
+    state_path = root / "workflow-state.json"
+    raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+    smuggled = json.loads(json.dumps(raw_state["decisions"][-1]))
+    smuggled["hypothesis_id"] = "hyp_" + "d" * 24
+    smuggled["hypothesis_fingerprint"] = "d" * 32
+    raw_state["decisions"].append(smuggled)
+    state_path.write_text(json.dumps(raw_state), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="do not exactly cover the candidate batch"):
+        verify_e4a_evidence_root(
+            root,
+            issuer_bindings=bindings,
+            evidence_signing_key=_ROOT_EVIDENCE_PRIVATE,
+        )
+
+
+def test_evidence_root_certifies_probe_only_reconnaissance_without_a_contract(
+    tmp_path: Path,
+) -> None:
+    """Option B (user decision 2026-08-03): the tool allowlist has 11 entries and
+    data_tool_result_contracts covers 3, so any real run using profile_slice was
+    unissuable. Only receipts an insight rests on are release evidence."""
+    root, bindings = _build_evidence_issuer_root(tmp_path, with_probe_only_tool=True)
+    workflow = JsonExplorationWorkflowStateStore(root / "workflow-state.json").load()
+    cited = {
+        receipt_id
+        for insight in workflow.insights.values()
+        for receipt_id in (
+            *insight.supporting_receipt_ids,
+            *insight.contradicting_receipt_ids,
+        )
+    }
+    by_tool = {
+        receipt.tool_name: receipt for receipt in workflow.committed_receipts.values()
+    }
+    assert by_tool["run_stat_test"].receipt_id in cited
+    # Committed, gated, in the claim bundle — but adjudicated by nothing, so it
+    # is reconnaissance rather than release evidence.
+    assert by_tool["profile_slice"].receipt_id not in cited
+
+    trial, _manifest = verify_e4a_evidence_root(
+        root,
+        issuer_bindings=bindings,
+        evidence_signing_key=_ROOT_EVIDENCE_PRIVATE,
+    )
+    assert trial.usage.tool_calls == 2
 
 
 def _rewrite_first_workflow_receipt(root: Path, mutation: str) -> None:
@@ -2544,6 +2881,88 @@ def test_a_probe_that_uses_up_its_step_budget_is_not_an_invariant_violation(
     batch = outcome.payload
     assert isinstance(batch, ExecutedProbeBatch)
     assert batch.receipts == ()
+
+
+def test_concurrent_probe_sessions_overlap_and_keep_result_order(
+    tmp_path: Path,
+) -> None:
+    """Speedup plan P4: probe_concurrency > 1 runs a round's sessions in worker
+    threads. Sessions must genuinely overlap, and executions must come back in
+    selection order regardless of completion order."""
+    import threading
+    import time as _time
+
+    class _SlowExecutor:
+        def __init__(self) -> None:
+            self.guard = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def run(self, **kwargs: Any) -> Any:
+            with self.guard:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            # The first-submitted session is the slowest: order must still hold.
+            run_id = kwargs["run_id"]
+            _time.sleep(0.2 if "hyp-a" in run_id else 0.05)
+            with self.guard:
+                self.active -= 1
+            return ProbeExecutionResult(status="completed", answer=run_id)
+
+    journal = JsonlExplorationJournal(tmp_path / "xpl" / "journal.jsonl")
+    journal.initialize(
+        exploration_id="xpl-conc",
+        policy=build_exploration_policy(
+            tier="standard",
+            dataset_scope=("ds-1",),
+            tool_capability_digest="tools-v1",
+        ),
+        code_fingerprint="code-v1",
+        data_state_witness=WITNESS,
+    )
+    slow = _SlowExecutor()
+    port = SupervisorProbeExecutorPort(
+        executor=cast(Any, slow),
+        journal=journal,
+        state=ExplorationWorkflowState(),
+        receipt_decoder=artifact_receipt_decoder,
+        probe_concurrency=3,
+    )
+    seeds = [
+        candidate_seed(
+            _proposal_with_statement(f"Question {name}?"), sequence_index=index + 1
+        )
+        for index, name in enumerate(("hyp-a", "hyp-b", "hyp-c"))
+    ]
+    items = tuple(
+        FrontierItem(f"hyp-{name}", 1.0, payload=seed)
+        for name, seed in zip(("a", "b", "c"), seeds, strict=True)
+    )
+    context = PhaseContext(
+        exploration_id="xpl-conc",
+        round_index=0,
+        phase=SupervisorPhase.EXECUTE_PROBES,
+        data_state_witness=WITNESS,
+        soft_countdown_context="",
+        completed_step_ids=frozenset(),
+    )
+
+    started = _time.perf_counter()
+    outcome = port.execute(context, ProbeSelection(items))
+    elapsed = _time.perf_counter() - started
+
+    batch = outcome.payload
+    assert isinstance(batch, ExecutedProbeBatch)
+    assert slow.max_active >= 2, "probe sessions never overlapped"
+    assert elapsed < 0.3, f"sessions ran serially: {elapsed:.3f}s"
+    answers = [execution.answer for execution in batch.executions]
+    assert answers == sorted(answers, key=lambda a: str(a))  # selection order
+    assert [seed.hypothesis_id in str(a) for seed, a in zip(seeds, answers, strict=True)]
+
+
+def _proposal_with_statement(statement: str) -> HypothesisProposal:
+    proposal = _proposal()
+    return proposal.model_copy(update={"statement": statement})
 
 
 def test_a_failed_probe_is_still_an_invariant_violation(tmp_path: Path) -> None:

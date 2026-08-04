@@ -33,8 +33,9 @@ _XPL = "xpl-interrupted"
 _WITNESS = "witness-interruption-v1"
 
 
-def _receipt(name: str) -> EvidenceReceipt:
+def _receipt(name: str, execution: object | None = None) -> EvidenceReceipt:
     return build_receipt(
+        execution=execution,
         tool_call_id=f"call-{name}",
         tool_name="profile_slice",
         tool_version="1",
@@ -59,6 +60,21 @@ def _receipt(name: str) -> EvidenceReceipt:
         method=ReceiptMethod(family="profile_slice"),
         data_state_witness=_WITNESS,
         created_at="2026-08-03T00:00:00Z",
+    )
+
+
+def _bound_receipt(name: str, hypothesis_id: str) -> EvidenceReceipt:
+    """A receipt carrying the executor identity the issuer replays from."""
+    from eda_platform.schemas.receipts import ReceiptExecution
+
+    return _receipt(
+        name,
+        execution=ReceiptExecution(
+            run_id=f"{_XPL}:round:0:hypothesis:{hypothesis_id}:execute_probes",
+            provider_call_id=f"call-{name}",
+            logical_step_id="step_" + name.ljust(24, "x")[:24],
+            sequence_index=1,
+        ),
     )
 
 
@@ -167,3 +183,122 @@ def test_orphans_without_any_settled_round_are_tolerated() -> None:
         _committed(3, b),
     ]
     _verify_committed_receipts(_workflow(()), _terminal((a, b)), events)
+
+
+# --- concurrent probe sessions interleave their commits ----------------------
+
+
+def test_gate_verdicts_match_by_content_not_by_commit_order() -> None:
+    """Concurrency regression (gpt-5.6-luna seed 202): the issuer paired gate
+    verdicts with hypotheses positionally, by first-receipt-commit order. The
+    reducer gates in selection order, so interleaved commits shifted every
+    pairing and a healthy root was rejected as forged."""
+    from eda_platform.agents.exploration.candidates import candidate_seed
+    from eda_platform.drivers.exploration_evidence_issuer import (
+        _canonical_claim_bundle,
+        _rebuild_canonical_bundles,
+    )
+    from eda_platform.schemas.exploration import GateVerdictEvent
+    from eda_platform.schemas.hypotheses import HypothesisPredicate, HypothesisProposal
+    from eda_platform.schemas.exploration import InsightFamily
+
+    def _proposal(name: str) -> HypothesisProposal:
+        return HypothesisProposal(
+            statement=f"Does {name} matter?",
+            rationale="Concurrency ordering fixture.",
+            expected_evidence="A slice profile.",
+            falsification_conditions=("It does not.",),
+            family=InsightFamily.DIAGNOSTIC,
+            method_family="profile_slice",
+            dataset_ids=("ds-1",),
+            columns=(name,),
+            probe_kind="profile",
+            predicate=HypothesisPredicate(metric=name, operator="exists"),
+        )
+
+    seeds = {
+        name: candidate_seed(_proposal(name), sequence_index=index + 1)
+        for index, name in enumerate(("alpha", "beta"))
+    }
+    receipts = {
+        name: _bound_receipt(name, seed.hypothesis_id)
+        for name, seed in seeds.items()
+    }
+
+    workflow = ExplorationWorkflowState()
+    for receipt in receipts.values():
+        workflow.committed_receipts[receipt.receipt_id] = receipt
+    candidates_by_round = {0: {seed.hypothesis_id: seed for seed in seeds.values()}}
+    bundles = {
+        name: _canonical_claim_bundle(seeds[name], (receipts[name],))
+        for name in seeds
+    }
+
+    # alpha commits first, but the reducer gated beta first.
+    events: list[ExplorationLoopEvent] = [
+        RoundStartedEvent(seq=1, exploration_id=_XPL, round_index=0),
+        _committed(2, receipts["alpha"]),
+        _committed(3, receipts["beta"]),
+        GateVerdictEvent(
+            seq=4,
+            exploration_id=_XPL,
+            claim_bundle_id=bundles["beta"].claim_bundle_id,
+            verdict="passed",
+        ),
+        GateVerdictEvent(
+            seq=5,
+            exploration_id=_XPL,
+            claim_bundle_id=bundles["alpha"].claim_bundle_id,
+            verdict="passed",
+        ),
+        RoundSettledEvent(seq=6, exploration_id=_XPL, round_index=0, progress=True),
+    ]
+
+    rebuilt = _rebuild_canonical_bundles(
+        events, workflow, candidates_by_round=candidates_by_round
+    )
+    assert set(rebuilt) == {
+        bundles["alpha"].claim_bundle_id,
+        bundles["beta"].claim_bundle_id,
+    }
+
+
+def test_a_gate_id_no_group_can_recompute_still_raises() -> None:
+    """Control: content matching must not become 'accept any id'."""
+    from eda_platform.agents.exploration.candidates import candidate_seed
+    from eda_platform.drivers.exploration_evidence_issuer import _rebuild_canonical_bundles
+    from eda_platform.schemas.exploration import GateVerdictEvent, InsightFamily
+    from eda_platform.schemas.hypotheses import HypothesisPredicate, HypothesisProposal
+
+    seed = candidate_seed(
+        HypothesisProposal(
+            statement="Does alpha matter?",
+            rationale="Control fixture.",
+            expected_evidence="A slice profile.",
+            falsification_conditions=("It does not.",),
+            family=InsightFamily.DIAGNOSTIC,
+            method_family="profile_slice",
+            dataset_ids=("ds-1",),
+            columns=("alpha",),
+            probe_kind="profile",
+            predicate=HypothesisPredicate(metric="alpha", operator="exists"),
+        ),
+        sequence_index=1,
+    )
+    bound = _bound_receipt("alpha", seed.hypothesis_id)
+    workflow = ExplorationWorkflowState()
+    workflow.committed_receipts[bound.receipt_id] = bound
+    events: list[ExplorationLoopEvent] = [
+        RoundStartedEvent(seq=1, exploration_id=_XPL, round_index=0),
+        _committed(2, bound),
+        GateVerdictEvent(
+            seq=3, exploration_id=_XPL, claim_bundle_id="cb_" + "0" * 24, verdict="passed"
+        ),
+        RoundSettledEvent(seq=4, exploration_id=_XPL, round_index=0, progress=True),
+    ]
+    with pytest.raises(ValueError, match="differs from canonical reducer bundle"):
+        _rebuild_canonical_bundles(
+            events,
+            workflow,
+            candidates_by_round={0: {seed.hypothesis_id: seed}},
+        )

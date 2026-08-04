@@ -231,3 +231,49 @@ export function stopReasonLabel(reason: ExplorationStopReason | null): string {
   };
   return labels[reason];
 }
+
+/** How much attention a terminal stop deserves.
+ *
+ * `problem` means the run did not finish its own way and the reader has
+ * something to act on; `incomplete` means the results are valid but partial.
+ * Rendering every stop identically hid a provider outage behind the same grey
+ * line as a converged run (seed 8, 2026-08-03). */
+export type StopSeverity = "problem" | "incomplete" | "healthy";
+
+export function stopSeverity(reason: ExplorationStopReason | null): StopSeverity {
+  if (reason === null) return "healthy";
+  const severities: Record<ExplorationStopReason, StopSeverity> = {
+    completed: "healthy",
+    no_new_information: "healthy",
+    // The operator asked for it; nothing to act on.
+    cancelled: "healthy",
+    budget_exhausted: "incomplete",
+    failed: "problem",
+    state_witness_changed: "problem",
+  };
+  return severities[reason];
+}
+
+/** Plain-language consequence, not a restatement of the code. */
+export function stopReasonGuidance(
+  reason: ExplorationStopReason | null,
+): string | null {
+  if (reason === null) return null;
+  const guidance: Record<ExplorationStopReason, string | null> = {
+    completed: null,
+    no_new_information: null,
+    cancelled: "You stopped this run. Its committed evidence is kept.",
+    budget_exhausted:
+      "A budget cap was reached, so the exploration is incomplete: what it did " +
+      "prove still holds, but unexplored questions remain.",
+    failed:
+      "The run hit a fault it could not continue past. Evidence already " +
+      "committed is kept and verifiable; re-running resumes from the journal " +
+      "rather than starting over.",
+    state_witness_changed:
+      "The underlying data changed while the run was in flight, so these " +
+      "results describe the earlier snapshot. Re-run against the current data " +
+      "before acting on them.",
+  };
+  return guidance[reason];
+}

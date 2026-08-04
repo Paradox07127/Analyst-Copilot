@@ -277,16 +277,25 @@ def test_unrestored_fields_raise_instead_of_defaulting(tmp_path: Path) -> None:
         state.require_current_round_index()
 
 
-def test_pending_operations_are_mutually_exclusive(tmp_path: Path) -> None:
+def test_pending_operations_block_round_transitions_but_not_new_slots(
+    tmp_path: Path,
+) -> None:
+    """Multi-slot machine: concurrent starts are legal, duplicates are not,
+    and round settlement still requires full quiescence."""
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new("llm_call_started", call_id="call-0")
+    state = journal.append_new(
+        "tool_call_started", logical_step_id="step-1", input_fingerprint="fp-1"
+    )
+    assert state.pending_call_ids == ("call-0",)
+    assert set(state.pending_tool_steps) == {"step-1"}
+    with pytest.raises(EventTransitionError, match="already pending"):
+        journal.append_new("llm_call_started", call_id="call-0")
     with pytest.raises(EventTransitionError, match="already pending"):
         journal.append_new(
             "tool_call_started", logical_step_id="step-1", input_fingerprint="fp-1"
         )
-    with pytest.raises(EventTransitionError, match="already pending"):
-        journal.append_new("llm_call_started", call_id="call-1")
     with pytest.raises(EventTransitionError, match="pending"):
         journal.append_new("round_settled", round_index=0, progress=False)
 

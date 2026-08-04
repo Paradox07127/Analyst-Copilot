@@ -294,6 +294,25 @@ ExplorationLoopEvent = Annotated[
 ]
 
 
+class PendingToolStep(BaseModel):
+    """One in-flight tool slot, keyed by its logical_step_id in the loop state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_kind: str | None = None
+    input_fingerprint: str | None = None
+    projected_rows_scanned: int = Field(ge=0, default=0)
+    projected_result_cells: int = Field(ge=0, default=0)
+    prepared_receipt_id: str | None = None
+    prepared_result_digest: str | None = None
+
+    @model_validator(mode="after")
+    def _prepared_fields_are_consistent(self) -> PendingToolStep:
+        if self.prepared_result_digest is not None and self.prepared_receipt_id is None:
+            raise ValueError("a prepared result digest requires a prepared receipt.")
+        return self
+
+
 class ExplorationLoopState(BaseModel):
     """Rebuildable state derived exclusively from a complete journal prefix."""
 
@@ -342,6 +361,16 @@ class ExplorationLoopState(BaseModel):
     remaining_tool_call_budget: int = Field(ge=0)
     remaining_round_budget: int = Field(ge=0)
 
+    # Multi-slot pending state: any number of tool steps and LLM calls may be
+    # in flight at once (parallel probe sessions, plan §3 P1/P2).
+    pending_tool_steps: dict[str, PendingToolStep] = Field(default_factory=dict)
+    pending_call_ids: tuple[str, ...] = ()
+    # call_id -> bound logical step (only calls that declared a step_id).
+    pending_call_steps: dict[str, str] = Field(default_factory=dict)
+
+    # Legacy single-slot fields. They stay in the schema so old snapshots load,
+    # but the reducer keeps them at their defaults forever; a non-default value
+    # is migrated into the multi-slot fields by _migrate_legacy_pending.
     pending_call_id: str | None = None
     pending_call_step_id: str | None = None
     pending_logical_step_id: str | None = None
@@ -367,27 +396,64 @@ class ExplorationLoopState(BaseModel):
 
     last_seq: int = Field(ge=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_pending(cls, data: object) -> object:
+        """Map an old single-slot snapshot (scalar pending fields) into one
+        multi-slot entry each; new states always carry the scalars as None."""
+        if not isinstance(data, dict):
+            return data
+        legacy_call = data.get("pending_call_id")
+        legacy_step = data.get("pending_logical_step_id")
+        if legacy_call is None and legacy_step is None:
+            return data
+        data = dict(data)
+        if legacy_call is not None:
+            call_ids = tuple(data.get("pending_call_ids") or ())
+            if legacy_call not in call_ids:
+                data["pending_call_ids"] = (*call_ids, legacy_call)
+                bound_step = data.get("pending_call_step_id")
+                if bound_step is not None:
+                    call_steps = dict(data.get("pending_call_steps") or {})
+                    call_steps[legacy_call] = bound_step
+                    data["pending_call_steps"] = call_steps
+            data["pending_call_id"] = None
+            data["pending_call_step_id"] = None
+        if legacy_step is not None:
+            slots = dict(data.get("pending_tool_steps") or {})
+            if legacy_step not in slots:
+                slots[legacy_step] = {
+                    "tool_kind": data.get("pending_tool_kind"),
+                    "input_fingerprint": data.get("pending_tool_input_fingerprint"),
+                    "projected_rows_scanned": data.get("pending_projected_rows_scanned")
+                    or 0,
+                    "projected_result_cells": data.get("pending_projected_result_cells")
+                    or 0,
+                    "prepared_receipt_id": data.get("prepared_receipt_id"),
+                    "prepared_result_digest": data.get("prepared_result_digest"),
+                }
+                data["pending_tool_steps"] = slots
+            data["pending_logical_step_id"] = None
+            data["pending_tool_kind"] = None
+            data["pending_tool_input_fingerprint"] = None
+            data["pending_projected_rows_scanned"] = 0
+            data["pending_projected_result_cells"] = 0
+            data["prepared_receipt_id"] = None
+            data["prepared_result_digest"] = None
+        return data
+
     @model_validator(mode="after")
     def _derived_values_are_consistent(self) -> ExplorationLoopState:
         if len(self.completed_step_ids) != len(set(self.completed_step_ids)):
             raise ValueError("completed_step_ids must be unique.")
-        if self.pending_call_id is not None and self.pending_logical_step_id is not None:
-            raise ValueError("a call and a tool step cannot both be pending.")
+        if len(self.pending_call_ids) != len(set(self.pending_call_ids)):
+            raise ValueError("pending_call_ids must be unique.")
+        if not set(self.pending_call_steps) <= set(self.pending_call_ids):
+            raise ValueError("pending_call_steps keys must be pending call ids.")
+        if set(self.pending_tool_steps) & set(self.completed_step_ids):
+            raise ValueError("a pending tool step cannot already be completed.")
         if self.pending_call_step_id is not None and self.pending_call_id is None:
             raise ValueError("a pending call step requires a pending call.")
-        if self.prepared_receipt_id is not None and self.pending_logical_step_id is None:
-            raise ValueError("a prepared receipt requires a pending tool step.")
-        if self.prepared_result_digest is not None and self.prepared_receipt_id is None:
-            raise ValueError("a prepared result digest requires a prepared receipt.")
-        if self.pending_logical_step_id is None and any(
-            (
-                self.pending_tool_kind is not None,
-                self.pending_tool_input_fingerprint is not None,
-                self.pending_projected_rows_scanned,
-                self.pending_projected_result_cells,
-            )
-        ):
-            raise ValueError("pending tool metadata requires a pending tool step.")
         if len(self.completed_probe_fingerprints) != len(
             set(self.completed_probe_fingerprints)
         ):

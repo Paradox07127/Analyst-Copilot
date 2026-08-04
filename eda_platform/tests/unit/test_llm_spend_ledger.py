@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
+import threading
 from threading import Lock
 from typing import Any, cast
 
@@ -111,19 +112,25 @@ class _PassthroughCancellation:
 
 
 class _ConcurrentUsageLLM(_FakeLLM):
+    """Thread-local last-usage, like the real adapters since speedup-plan P4."""
+
     def __init__(self) -> None:
         super().__init__()
         self._guard = Lock()
+        self._local = threading.local()
         self.active = 0
         self.max_active = 0
+
+    def last_usage(self) -> LLMResultMetadata | None:
+        return getattr(self._local, "value", None)
 
     def text(self, *, task: str, payload: dict) -> str:
         with self._guard:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
-        time.sleep(0.02)
+        time.sleep(0.05)
         tokens = 10 if task == "ten" else 20
-        self._last = LLMResultMetadata(
+        self._local.value = LLMResultMetadata(
             provider="fake",
             model="fake-1",
             usage=LLMUsage(
@@ -286,7 +293,10 @@ def test_run_budget_rejects_before_a_second_provider_call() -> None:
     assert events[3].call_id != events[0].call_id
 
 
-def test_ledger_serializes_mutable_last_usage_across_concurrent_calls() -> None:
+def test_ledger_runs_concurrent_calls_and_bills_each_its_own_usage() -> None:
+    """Contract flipped by speedup-plan P4: the ledger no longer serializes
+    provider calls (adapter last-usage is thread-local), and each settlement
+    must still carry its own call's tokens."""
     events: list[TraceEvent] = []
     inner = _ConcurrentUsageLLM()
     client = LedgerLLMClient(
@@ -305,7 +315,7 @@ def test_ledger_serializes_mutable_last_usage_across_concurrent_calls() -> None:
         )
 
     assert results == ["ten", "twenty"]
-    assert inner.max_active == 1
+    assert inner.max_active == 2, "provider calls no longer overlap"
     usage = [event for event in events if event.event_type == LLM_USAGE_EVENT]
     assert sorted(event.summary["total_tokens"] for event in usage) == [10, 20]
 

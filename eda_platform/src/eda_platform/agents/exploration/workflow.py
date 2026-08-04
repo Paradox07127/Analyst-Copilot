@@ -8,6 +8,8 @@ doubles; the driver supplies only environment-specific LLM/tools/storage.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
@@ -66,7 +68,10 @@ from eda_platform.core.exploration_budget import ToolCallLedger
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
 from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.kernel import SessionCancelled
-from eda_platform.core.llm import MalformedProviderResponseError
+from eda_platform.core.llm import (
+    MalformedProviderResponseError,
+    ProviderUnavailableError,
+)
 from eda_platform.core.llm_ledger import logical_llm_call
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.claims import Claim, ClaimBundle, ClaimScope
@@ -234,6 +239,16 @@ class JournaledCandidateGenerator:
                         call_id=call_id,
                         error=error,
                     )
+            except ProviderUnavailableError as exc:
+                # The provider stated it never processed the request, so the
+                # logical call is rejected, not uncertain: nothing was
+                # generated and no reservation is owed.
+                self.journal.append_new(
+                    "llm_call_rejected",
+                    call_id=call_id,
+                    error=_safe_error(exc),
+                )
+                raise
             except Exception as exc:
                 self.journal.append_new(
                     "llm_call_uncertain",
@@ -361,10 +376,13 @@ def compose_exploration_workflow(
     goal: str | None = None,
     dataset_columns: Mapping[str, Iterable[str]] | None = None,
     supported_method_families: Iterable[str] = (),
+    probe_concurrency: int = 1,
 ) -> ExplorationWorkflowComponents:
     """Wire real E4a control components; only provider/tools/data signals are injected."""
     if not tools:
         raise ValueError("exploration workflow requires at least one read-only tool.")
+    if probe_concurrency < 1:
+        raise ValueError("probe_concurrency must be at least 1.")
     state = initial_state or ExplorationWorkflowState()
     probe_executor = ProbeExecutor(
         provider,
@@ -379,6 +397,9 @@ def compose_exploration_workflow(
         tool_result_store=tool_result_store,
         max_steps=max_probe_steps,
         max_tool_calls=max_probe_tool_calls,
+        # W1 resume: the breaker counter is rebuilt from the journal's prior
+        # failure events so a restart cannot forget a disabled tool.
+        prior_failure_events=tuple(journal.events()),
     )
     return ExplorationWorkflowComponents(
         state=state,
@@ -409,6 +430,7 @@ def compose_exploration_workflow(
             state=state,
             receipt_decoder=artifact_receipt_decoder,
             persist_state=persist_state,
+            probe_concurrency=probe_concurrency,
         ),
         validator=PassThroughValidatorPort(),
         reducer=ClaimGateReducerPort(
@@ -532,72 +554,128 @@ class SupervisorProbeExecutorPort:
     state: ExplorationWorkflowState
     receipt_decoder: Callable[[object], EvidenceReceipt | None]
     persist_state: Callable[[ExplorationWorkflowState], None] = lambda _state: None
+    # Speedup plan P4: probe sessions have no data dependency on each other, so
+    # a round's chosen batch may run concurrently. 1 = today's serial loop.
+    probe_concurrency: int = 1
 
-    def execute(self, context: PhaseContext, selection: ProbeSelection) -> ProbeOutcome:
-        executions: list[ProbeExecutionResult] = []
-        receipts: list[EvidenceReceipt] = []
-        bindings: list[tuple[str, str]] = []
+    def _run_probe(
+        self,
+        context: PhaseContext,
+        candidate: CandidateSeed,
+        journal_state: Any,
+        seen_probe_fingerprints: set[str],
+    ) -> ProbeExecutionResult:
+        execution_run_id = (
+            f"{context.exploration_id}:round:{context.round_index}:"
+            f"hypothesis:{candidate.hypothesis_id}:execute_probes"
+        )
+        try:
+            execution = self.executor.run(
+                phase="execute_probes",
+                system_prompt=(
+                    "Execute only this falsifiable probe. Return a concise "
+                    "summary after tools; claims are built and gated separately. "
+                    + context.soft_countdown_context
+                ),
+                user_message=_candidate_prompt(candidate),
+                run_id=execution_run_id,
+                seen_probe_fingerprints=seen_probe_fingerprints,
+                failure_history=journal_state.failure_history,
+                completed_step_ids=set(journal_state.completed_step_ids),
+                completed_response_digests=_completed_response_digests(self.journal),
+                blocked_llm_call_ids=set(journal_state.uncertain_call_ids),
+                hypothesis=HypothesisExecutionBinding(
+                    hypothesis_id=candidate.hypothesis_id,
+                    predicate=candidate.proposal.predicate,
+                    method_family=candidate.proposal.method_family,
+                    dataset_ids=candidate.proposal.dataset_ids,
+                    columns=candidate.proposal.columns,
+                ),
+            )
+        except BudgetExceeded as exc:
+            raise SupervisorBudgetExhausted(str(exc)) from exc
+        except (SessionCancelled, CancellationError) as exc:
+            # Cancellation is a decision, not a defect. Escaping as a
+            # generic exception settled the run as `failed`.
+            raise SupervisorCancelled(str(exc) or "probe cancelled") from exc
+        # `limit_reached` means this probe used up its own conversation
+        # step/tool budget — an expected outcome for an eager model, not a
+        # control-plane fault. Its committed receipts are already journaled
+        # and valid, so the round proceeds with the evidence it did gather.
+        # `failed` with a probe-local code (truncation, content filter, an
+        # unresponsive model) is the same shape. Every other `failed` is an
+        # integrity fault and stays terminal.
+        if not _probe_outcome_is_usable(execution):
+            raise SupervisorInvariantError(
+                f"probe execution ended as {execution.status}: {execution.error or ''}"
+            )
+        return execution
+
+    def _candidates(self, selection: ProbeSelection) -> list[CandidateSeed]:
+        candidates: list[CandidateSeed] = []
         for item in selection.items:
             if not isinstance(item.payload, CandidateSeed):
                 raise SupervisorInvariantError("probe selection contains a non-candidate.")
-            candidate = item.payload
-            journal_state = self.journal.rebuild()
-            if journal_state is None:
-                raise SupervisorInvariantError("probe executor requires an initialized journal.")
+            candidates.append(item.payload)
+        return candidates
+
+    def _execute_concurrent(
+        self, context: PhaseContext, candidates: list[CandidateSeed]
+    ) -> list[ProbeExecutionResult]:
+        """One pre-batch snapshot feeds every session; receipts and budget stay
+        correct through the journal's multi-slot state and the thread-safe
+        ledger. Advisory context (failure history, fingerprints) is shared —
+        batch siblings may not see each other's very latest failures."""
+        journal_state = self.journal.rebuild()
+        if journal_state is None:
+            raise SupervisorInvariantError("probe executor requires an initialized journal.")
+        shared_seen = set(journal_state.completed_probe_fingerprints)
+        with ThreadPoolExecutor(max_workers=self.probe_concurrency) as pool:
+            return list(
+                pool.map(
+                    lambda candidate: self._run_probe(
+                        context, candidate, journal_state, shared_seen
+                    ),
+                    candidates,
+                )
+            )
+
+    def execute(self, context: PhaseContext, selection: ProbeSelection) -> ProbeOutcome:
+        candidates = self._candidates(selection)
+        executions: list[ProbeExecutionResult] = []
+        receipts: list[EvidenceReceipt] = []
+        bindings: list[tuple[str, str]] = []
+        if self.probe_concurrency > 1 and len(candidates) > 1:
+            executions = self._execute_concurrent(context, candidates)
+        else:
+            for candidate in candidates:
+                journal_state = self.journal.rebuild()
+                if journal_state is None:
+                    raise SupervisorInvariantError(
+                        "probe executor requires an initialized journal."
+                    )
+                executions.append(
+                    self._run_probe(
+                        context,
+                        candidate,
+                        journal_state,
+                        set(journal_state.completed_probe_fingerprints),
+                    )
+                )
+        committed_state = self.journal.rebuild()
+        if committed_state is None:  # pragma: no cover - checked above
+            raise SupervisorInvariantError("exploration journal disappeared after probes.")
+        committed_ids = set(committed_state.step_receipt_refs.values())
+        for candidate, execution in zip(candidates, executions, strict=True):
             execution_run_id = (
                 f"{context.exploration_id}:round:{context.round_index}:"
                 f"hypothesis:{candidate.hypothesis_id}:execute_probes"
             )
-            try:
-                execution = self.executor.run(
-                    phase="execute_probes",
-                    system_prompt=(
-                        "Execute only this falsifiable probe. Return a concise "
-                        "summary after tools; claims are built and gated separately. "
-                        + context.soft_countdown_context
-                    ),
-                    user_message=_candidate_prompt(candidate),
-                    run_id=execution_run_id,
-                    seen_probe_fingerprints=set(journal_state.completed_probe_fingerprints),
-                    failure_history=journal_state.failure_history,
-                    completed_step_ids=set(journal_state.completed_step_ids),
-                    completed_response_digests=_completed_response_digests(self.journal),
-                    blocked_llm_call_ids=set(journal_state.uncertain_call_ids),
-                    hypothesis=HypothesisExecutionBinding(
-                        hypothesis_id=candidate.hypothesis_id,
-                        predicate=candidate.proposal.predicate,
-                        method_family=candidate.proposal.method_family,
-                        dataset_ids=candidate.proposal.dataset_ids,
-                        columns=candidate.proposal.columns,
-                    ),
-                )
-            except BudgetExceeded as exc:
-                raise SupervisorBudgetExhausted(str(exc)) from exc
-            except (SessionCancelled, CancellationError) as exc:
-                # Cancellation is a decision, not a defect. Escaping as a
-                # generic exception settled the run as `failed`.
-                raise SupervisorCancelled(str(exc) or "probe cancelled") from exc
-            # `limit_reached` means this probe used up its own conversation
-            # step/tool budget — an expected outcome for an eager model, not a
-            # control-plane fault. Its committed receipts are already journaled
-            # and valid, so the round proceeds with the evidence it did gather.
-            # `failed` with a probe-local code (truncation, content filter, an
-            # unresponsive model) is the same shape. Every other `failed` is an
-            # integrity fault and stays terminal.
-            if not _probe_outcome_is_usable(execution):
-                raise SupervisorInvariantError(
-                    f"probe execution ended as {execution.status}: {execution.error or ''}"
-                )
-            executions.append(execution)
             execution_receipts = tuple(
                 receipt
                 for artifact in execution.artifacts
                 if (receipt := self.receipt_decoder(artifact)) is not None
             )
-            committed_state = self.journal.rebuild()
-            if committed_state is None:  # pragma: no cover - checked above
-                raise SupervisorInvariantError("exploration journal disappeared after probes.")
-            committed_ids = set(committed_state.step_receipt_refs.values())
             for receipt in execution_receipts:
                 if receipt.receipt_id not in committed_ids:
                     raise SupervisorInvariantError(

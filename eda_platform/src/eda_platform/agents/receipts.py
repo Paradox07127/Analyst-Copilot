@@ -297,6 +297,12 @@ def _predicate_outcome(
         return "supports" if exists == (operator == "exists") else "contradicts"
 
     value = _predicate_numeric_value(facts, predicate.metric)
+    if value is None:
+        # Metric-name resolution (seed-7): the model's predicates name derived
+        # metrics ("pearson_correlation", "r2") while facts are namespaced by
+        # the tool ("pair0.coefficient", "metric.r2"). Resolve the honest
+        # aliases; anything needing computation stays unadjudicated.
+        value = _resolve_named_metric(receipt, predicate, facts)
     threshold = predicate.threshold
     if value is None or threshold is None:
         return None
@@ -308,6 +314,53 @@ def _predicate_outcome(
         return "supports" if value == threshold else "contradicts"
     if operator == "not_equal_to":
         return "supports" if value != threshold else "contradicts"
+    return None
+
+
+_CORRELATION_METRIC_NAMES = frozenset(
+    {
+        "pearson_correlation",
+        "spearman_correlation",
+        "correlation",
+        "correlation_coefficient",
+        "coefficient",
+    }
+)
+_R2_METRIC_NAMES = frozenset({"r2", "r_squared", "baseline_r2", "baseline_r_squared"})
+
+
+def _resolve_named_metric(
+    receipt: EvidenceReceipt,
+    predicate: HypothesisPredicate,
+    facts: dict[str, float | int | str | bool | None],
+) -> float | None:
+    normalized = predicate.metric.casefold()
+    # Tool-agnostic namespace fallback: tools publish model metrics under
+    # "metric.<name>" ("metric.r2", "metric.accuracy", "metric.rmse").
+    namespaced = _finite_fact_number(facts.get(f"metric.{normalized}"))
+    if namespaced is not None:
+        return namespaced
+    if normalized in _R2_METRIC_NAMES:
+        return _finite_fact_number(facts.get("metric.r2"))
+    if (
+        normalized in _CORRELATION_METRIC_NAMES
+        and receipt.tool_name == "correlate_columns"
+    ):
+        left = predicate.left_operand
+        right = predicate.right_operand
+        if not left or not right:
+            return None
+        target_pair = {left.casefold(), right.casefold()}
+        for fact_id, value in facts.items():
+            if not fact_id.startswith("pair") or not fact_id.endswith(".columns"):
+                continue
+            if not isinstance(value, str) or {
+                item.strip().casefold() for item in value.split("~")
+            } != target_pair:
+                continue
+            return _finite_fact_number(
+                facts.get(fact_id.removesuffix(".columns") + ".coefficient")
+            )
     return None
 
 

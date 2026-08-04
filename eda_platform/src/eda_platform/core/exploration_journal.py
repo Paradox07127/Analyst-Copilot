@@ -171,35 +171,36 @@ def reduce_exploration_event(
         values["current_round_reduction_committed"] = False
     elif isinstance(event, LlmCallStartedEvent):
         _require_running(state, "llm_call_started")
-        _require_no_pending(state)
+        if event.call_id in state.pending_call_ids:
+            raise EventTransitionError(
+                f"llm call {event.call_id!r} is already pending."
+            )
+        # In-flight calls hold a slot of the request cap so concurrent starts
+        # cannot over-admit before any of them settles.
         if (
             state.remaining_llm_call_budget is not None
-            and state.remaining_llm_call_budget <= 0
+            and state.remaining_llm_call_budget - len(state.pending_call_ids) <= 0
         ):
             raise EventTransitionError(
                 "llm call would exceed the llm request cap (max_requests)."
             )
-        values["pending_call_id"] = event.call_id
-        values["pending_call_step_id"] = event.step_id
+        values["pending_call_ids"] = (*state.pending_call_ids, event.call_id)
+        if event.step_id is not None:
+            values["pending_call_steps"] = {
+                **state.pending_call_steps,
+                event.call_id: event.step_id,
+            }
     elif isinstance(event, LlmCallCompletedEvent):
-        if event.call_id != state.pending_call_id:
-            raise EventTransitionError("completed call does not match the pending call.")
-        if (
-            state.pending_call_step_id is not None
-            and event.step_id != state.pending_call_step_id
-        ):
+        _settle_pending_call(values, state, event.call_id, "completed")
+        bound_step = state.pending_call_steps.get(event.call_id)
+        if bound_step is not None and event.step_id != bound_step:
             raise EventTransitionError("completed step does not match the pending call.")
         _append_completed_step(values, state, event.step_id)
-        values["pending_call_id"] = None
-        values["pending_call_step_id"] = None
         values["llm_calls_settled"] = state.llm_calls_settled + 1
         if state.remaining_llm_call_budget is not None:
             values["remaining_llm_call_budget"] = state.remaining_llm_call_budget - 1
     elif isinstance(event, LlmCallRejectedEvent):
-        if event.call_id != state.pending_call_id:
-            raise EventTransitionError("rejected call does not match the pending call.")
-        values["pending_call_id"] = None
-        values["pending_call_step_id"] = None
+        _settle_pending_call(values, state, event.call_id, "rejected")
         # A known provider rejection is still one attempted request. Treat it
         # as settled so repeated 4xx/5xx responses cannot bypass max_requests.
         values["llm_calls_settled"] = state.llm_calls_settled + 1
@@ -209,10 +210,7 @@ def reduce_exploration_event(
     elif isinstance(event, LlmCallUncertainEvent):
         # Fail closed: the provider outcome is unknown, so the reservation is
         # fully consumed, but the run itself stays resumable (R3.3).
-        if event.call_id != state.pending_call_id:
-            raise EventTransitionError("uncertain call does not match the pending call.")
-        values["pending_call_id"] = None
-        values["pending_call_step_id"] = None
+        _settle_pending_call(values, state, event.call_id, "uncertain")
         values["llm_calls_uncertain"] = state.llm_calls_uncertain + 1
         values["uncertain_call_ids"] = [*state.uncertain_call_ids, event.call_id]
         if state.remaining_llm_call_budget is not None:
@@ -220,44 +218,64 @@ def reduce_exploration_event(
         values["failure_history"] = [*state.failure_history, event.error]
     elif isinstance(event, ToolCallStartedEvent):
         _require_running(state, "tool_call_started")
-        _require_no_pending(state)
-        if state.remaining_tool_call_budget <= 0:
+        if event.logical_step_id in state.pending_tool_steps:
             raise EventTransitionError(
-                "tool call would exceed max_successful_tool_calls."
+                f"tool step {event.logical_step_id!r} is already pending."
             )
         if event.logical_step_id in state.completed_step_ids:
             raise EventTransitionError(
                 f"logical step {event.logical_step_id!r} is already committed; "
                 "adopt its receipt instead of re-running."
             )
-        values["pending_logical_step_id"] = event.logical_step_id
-        values["pending_tool_kind"] = event.tool_kind
-        values["pending_tool_input_fingerprint"] = event.input_fingerprint
-        values["pending_projected_rows_scanned"] = event.projected_rows_scanned
-        values["pending_projected_result_cells"] = event.projected_result_cells
+        # In-flight slots reserve success budget so concurrent sessions cannot
+        # over-admit before any receipt commits.
+        if state.remaining_tool_call_budget - len(state.pending_tool_steps) <= 0:
+            raise EventTransitionError(
+                "tool call would exceed max_successful_tool_calls."
+            )
+        values["pending_tool_steps"] = {
+            **_dumped_tool_slots(state),
+            event.logical_step_id: {
+                "tool_kind": event.tool_kind,
+                "input_fingerprint": event.input_fingerprint,
+                "projected_rows_scanned": event.projected_rows_scanned,
+                "projected_result_cells": event.projected_result_cells,
+                "prepared_receipt_id": None,
+                "prepared_result_digest": None,
+            },
+        }
     elif isinstance(event, ReceiptPreparedEvent):
-        if event.logical_step_id != state.pending_logical_step_id:
-            raise EventTransitionError("receipt does not match the pending tool step.")
-        prior = state.prepared_receipt_id
-        if prior is not None and prior != event.receipt_id:
+        slot = state.pending_tool_steps.get(event.logical_step_id)
+        if slot is None:
+            raise EventTransitionError("receipt does not match a pending tool step.")
+        if slot.prepared_receipt_id is not None and (
+            slot.prepared_receipt_id != event.receipt_id
+        ):
             raise EventTransitionError("prepared receipt cannot be replaced.")
         if (
-            state.prepared_result_digest is not None
-            and state.prepared_result_digest != event.result_digest
+            slot.prepared_result_digest is not None
+            and slot.prepared_result_digest != event.result_digest
         ):
             raise EventTransitionError("prepared tool result digest cannot be replaced.")
-        values["prepared_receipt_id"] = event.receipt_id
-        values["prepared_result_digest"] = event.result_digest
+        values["pending_tool_steps"] = {
+            **_dumped_tool_slots(state),
+            event.logical_step_id: {
+                **slot.model_dump(),
+                "prepared_receipt_id": event.receipt_id,
+                "prepared_result_digest": event.result_digest,
+            },
+        }
     elif isinstance(event, ReceiptCommittedEvent):
-        if event.logical_step_id != state.pending_logical_step_id:
-            raise EventTransitionError("receipt does not match the pending tool step.")
-        if state.prepared_receipt_id is None:
+        slot = state.pending_tool_steps.get(event.logical_step_id)
+        if slot is None:
+            raise EventTransitionError("receipt does not match a pending tool step.")
+        if slot.prepared_receipt_id is None:
             raise EventTransitionError("receipt must be prepared before it is committed.")
-        if state.prepared_receipt_id != event.receipt_id:
+        if slot.prepared_receipt_id != event.receipt_id:
             raise EventTransitionError(
                 "committed receipt does not match the prepared receipt."
             )
-        if state.prepared_result_digest != event.result_digest:
+        if slot.prepared_result_digest != event.result_digest:
             raise EventTransitionError(
                 "committed tool result digest does not match the prepared body."
             )
@@ -269,34 +287,28 @@ def reduce_exploration_event(
             result_digests = dict(state.step_result_digests)
             result_digests[event.logical_step_id] = event.result_digest
             values["step_result_digests"] = result_digests
-        values["pending_logical_step_id"] = None
-        values["prepared_receipt_id"] = None
-        values["prepared_result_digest"] = None
-        tool_kind = state.pending_tool_kind or "legacy_unknown"
+        tool_kind = slot.tool_kind or "legacy_unknown"
         values["tool_calls_by_kind"] = {
             **state.tool_calls_by_kind,
             tool_kind: state.tool_calls_by_kind.get(tool_kind, 0) + 1,
         }
         values["rows_scanned"] = state.rows_scanned + event.rows_scanned
         values["result_cells"] = state.result_cells + event.result_cells
-        if state.pending_tool_input_fingerprint is not None:
+        if slot.input_fingerprint is not None:
             values["completed_probe_fingerprints"] = [
                 *state.completed_probe_fingerprints,
-                state.pending_tool_input_fingerprint,
+                slot.input_fingerprint,
             ]
-        _clear_pending_tool_metadata(values)
+        _remove_tool_slot(values, state, event.logical_step_id)
         values["tool_calls_committed"] = state.tool_calls_committed + 1
         values["remaining_tool_call_budget"] = state.remaining_tool_call_budget - 1
     elif isinstance(event, ToolCallFailedEvent):
         # Success-counted budget: a failed call consumes nothing (plan §4.2).
-        if event.logical_step_id != state.pending_logical_step_id:
-            raise EventTransitionError("failed call does not match the pending tool step.")
-        values["pending_logical_step_id"] = None
-        values["prepared_receipt_id"] = None
-        values["prepared_result_digest"] = None
+        if event.logical_step_id not in state.pending_tool_steps:
+            raise EventTransitionError("failed call does not match a pending tool step.")
         values["rows_scanned"] = state.rows_scanned + event.rows_scanned
         values["result_cells"] = state.result_cells + event.result_cells
-        _clear_pending_tool_metadata(values)
+        _remove_tool_slot(values, state, event.logical_step_id)
         values["failure_history"] = [*state.failure_history, event.error]
     elif isinstance(event, GateVerdictEvent):
         _require_running(state, "gate_verdict")
@@ -478,29 +490,30 @@ def reduce_exploration_event(
         values["status"] = "stopped"
         values["stop_reason"] = event.stop_reason
         values["final_report_ref"] = event.final_report_ref
-        if state.pending_call_id is not None:
-            values["llm_calls_uncertain"] = state.llm_calls_uncertain + 1
+        if state.pending_call_ids:
+            values["llm_calls_uncertain"] = state.llm_calls_uncertain + len(
+                state.pending_call_ids
+            )
             values["uncertain_call_ids"] = [
                 *state.uncertain_call_ids,
-                state.pending_call_id,
+                *state.pending_call_ids,
             ]
             if state.remaining_llm_call_budget is not None:
-                values["remaining_llm_call_budget"] = (
-                    state.remaining_llm_call_budget - 1
+                values["remaining_llm_call_budget"] = state.remaining_llm_call_budget - len(
+                    state.pending_call_ids
                 )
-        values["pending_call_id"] = None
-        values["pending_call_step_id"] = None
-        if state.pending_logical_step_id is not None:
-            values["rows_scanned"] = (
-                state.rows_scanned + state.pending_projected_rows_scanned
+        values["pending_call_ids"] = ()
+        values["pending_call_steps"] = {}
+        if state.pending_tool_steps:
+            values["rows_scanned"] = state.rows_scanned + sum(
+                slot.projected_rows_scanned
+                for slot in state.pending_tool_steps.values()
             )
-            values["result_cells"] = (
-                state.result_cells + state.pending_projected_result_cells
+            values["result_cells"] = state.result_cells + sum(
+                slot.projected_result_cells
+                for slot in state.pending_tool_steps.values()
             )
-        values["pending_logical_step_id"] = None
-        values["prepared_receipt_id"] = None
-        values["prepared_result_digest"] = None
-        _clear_pending_tool_metadata(values)
+        values["pending_tool_steps"] = {}
         values["pending_terminal_reason"] = None
         values["pending_terminal_has_reduction"] = False
     else:  # pragma: no cover - the discriminated union is exhaustive
@@ -593,78 +606,79 @@ class JsonlExplorationJournal(
             "reservation consumed (fail closed)."
         ),
     ) -> ExplorationLoopState:
-        """Fence out older executors, then settle an in-flight LLM call as
-        uncertain — the provider may have consumed the request, so it is never
-        resent. Pending tool steps stay pending: local re-runs are safe and the
-        receipt outbox guarantees the single logical commit."""
+        """Fence out older executors, then settle every in-flight LLM call as
+        uncertain — the provider may have consumed each request, so none is
+        resent. Every pending tool slot is settled the same way one was before:
+        a durable body is adopted, otherwise the projection is charged before a
+        safe logical rerun."""
         state = self.claim_attempt()
-        if state.pending_call_id is not None:
+        for call_id in state.pending_call_ids:
+            bound_step = state.pending_call_steps.get(call_id)
             digest = None
-            if (
-                state.pending_call_step_id is not None
-                and completed_response_digest is not None
-            ):
-                digest = completed_response_digest(state.pending_call_step_id)
+            if bound_step is not None and completed_response_digest is not None:
+                digest = completed_response_digest(bound_step)
             if digest:
                 state = self.append_new(
                     "llm_call_completed",
-                    call_id=state.pending_call_id,
-                    step_id=state.pending_call_step_id,
+                    call_id=call_id,
+                    step_id=bound_step,
                     response_digest=digest,
                 )
             else:
                 state = self.append_new(
                     "llm_call_uncertain",
-                    call_id=state.pending_call_id,
+                    call_id=call_id,
                     error=uncertain_error,
                 )
-        if settle_pending_tool and state.pending_logical_step_id is not None:
-            recovered_tool = (
-                completed_tool_result(state.pending_logical_step_id)
-                if completed_tool_result is not None
-                else None
-            )
-            if recovered_tool is not None:
-                if state.prepared_receipt_id not in {None, recovered_tool.receipt_id}:
-                    raise EventTransitionError(
-                        "durable tool body does not match the prepared receipt."
-                    )
-                if state.prepared_receipt_id is not None:
-                    if state.prepared_result_digest is None:
+        if settle_pending_tool:
+            for logical_step_id in list(state.pending_tool_steps):
+                slot = state.pending_tool_steps[logical_step_id]
+                recovered_tool = (
+                    completed_tool_result(logical_step_id)
+                    if completed_tool_result is not None
+                    else None
+                )
+                if recovered_tool is not None:
+                    if slot.prepared_receipt_id not in {None, recovered_tool.receipt_id}:
                         raise EventTransitionError(
-                            "prepared receipt has no durable tool-result digest; "
-                            "refusing crash adoption."
+                            "durable tool body does not match the prepared receipt."
                         )
-                    if state.prepared_result_digest != recovered_tool.result_digest:
-                        raise EventTransitionError(
-                            "durable tool body digest does not match the prepared receipt."
+                    if slot.prepared_receipt_id is not None:
+                        if slot.prepared_result_digest is None:
+                            raise EventTransitionError(
+                                "prepared receipt has no durable tool-result digest; "
+                                "refusing crash adoption."
+                            )
+                        if slot.prepared_result_digest != recovered_tool.result_digest:
+                            raise EventTransitionError(
+                                "durable tool body digest does not match the prepared receipt."
+                            )
+                    if slot.prepared_receipt_id is None:
+                        state = self.append_new(
+                            "receipt_prepared",
+                            logical_step_id=logical_step_id,
+                            receipt_id=recovered_tool.receipt_id,
+                            result_digest=recovered_tool.result_digest,
                         )
-                if state.prepared_receipt_id is None:
                     state = self.append_new(
-                        "receipt_prepared",
-                        logical_step_id=state.pending_logical_step_id,
+                        "receipt_committed",
+                        logical_step_id=logical_step_id,
                         receipt_id=recovered_tool.receipt_id,
+                        rows_scanned=recovered_tool.rows_scanned,
+                        result_cells=recovered_tool.result_cells,
                         result_digest=recovered_tool.result_digest,
                     )
-                state = self.append_new(
-                    "receipt_committed",
-                    logical_step_id=state.pending_logical_step_id,
-                    receipt_id=recovered_tool.receipt_id,
-                    rows_scanned=recovered_tool.rows_scanned,
-                    result_cells=recovered_tool.result_cells,
-                    result_digest=recovered_tool.result_digest,
-                )
-            else:
-                state = self.append_new(
-                    "tool_call_failed",
-                    logical_step_id=state.pending_logical_step_id,
-                    error=(
-                        "tool outcome unknown after crash; projected resource usage "
-                        "charged before safe logical rerun."
-                    ),
-                    rows_scanned=state.pending_projected_rows_scanned,
-                    result_cells=state.pending_projected_result_cells,
-                )
+                else:
+                    state = self.append_new(
+                        "tool_call_failed",
+                        logical_step_id=logical_step_id,
+                        error=(
+                            "tool outcome unknown after crash; projected resource usage "
+                            "charged before safe logical rerun."
+                        ),
+                        rows_scanned=slot.projected_rows_scanned,
+                        result_cells=slot.projected_result_cells,
+                    )
         return state
 
     def amend_budget(
@@ -783,17 +797,46 @@ def _require_running(state: ExplorationLoopState, event_label: str) -> None:
 
 
 def _require_no_pending(state: ExplorationLoopState) -> None:
-    if state.pending_call_id is not None or state.pending_logical_step_id is not None:
+    if state.pending_call_ids or state.pending_tool_steps:
         raise EventTransitionError(
             "another exploration operation is already pending."
         )
 
 
-def _clear_pending_tool_metadata(values: dict[str, object]) -> None:
-    values["pending_tool_kind"] = None
-    values["pending_tool_input_fingerprint"] = None
-    values["pending_projected_rows_scanned"] = 0
-    values["pending_projected_result_cells"] = 0
+def _settle_pending_call(
+    values: dict[str, object],
+    state: ExplorationLoopState,
+    call_id: str,
+    event_label: str,
+) -> None:
+    if call_id not in state.pending_call_ids:
+        raise EventTransitionError(
+            f"{event_label} call does not match a pending call."
+        )
+    values["pending_call_ids"] = tuple(
+        pending for pending in state.pending_call_ids if pending != call_id
+    )
+    values["pending_call_steps"] = {
+        pending: step
+        for pending, step in state.pending_call_steps.items()
+        if pending != call_id
+    }
+
+
+def _dumped_tool_slots(state: ExplorationLoopState) -> dict[str, dict[str, object]]:
+    return {step: slot.model_dump() for step, slot in state.pending_tool_steps.items()}
+
+
+def _remove_tool_slot(
+    values: dict[str, object],
+    state: ExplorationLoopState,
+    logical_step_id: str,
+) -> None:
+    values["pending_tool_steps"] = {
+        step: slot.model_dump()
+        for step, slot in state.pending_tool_steps.items()
+        if step != logical_step_id
+    }
 
 
 def _append_completed_step(

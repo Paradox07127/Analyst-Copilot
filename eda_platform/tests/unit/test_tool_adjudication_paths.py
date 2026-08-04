@@ -428,3 +428,155 @@ def test_run_baseline_model_predicate_about_another_target_stays_unadjudicated()
     )
     assert adjudicated.statistics is not None
     assert adjudicated.statistics.hypothesis_outcome is None
+
+
+# --- metric-name resolution (seed-7 predicate vocabulary) --------------------
+#
+# The model's natural predicates are named derived metrics under numeric
+# comparison ("pearson_correlation > 0.6", "r2 > 0.2"), while facts are
+# namespaced by the tool ("pair0.coefficient", "metric.r2"). Without a
+# resolution layer every one of these adjudicates to None (seed-7: 30/30).
+
+
+def _numeric_binding(
+    *,
+    metric: str,
+    operator: str,
+    threshold: float,
+    method_family: str,
+    right_operand: str | None = None,
+    left_operand: str = "x",
+    columns: tuple[str, ...] = ("x", "y"),
+) -> HypothesisExecutionBinding:
+    return HypothesisExecutionBinding(
+        hypothesis_id="hyp_named_metric",
+        predicate=HypothesisPredicate(
+            metric=metric,
+            operator=operator,  # type: ignore[arg-type]
+            left_operand=left_operand,
+            right_operand=right_operand,
+            threshold=threshold,
+        ),
+        method_family=method_family,
+        dataset_ids=("ds_observations",),
+        columns=columns,
+    )
+
+
+@pytest.mark.parametrize(
+    ("metric", "coefficient", "threshold", "expected"),
+    (
+        ("pearson_correlation", 0.9, 0.6, "supports"),
+        ("pearson_correlation", 0.3, 0.6, "contradicts"),
+        ("correlation_coefficient", -0.8, -0.9, "supports"),
+        ("spearman_correlation", 0.7, 0.6, "supports"),
+    ),
+)
+def test_correlation_coefficient_names_resolve_to_the_pair_fact(
+    metric: str, coefficient: float, threshold: float, expected: Outcome
+) -> None:
+    receipt = _correlation_receipt(coefficient=coefficient, adjusted_p=0.01)
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _numeric_binding(
+            metric=metric,
+            operator="greater_than",
+            threshold=threshold,
+            method_family="correlate_columns",
+            right_operand="y",
+        ),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome == expected
+
+
+def test_correlation_name_without_pair_row_stays_unadjudicated() -> None:
+    receipt = _correlation_receipt(coefficient=0.9, adjusted_p=0.01, pair="x~z")
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _numeric_binding(
+            metric="pearson_correlation",
+            operator="greater_than",
+            threshold=0.5,
+            method_family="correlate_columns",
+            right_operand="y",
+        ),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome is None
+
+
+@pytest.mark.parametrize(
+    ("metric", "r2", "threshold", "expected"),
+    (
+        ("r2", 0.45, 0.2, "supports"),
+        ("r2", 0.10, 0.2, "contradicts"),
+        ("baseline_r_squared", 0.45, 0.05, "supports"),
+        ("baseline_r2", 0.30, 0.5, "contradicts"),
+        ("r_squared", 0.45, 0.2, "supports"),
+    ),
+)
+def test_r2_aliases_resolve_to_the_metric_namespace(
+    metric: str, r2: float, threshold: float, expected: Outcome
+) -> None:
+    receipt = _baseline_receipt(task_type="regression", r2=r2)
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _numeric_binding(
+            metric=metric,
+            operator="greater_than",
+            threshold=threshold,
+            method_family="run_baseline_model",
+            left_operand="churn",
+            columns=("churn",),
+        ),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome == expected
+
+
+def test_metric_namespace_fallback_is_tool_agnostic() -> None:
+    receipt = _baseline_receipt(
+        task_type="classification", accuracy=0.9, baseline_accuracy=0.5
+    )
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _numeric_binding(
+            metric="accuracy",
+            operator="greater_than",
+            threshold=0.8,
+            method_family="run_baseline_model",
+            left_operand="churn",
+            columns=("churn",),
+        ),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome == "supports"
+
+
+@pytest.mark.parametrize(
+    ("metric", "method_family"),
+    (
+        # Requires dividing two facts: computation, not lookup.
+        ("model_vs_baseline_rmse_ratio", "run_baseline_model"),
+        # analyze_time_series emits no slope fact at all.
+        ("trend_slope", "analyze_time_series"),
+    ),
+)
+def test_unresolvable_named_metrics_stay_honestly_unadjudicated(
+    metric: str, method_family: str
+) -> None:
+    receipt = _baseline_receipt(task_type="regression", r2=0.4)
+    adjudicated = adjudicate_receipt_hypothesis(
+        receipt,
+        _numeric_binding(
+            metric=metric,
+            operator="less_than",
+            threshold=0.9,
+            method_family=method_family,
+            left_operand="churn",
+            columns=("churn",),
+        ),
+    )
+    assert adjudicated.statistics is not None
+    assert adjudicated.statistics.hypothesis_outcome is None

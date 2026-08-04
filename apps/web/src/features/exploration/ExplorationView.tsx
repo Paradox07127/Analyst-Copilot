@@ -6,12 +6,15 @@ import {
   buildExplorationReportGroups,
   effectiveBudgetCaps,
   remainingBudget,
+  stopReasonGuidance,
   stopReasonLabel,
+  stopSeverity,
   type EvidenceLane,
   type ExplorationInsightView,
   type ExplorationReportSectionId,
   type ExplorationRunView,
   type ExplorationStatus,
+  type ExplorationStopReason,
 } from "./exploration-model";
 
 const STATUS_PRESENTATION: Record<
@@ -73,6 +76,40 @@ export function EvidenceLaneBadge({
     <Badge tone={presentation.tone} variant="outline" title={presentation.meaning}>
       {label ?? presentation.label}
     </Badge>
+  );
+}
+
+/** A stop the run did not choose gets an alert, not a grey line. */
+function StopNotice({ reason }: { reason: ExplorationStopReason | null }) {
+  const severity = stopSeverity(reason);
+  const guidance = stopReasonGuidance(reason);
+  const label = stopReasonLabel(reason);
+  const heading = (
+    <p className="text-sm">
+      Stop reason: <strong>{label}</strong>
+      {reason && <code className="ml-2">{reason}</code>}
+    </p>
+  );
+  if (severity === "healthy") return heading;
+  const isProblem = severity === "problem";
+  return (
+    <div
+      role={isProblem ? "alert" : "status"}
+      aria-label={`Stop reason: ${label}`}
+      className={`flex flex-col gap-1 rounded-base border p-3 ${
+        isProblem ? "border-status-critical/40" : "border-status-warning/40"
+      }`}
+    >
+      <p
+        className={`text-sm font-medium ${
+          isProblem ? "text-status-critical" : "text-status-warning"
+        }`}
+      >
+        {label}
+        {reason && <code className="ml-2 font-normal">{reason}</code>}
+      </p>
+      {guidance && <p className="text-sm text-status-neutral">{guidance}</p>}
+    </div>
   );
 }
 
@@ -226,12 +263,7 @@ export function ExplorationRunPanel({ run }: { run: ExplorationRunView }) {
         actions={<CostChip run={run} />}
       />
       <RunStatus status={run.status} />
-      {run.status === "stopped" && (
-        <p className="text-sm">
-          Stop reason: <strong>{stopReasonLabel(run.stopReason)}</strong>
-          {run.stopReason && <code className="ml-2">{run.stopReason}</code>}
-        </p>
-      )}
+      {run.status === "stopped" && <StopNotice reason={run.stopReason} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section aria-label="Current hypothesis" className="flex flex-col gap-2">

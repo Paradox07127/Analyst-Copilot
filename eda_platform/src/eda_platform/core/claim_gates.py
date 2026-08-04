@@ -3,7 +3,8 @@
 Gate order is fixed: structure, reachability, numeric, entity, statistical,
 state. A structure failure short-circuits (nothing downstream is resolvable);
 every other gate runs to completion so the retry feedback carries the full
-failure list. The statistical gate registers violations without blocking (v1).
+failure list. Every gate blocks: a bundle passes only when all six verdicts
+pass, the statistical gate included.
 """
 
 from __future__ import annotations

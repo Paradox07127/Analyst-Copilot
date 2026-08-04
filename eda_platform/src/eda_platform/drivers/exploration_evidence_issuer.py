@@ -391,6 +391,12 @@ def _verify_and_project_root(
 
     workflow = JsonExplorationWorkflowStateStore(root / "workflow-state.json").load()
     _verify_committed_receipts(workflow, terminal, events)
+    # Receipts an interrupted trailing round committed but never reduced. Their
+    # spend still counts, but they carry no certified evidence, so every
+    # structural verifier below reads the journal as of the last settled round.
+    orphan_receipt_ids = frozenset(
+        _trailing_unsettled_receipts(events) - set(workflow.committed_receipts)
+    )
     candidates, candidates_by_round = _verify_scheduler_and_reductions(
         root, events, workflow
     )
@@ -398,6 +404,7 @@ def _verify_and_project_root(
         events,
         workflow,
         candidates_by_round=candidates_by_round,
+        orphan_receipt_ids=orphan_receipt_ids,
     )
     invocations = _verify_production_invocations(
         root,
@@ -406,7 +413,10 @@ def _verify_and_project_root(
         candidates_by_round=candidates_by_round,
     )
     stat_attempt_counts = _verify_stat_registry(
-        root, workflow.committed_receipts, invocations=invocations
+        root,
+        workflow.committed_receipts,
+        invocations=invocations,
+        orphan_receipt_ids=orphan_receipt_ids,
     )
     _verify_workflow(
         workflow,
@@ -451,6 +461,8 @@ def _verify_and_project_root(
         events,
         workflow.committed_receipts,
         invocations=invocations,
+        orphan_receipt_ids=orphan_receipt_ids,
+        release_grade_receipt_ids=_release_grade_receipt_ids(workflow),
     )
     _verify_completed_llm_bodies(root, events)
     usage = E4aTrialUsage(
@@ -695,6 +707,7 @@ def _verify_stat_registry(
     committed_receipts: Mapping[str, EvidenceReceipt],
     *,
     invocations: Mapping[str, _VerifiedInvocation],
+    orphan_receipt_ids: frozenset[str] = frozenset(),
 ) -> dict[str, int]:
     path = root / "stat_registry.jsonl"
     statistical_receipts = {
@@ -719,7 +732,11 @@ def _verify_stat_registry(
             if attempt.receipt_id is None or attempt.receipt_id in completed_by_receipt:
                 raise ValueError("statistical registry completion receipts must be unique")
             completed_by_receipt[attempt.receipt_id] = attempt
-    if not set(completed_by_receipt).issubset(committed_receipts):
+    # An interrupted round's attempts are completed and journalled but their
+    # receipts never reached workflow state; they still may not be unknown.
+    if not set(completed_by_receipt).issubset(
+        set(committed_receipts) | orphan_receipt_ids
+    ):
         raise ValueError("statistical registry cites an uncommitted receipt")
     for receipt_id, receipt in statistical_receipts.items():
         statistics = receipt.statistics
@@ -842,6 +859,37 @@ def _verify_committed_receipts(
             raise ValueError("workflow contains an invalid committed receipt")
 
 
+def _release_grade_receipt_ids(workflow: ExplorationWorkflowState) -> frozenset[str]:
+    """Receipts an insight rests on — the only ones that are release evidence.
+
+    Tool-layer allowlist and release contracts were never the same set (11 vs
+    3). Rather than force a reconstruction contract onto reconnaissance tools
+    like ``profile_slice``, release grade follows the reducer's own rule: a
+    receipt no insight adjudicated is not evidence for anything.
+    """
+    return frozenset(
+        receipt_id
+        for insight in workflow.insights.values()
+        for receipt_id in (
+            *insight.supporting_receipt_ids,
+            *insight.contradicting_receipt_ids,
+        )
+    )
+
+
+def _trailing_unsettled_round_index(
+    events: Sequence[ExplorationLoopEvent],
+) -> int | None:
+    """The round a mid-round interruption left open, if any."""
+    index: int | None = None
+    for event in events:
+        if isinstance(event, RoundStartedEvent):
+            index = event.round_index
+        elif isinstance(event, RoundSettledEvent):
+            index = None
+    return index
+
+
 def _trailing_unsettled_receipts(
     events: Sequence[ExplorationLoopEvent],
 ) -> set[str]:
@@ -920,6 +968,7 @@ def _rebuild_canonical_bundles(
     workflow: ExplorationWorkflowState,
     *,
     candidates_by_round: Mapping[int, Mapping[str, CandidateSeed]],
+    orphan_receipt_ids: frozenset[str] = frozenset(),
 ) -> dict[str, ClaimBundle]:
     """Replay the reducer's bundle construction without trusting stored bundles.
 
@@ -952,6 +1001,10 @@ def _rebuild_canonical_bundles(
         if isinstance(event, ReceiptCommittedEvent):
             if active_round is None:
                 raise ValueError("receipt commit is outside a scheduler round")
+            if event.receipt_id in orphan_receipt_ids:
+                # Committed by an interrupted round that never reduced: no
+                # bundle was built from it and none may be reconstructed.
+                continue
             receipt = workflow.committed_receipts.get(event.receipt_id)
             if receipt is None or receipt.execution is None:
                 raise ValueError("canonical bundle receipt lacks executor identity")
@@ -979,25 +1032,42 @@ def _rebuild_canonical_bundles(
         if isinstance(event, GateVerdictEvent):
             if active_round is None or gate_cursor >= len(gate_order):
                 raise ValueError("gate verdict lacks its deterministic receipt group")
-            hypothesis_id = gate_order[gate_cursor]
-            gate_cursor += 1
-            candidate = candidates_by_round[active_round][hypothesis_id]
-            current_ids = tuple(current_by_hypothesis[hypothesis_id])
-            cumulative_ids = tuple(
-                dict.fromkeys(
-                    (
-                        *prior_supporting.get(hypothesis_id, ()),
-                        *prior_contradicting.get(hypothesis_id, ()),
-                        *current_ids,
+            # Content-addressed, not positional: concurrent probe sessions
+            # interleave their receipt commits, so "first commit per hypothesis"
+            # is not the order the reducer gates them in. The bundle id is
+            # derived from (candidate, receipts), so the only honest match is
+            # the group that actually recomputes to it.
+            matched: tuple[str, ClaimBundle] | None = None
+            for hypothesis_id in gate_order[gate_cursor:]:
+                candidate = candidates_by_round[active_round][hypothesis_id]
+                cumulative_ids = tuple(
+                    dict.fromkeys(
+                        (
+                            *prior_supporting.get(hypothesis_id, ()),
+                            *prior_contradicting.get(hypothesis_id, ()),
+                            *current_by_hypothesis[hypothesis_id],
+                        )
                     )
                 )
-            )
-            bundle = _canonical_claim_bundle(
-                candidate,
-                tuple(workflow.committed_receipts[item] for item in cumulative_ids),
-            )
-            if event.claim_bundle_id != bundle.claim_bundle_id:
+                rebuilt = _canonical_claim_bundle(
+                    candidate,
+                    tuple(workflow.committed_receipts[item] for item in cumulative_ids),
+                )
+                if rebuilt.claim_bundle_id == event.claim_bundle_id:
+                    matched = (hypothesis_id, rebuilt)
+                    break
+            if matched is None:
                 raise ValueError("journal gate id differs from canonical reducer bundle")
+            hypothesis_id, bundle = matched
+            current_ids = tuple(current_by_hypothesis[hypothesis_id])
+            # Each hypothesis is gated once per round; consume its slot wherever
+            # it sat so a second verdict cannot reuse the same group.
+            gate_order = [
+                *gate_order[:gate_cursor],
+                *(item for item in gate_order[gate_cursor:] if item != hypothesis_id),
+            ]
+            gate_order.insert(gate_cursor, hypothesis_id)
+            gate_cursor += 1
             prior_bundle = canonical.get(bundle.claim_bundle_id)
             if prior_bundle is not None and prior_bundle != bundle:
                 raise ValueError("one canonical bundle id maps to conflicting bodies")
@@ -1027,7 +1097,10 @@ def _rebuild_canonical_bundles(
             if active_round is not None and gate_cursor != len(gate_order):
                 raise ValueError("scheduler round has receipt groups without gate verdicts")
             active_round = None
-    if active_round is not None:
+    if active_round is not None and (current_by_hypothesis or gate_cursor != len(gate_order)):
+        # An interrupted run legitimately ends inside a round, but only if that
+        # round contributed nothing certified: every receipt it committed was
+        # an orphan and it issued no gate verdict.
         raise ValueError("canonical bundle replay ended with an open round")
     return canonical
 
@@ -1218,8 +1291,57 @@ def _verify_scheduler_and_reductions(
             or reduction_outcome_digest(reduction) != event.reduction_digest
         ):
             raise ValueError("reduction body fails its journal digests")
-    if decision_cursor != len(workflow.decisions):
-        raise ValueError("workflow contains decisions absent from candidate recovery bodies")
+    leftover_decisions = workflow.decisions[decision_cursor:]
+    if leftover_decisions:
+        # Seed-7 shape: the trailing unsettled round persisted its admission
+        # decisions before the latch. They are tolerated exactly when they
+        # cover that round's recovered candidate batch with matching identity —
+        # the same checks a settled round gets, minus the reduction that never
+        # ran.
+        trailing_round = _trailing_unsettled_round_index(events)
+        if trailing_round is None or trailing_round in candidates_by_round:
+            raise ValueError(
+                "workflow contains decisions absent from candidate recovery bodies"
+            )
+        generate_step = f"{events[0].exploration_id}:round:{trailing_round}:generate"
+        try:
+            batch = recovery.load_required(generate_step)
+        except KeyError:
+            raise ValueError(
+                "workflow contains decisions absent from candidate recovery bodies"
+            ) from None
+        if not isinstance(batch, CandidateBatch) or candidate_batch_digest(
+            batch
+        ) != response_digests.get(generate_step):
+            raise ValueError("scheduler candidate batch fails its journal digest")
+        trailing_candidates = {
+            item.hypothesis_id: item
+            for item in batch.candidates
+            if isinstance(item, CandidateSeed)
+        }
+        if {item.hypothesis_id for item in leftover_decisions} != set(
+            trailing_candidates
+        ):
+            raise ValueError(
+                "workflow decisions do not exactly cover the candidate batch"
+            )
+        for decision in leftover_decisions:
+            candidate = trailing_candidates[decision.hypothesis_id]
+            if (
+                decision.hypothesis_fingerprint != candidate.hypothesis_fingerprint
+                or decision.family != candidate.proposal.family
+            ):
+                raise ValueError(
+                    "workflow decision identity conflicts with its candidate"
+                )
+        candidates_by_round[trailing_round] = trailing_candidates
+        for hypothesis_id, candidate in trailing_candidates.items():
+            prior = candidates.get(hypothesis_id)
+            if prior is not None and _candidate_identity(prior) != _candidate_identity(
+                candidate
+            ):
+                raise ValueError("one hypothesis id maps to conflicting candidate bodies")
+            candidates.setdefault(hypothesis_id, candidate)
     if last_reduction_event is None:
         raise ValueError("evidence root contains no committed reduction")
     final_ledger_digest = final_reduction_state_digest(workflow)
@@ -1348,9 +1470,16 @@ def _verify_tool_results(
     committed_receipts: Mapping[str, EvidenceReceipt],
     *,
     invocations: Mapping[str, _VerifiedInvocation],
+    orphan_receipt_ids: frozenset[str] = frozenset(),
+    release_grade_receipt_ids: frozenset[str] = frozenset(),
 ) -> str:
     store = JsonToolResultStore(root / "tool-results")
-    committed_events = [event for event in events if isinstance(event, ReceiptCommittedEvent)]
+    committed_events = [
+        event
+        for event in events
+        if isinstance(event, ReceiptCommittedEvent)
+        and event.receipt_id not in orphan_receipt_ids
+    ]
     bodies: list[dict[str, object]] = []
     for event in committed_events:
         durable = store.load_required(event.logical_step_id)
@@ -1367,11 +1496,15 @@ def _verify_tool_results(
         invocation = invocations.get(receipt.receipt_id)
         if invocation is None:
             raise ValueError("tool result lacks its verified provider invocation")
-        verify_data_tool_result_contract(
-            receipt,
-            durable.result,
-            invocation.canonical_arguments,
-        )
+        if receipt.receipt_id in release_grade_receipt_ids:
+            # Only receipts an insight actually rests on are release evidence;
+            # reconnaissance a probe ran and no insight cited is probe-only and
+            # owes no durable reconstruction contract.
+            verify_data_tool_result_contract(
+                receipt,
+                durable.result,
+                invocation.canonical_arguments,
+            )
         body_digest = durable_tool_result_digest(durable)
         if event.result_digest is None or event.result_digest != body_digest:
             raise ValueError("tool result body fails its journal result digest")
