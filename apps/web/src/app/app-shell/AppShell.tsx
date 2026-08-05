@@ -519,10 +519,13 @@ function AppShellLayout() {
                       * was narrower than the project names it lists. The three
                       * defaults must still total 100: react-resizable-panels
                       * warns and renormalizes otherwise, so the numbers here
-                      * would not be the ones rendered. */}
+                      * would not be the ones rendered. Rail is 80% of its old
+                      * 22 (17.6); the 4.4 points it gave up are handed to main
+                      * and inspector in their existing 56:22 ratio (59.2/23.2),
+                      * not split evenly, so their relative sizes are unchanged. */}
                     <Panel
                       id="rail"
-                      defaultSize={22}
+                      defaultSize={17.6}
                       minSize={16}
                       maxSize={32}
                       order={1}
@@ -532,7 +535,7 @@ function AppShellLayout() {
                     <PanelResizeHandle className="group/resize relative w-2 cursor-col-resize bg-transparent after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-border after:transition-colors after:content-[''] hover:after:bg-primary active:after:bg-primary" />
                   </>
                 )}
-                <Panel id="main" defaultSize={56} minSize={30} order={2}>
+                <Panel id="main" defaultSize={59.2} minSize={30} order={2}>
                   <div className="relative h-full min-h-0 min-w-0">
                     {workspaceView}
                     <SplitDropOverlay />
@@ -546,7 +549,7 @@ function AppShellLayout() {
                       ref={inspectorRef}
                       collapsible
                       collapsedSize={0}
-                      defaultSize={22}
+                      defaultSize={23.2}
                       minSize={14}
                       maxSize={40}
                       order={3}

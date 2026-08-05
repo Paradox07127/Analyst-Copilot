@@ -28,6 +28,10 @@ import {
 } from "../../components/async-states";
 import { Badge, Card, MetricStrip, MetricTile, SectionHeader } from "../../components/ui";
 import { explorationRunFromDto } from "./exploration-adapter";
+import {
+  readExplorationGoal,
+  writeLastExplorationId,
+} from "./exploration-goal-storage";
 import { ExplorationReport, ExplorationRunPanel } from "./ExplorationView";
 
 function usd(value: string | number | null): string {
@@ -63,8 +67,14 @@ function ExplorationLaunch({ projectId, sessionId }: { projectId: string; sessio
   const datasets = useDatasets(sessionId);
   const prepare = usePrepareExploration(sessionId);
   const start = useStartExploration(sessionId);
-  const [mode, setMode] = useState<"open" | "goal_directed">("open");
-  const [goal, setGoal] = useState("");
+  /* A goal typed on the new-session screen decides the mode too: arriving with
+   * "Explore freely" pre-selected would silently discard what the user asked
+   * for. */
+  const carriedGoal = useRef(readExplorationGoal(sessionId)).current;
+  const [mode, setMode] = useState<"open" | "goal_directed">(
+    carriedGoal ? "goal_directed" : "open",
+  );
+  const [goal, setGoal] = useState(carriedGoal);
   const [tier, setTier] = useState<ExplorationTierDto>("standard");
   const [selected, setSelected] = useState<string[]>([]);
   const initializedScope = useRef(false);
@@ -104,8 +114,11 @@ function ExplorationLaunch({ projectId, sessionId }: { projectId: string; sessio
         idempotencyKey: startKey.current,
       },
       {
-        onSuccess: (result) =>
-          navigate(explorationRunPath(projectId, sessionId, result.exploration.exploration_id)),
+        onSuccess: (result) => {
+          const { exploration_id: explorationId } = result.exploration;
+          writeLastExplorationId(sessionId, explorationId);
+          navigate(explorationRunPath(projectId, sessionId, explorationId));
+        },
       },
     );
   };

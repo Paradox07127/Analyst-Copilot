@@ -18,12 +18,17 @@ import type {
   KnowledgePromotionPrepared,
 } from "../../api/client";
 import {
+  useCapabilities,
   useDecisionCoverage,
   useFindings,
   usePrepareFindingPromotion,
   usePromoteFinding,
 } from "../../api/hooks";
-import { artifactPath, sessionSectionPath } from "../../app/paths";
+import {
+  artifactPath,
+  explorationRunPath,
+  sessionSectionPath,
+} from "../../app/paths";
 import {
   EmptyState,
   ErrorState,
@@ -42,6 +47,10 @@ import {
   formatPercent,
   type Tone,
 } from "../../components/ui";
+import {
+  readExplorationGoal,
+  readLastExplorationId,
+} from "../exploration/exploration-goal-storage";
 
 const FRESHNESS_TONE: Record<string, Tone> = {
   fresh: "ok",
@@ -731,6 +740,55 @@ function FindingsList({
   );
 }
 
+/* The way into Explore. It sits here rather than in the section bar because
+ * this is the page where the user has just learned what is worth chasing, and
+ * because a started run has no listing endpoint — the id remembered at launch
+ * is the only way back to one already in flight. */
+function DeepDiveBar({
+  projectId,
+  sessionId,
+}: {
+  projectId: string;
+  sessionId: string;
+}) {
+  const capabilities = useCapabilities();
+  if (capabilities.data?.exploration_available !== true) return null;
+
+  const goal = readExplorationGoal(sessionId);
+  const startedId = readLastExplorationId(sessionId);
+  const to = startedId
+    ? explorationRunPath(projectId, sessionId, startedId)
+    : sessionSectionPath(projectId, sessionId, "explorations");
+
+  return (
+    <Card tone="quiet" className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3">
+      <p className="min-w-64 flex-1 text-sm">
+        {startedId ? (
+          /* Not "is running": the remembered id says a run was started, not
+           * that it is still going. The run page owns the status. */
+          "This session has a deep dive."
+        ) : goal ? (
+          <>
+            Carried over from the run setup:{" "}
+            <span className="text-status-neutral">“{goal}”</span>
+          </>
+        ) : (
+          /* Not "something here worth chasing?" — an empty findings list is
+           * exactly when a deep dive is worth offering, and that wording reads
+           * as a question about cards that are not on screen. */
+          "The agent can chase one question further, in a read-only run that leaves this session's data untouched."
+        )}
+      </p>
+      <Link
+        to={to}
+        className="rounded-base border border-primary px-3 py-1.5 text-sm font-medium text-primary"
+      >
+        {startedId ? "Open the deep dive" : "Start a deep dive"}
+      </Link>
+    </Card>
+  );
+}
+
 export function Component() {
   const { projectId = "", sessionId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -811,6 +869,7 @@ export function Component() {
           links keep the session you currently have open.
         </p>
       </Card>
+      <DeepDiveBar projectId={projectId} sessionId={sessionId} />
       {(warnings ?? []).length > 0 && (
         <Card tone="warn" className="p-3">
           <div role="alert" className="text-xs text-status-warn">

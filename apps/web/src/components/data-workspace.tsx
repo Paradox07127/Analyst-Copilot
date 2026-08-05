@@ -28,8 +28,16 @@ export function DataWorkspacePage({
       }`}
     >
       <div
-        className={`flex min-w-0 flex-col px-3 @2xl/data-page:px-4 @5xl/data-page:px-6 ${
-          fill ? "h-full overflow-hidden pt-4 pb-2" : "py-4 @5xl/data-page:py-6"
+        className={`flex min-w-0 flex-col px-3 pt-4 @2xl/data-page:px-4 @5xl/data-page:px-6 @5xl/data-page:pt-6 ${
+          /* Top padding is the same responsive scale on every page under this
+           * frame. fill only changes the bottom: a virtualized table needs a
+           * bounded, non-scrolling page and a tight pb-2 instead of matching
+           * the top's pb-6. Splitting the old py- shorthand into separate
+           * top/bottom utilities kept fill's bottom compact without also
+           * compacting the top, which had made Table Preview sit 8px higher
+           * than Data Map, Quality, Profiles, Cleanup, Relationships and
+           * Knowledge. */
+          fill ? "h-full overflow-hidden pb-2" : "pb-4 @5xl/data-page:pb-6"
         } ${gap === "compact" ? "gap-2" : "gap-4"}`}
       >
         <SectionHeader

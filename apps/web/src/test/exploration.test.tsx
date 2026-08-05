@@ -415,13 +415,15 @@ const preparedDto: ExplorationPreparedDto = {
 };
 
 describe("E5 exploration API workflow", () => {
-  it("keeps the navigation entry fail-closed without a trusted release capability", async () => {
-    renderAppWithRouterAt("/projects/p1/sessions/r1/questions");
-    await screen.findByRole("heading", { name: "Questions" });
-    expect(screen.queryByRole("link", { name: "Explore" })).not.toBeInTheDocument();
+  it("keeps the deep dive entry fail-closed without a trusted release capability", async () => {
+    renderAppWithRouterAt("/projects/p1/sessions/r1/findings");
+    await screen.findByRole("heading", { name: "Findings" });
+    expect(
+      screen.queryByRole("link", { name: "Start a deep dive" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("shows the navigation entry only when the server advertises exploration availability", async () => {
+  it("offers the deep dive from Findings, not from the section bar", async () => {
     server.use(
       http.get("/api/v1/system/capabilities", () => HttpResponse.json({
         pdf_export_available: true,
@@ -429,11 +431,39 @@ describe("E5 exploration API workflow", () => {
         exploration_available: true,
       })),
     );
-    renderAppWithRouterAt("/projects/p1/sessions/r1/questions");
-    expect(await screen.findByRole("link", { name: "Explore" })).toHaveAttribute(
-      "href",
-      "/projects/p1/sessions/r1/explorations",
+    renderAppWithRouterAt("/projects/p1/sessions/r1/findings");
+    expect(
+      await screen.findByRole("link", { name: "Start a deep dive" }),
+    ).toHaveAttribute("href", "/projects/p1/sessions/r1/explorations");
+    expect(screen.queryByRole("link", { name: "Explore" })).not.toBeInTheDocument();
+  });
+
+  it("points at the started run instead of the launcher once one exists", async () => {
+    server.use(
+      http.get("/api/v1/system/capabilities", () => HttpResponse.json({
+        pdf_export_available: true,
+        pdf_export_hint: "",
+        exploration_available: true,
+      })),
     );
+    window.localStorage.setItem("eda.exploration.run.v1.r1", "expl_9");
+    renderAppWithRouterAt("/projects/p1/sessions/r1/findings");
+    expect(
+      await screen.findByRole("link", { name: "Open the deep dive" }),
+    ).toHaveAttribute("href", "/projects/p1/sessions/r1/explorations/expl_9");
+  });
+
+  it("carries a goal typed on the new-session screen into goal-directed mode", async () => {
+    window.localStorage.setItem(
+      "eda.exploration.goal.v1.r1",
+      "Why did June conversion drop?",
+    );
+    renderAppWithRouterAt("/projects/p1/sessions/r1/explorations");
+    const goal = await screen.findByRole("textbox", { name: /Goal/ });
+    expect(goal).toHaveValue("Why did June conversion drop?");
+    expect(
+      screen.getByRole("button", { name: "Investigate a goal" }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
   it("maps every typed snake_case product field without replacing coverage difference", () => {

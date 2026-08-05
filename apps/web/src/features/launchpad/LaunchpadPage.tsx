@@ -32,6 +32,7 @@ import {
 } from "../../api/client";
 import {
   queryKeys,
+  useCapabilities,
   useProjectUploads,
   useProjects,
   useSettings,
@@ -52,6 +53,7 @@ import {
   Marquee,
   SectionHeader,
 } from "../../components/ui";
+import { writeExplorationGoal } from "../exploration/exploration-goal-storage";
 import { liveState } from "../settings/live-status";
 
 interface UploadEntry {
@@ -437,6 +439,8 @@ function NewSessionPanel({
   const openSettings = useOpenSettingsDialog();
   const settings = useSettings();
   const projects = useProjects();
+  const capabilities = useCapabilities();
+  const explorationAvailable = capabilities.data?.exploration_available === true;
 
   const [uploads, setUploads] = useState<UploadEntry[]>([]);
   const [projectChoice, setProjectChoice] = useState<
@@ -447,6 +451,7 @@ function NewSessionPanel({
   );
   const [newProjectName, setNewProjectName] = useState("");
   const [businessContext, setBusinessContext] = useState("");
+  const [deepDiveGoal, setDeepDiveGoal] = useState("");
   const [preclean, setPreclean] = useState<PrecleaningOptions>(PRECLEAN_DEFAULTS);
   const [reusedIds, setReusedIds] = useState<string[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -819,6 +824,7 @@ function NewSessionPanel({
       datasets: DatasetHandle[];
     }) => {
       launchRef.current = null;
+      writeExplorationGoal(created.session_id, deepDiveGoal);
       startTracking({
         jobId: created.job_id,
         sessionId: created.session_id,
@@ -1157,6 +1163,26 @@ function NewSessionPanel({
             className="w-full resize-y rounded-base border border-border bg-bg p-2.5 text-sm outline-none placeholder:text-status-neutral"
           />
         </label>
+
+        {/* One line, not a second canvas: Context describes the data, this names
+         * a single question to chase afterwards. Hidden without the capability
+         * so the ordinary run screen gains nothing it cannot act on. */}
+        {explorationAvailable && (
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-semibold">
+              Deep dive{" "}
+              <span className="font-normal text-status-neutral">(optional)</span>
+            </span>
+            <input
+              aria-label="Deep dive goal"
+              value={deepDiveGoal}
+              onChange={(event) => setDeepDiveGoal(event.target.value)}
+              maxLength={4000}
+              placeholder="One question for the agent to chase once the run finishes"
+              className="w-full rounded-base border border-border bg-bg p-2.5 text-sm outline-none placeholder:text-status-neutral"
+            />
+          </label>
+        )}
 
       </div>
 
