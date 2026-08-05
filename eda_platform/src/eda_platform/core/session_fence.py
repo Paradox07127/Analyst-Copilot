@@ -44,6 +44,40 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
+def _write_identity(identity_fd: int, identity: bytes) -> None:
+    os.ftruncate(identity_fd, 0)
+    os.lseek(identity_fd, 0, os.SEEK_SET)
+    os.write(identity_fd, identity)
+    os.fsync(identity_fd)
+
+
+def _identity_bytes(info: os.stat_result) -> bytes:
+    return f"{info.st_dev}:{info.st_ino}\n".encode()
+
+
+def _identity_names_directory(recorded: bytes, info: os.stat_result) -> bool:
+    """Whether a persisted identity still names this directory.
+
+    The inode identifies the object; ``st_dev`` identifies the *mount*, and the
+    kernel reassigns it every time the volume is mounted. Persisting both meant
+    a reboot renumbered a workspace and the fence read it as a replacement:
+    `16777232:98226571` recorded against `16777234:98226571` on disk, same
+    inode (2026-08-05). The in-process comparisons above keep both halves —
+    there the mount cannot change between the two stat calls.
+
+    What this gives up: a path that now resolves onto a different volume whose
+    directory carries the same inode number would pass. Replacing a directory
+    in place — the case the fence exists for — always changes the inode.
+
+    Identity files written by older Windows builds were opened in text mode, so
+    their trailing LF persisted as CRLF; stripping covers that without relaxing
+    anything else.
+    """
+    text = recorded.decode("utf-8", errors="replace").strip()
+    _, separator, inode = text.rpartition(":")
+    return bool(separator) and inode == str(info.st_ino)
+
+
 def _open_directory_at(parent_fd: int, name: str) -> int:
     """Create/open a directory and prove the descriptor still names the path."""
     for _ in range(_OPEN_RETRIES):
@@ -137,14 +171,19 @@ def _verify_recorded_identity(
     identity_fd, created = _open_regular_at(parent_fd, identity_name)
     try:
         target = os.fstat(target_fd)
-        identity = f"{target.st_dev}:{target.st_ino}\n".encode()
+        identity = _identity_bytes(target)
         if created:
-            os.write(identity_fd, identity)
-            os.fsync(identity_fd)
+            _write_identity(identity_fd, identity)
             return
         os.lseek(identity_fd, 0, os.SEEK_SET)
-        if os.read(identity_fd, 128) != identity:
+        recorded = os.read(identity_fd, 128)
+        if recorded == identity:
+            return
+        if not _identity_names_directory(recorded, target):
             raise SessionFencePathError(f"Session fence {label} identity changed.")
+        # Same directory, new mount: record this one so the next open compares
+        # against it rather than re-deriving the tolerance every time.
+        _write_identity(identity_fd, identity)
     finally:
         os.close(identity_fd)
 
@@ -336,20 +375,17 @@ def _verify_recorded_path_identity(
     identity_fd, created = _open_regular_path(identity_path)
     try:
         info = target.stat()
-        identity = f"{info.st_dev}:{info.st_ino}\n".encode()
+        identity = _identity_bytes(info)
         if created:
-            os.write(identity_fd, identity)
-            os.fsync(identity_fd)
+            _write_identity(identity_fd, identity)
             return
         os.lseek(identity_fd, 0, os.SEEK_SET)
         recorded = os.read(identity_fd, 128)
-        # Identity files created by older Windows builds were opened in text
-        # mode, so their trailing LF was persisted as CRLF. The tuple is the
-        # security boundary; accept that one legacy encoding without relaxing
-        # comparisons for any other content.
-        legacy_windows_identity = identity[:-1] + b"\r\n"
-        if recorded not in (identity, legacy_windows_identity):
+        if recorded == identity:
+            return
+        if not _identity_names_directory(recorded, info):
             raise SessionFencePathError(f"Session fence {label} identity changed.")
+        _write_identity(identity_fd, identity)
     finally:
         os.close(identity_fd)
 

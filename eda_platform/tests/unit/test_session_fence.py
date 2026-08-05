@@ -173,3 +173,44 @@ def test_workspace_root_replacement_cannot_create_a_second_lock(
             tmp_path.rmdir()
         if original.exists():
             original.rename(tmp_path)
+
+
+def test_a_remounted_volume_keeps_its_workspace(tmp_path: Path) -> None:
+    """`st_dev` is a mount-instance number, not part of a directory's identity.
+
+    Live failure 2026-08-05: creating a job raised "Session fence workspace root
+    identity changed." with `16777232:98226571` recorded and `16777234:98226571`
+    on disk -- the same inode, a device number macOS reassigned when the volume
+    was remounted. The machine had already hit this once; a
+    `.storage-operations.identity.pre-migration-` backup from an earlier mount
+    holds the same inode under a third device number.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    digest = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()
+    identity_path = workspace.parent / f".eda-workspace-{digest}.identity"
+    info = workspace.stat()
+    identity_path.write_bytes(f"{info.st_dev + 2}:{info.st_ino}\n".encode())
+
+    with session_key_lock(workspace, "same_run"):
+        pass
+
+    # Rewritten, so the next open compares against this mount, not the old one.
+    assert identity_path.read_bytes() == f"{info.st_dev}:{info.st_ino}\n".encode()
+
+
+def test_a_replaced_workspace_is_still_rejected(tmp_path: Path) -> None:
+    """Tolerating the device number must not tolerate a different directory.
+
+    A swap changes the inode, which is the half that identifies the object.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    digest = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()
+    identity_path = workspace.parent / f".eda-workspace-{digest}.identity"
+    info = workspace.stat()
+    identity_path.write_bytes(f"{info.st_dev}:{info.st_ino + 1}\n".encode())
+
+    with pytest.raises(SessionFencePathError, match="workspace root identity changed"):
+        with session_key_lock(workspace, "same_run"):
+            pytest.fail("a different directory must never pass the fence")
