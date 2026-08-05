@@ -494,3 +494,36 @@ def test_exporters_render_strength_prefixes() -> None:
     assert "<li>Strong claim.</li>" in html
     assert "<li>[Indicative] Indicative claim.</li>" in html
     assert "<li>[Exploratory — hypothesis-generating] Exploratory claim.</li>" in html
+
+
+# --------------------------------------------------------------------------- #
+# Registry-authored SQL: the cap exists because a SqlResult cannot prove its own
+# coverage. When the platform wrote the query, the platform knows the coverage.
+# --------------------------------------------------------------------------- #
+def test_registry_written_sql_is_strong() -> None:
+    """A domain metric's SQL is a registry template, not a model's plan.
+
+    `_time_coverage_sql` and friends aggregate a named table the platform chose;
+    that is the same footing as the profiler scan, which is already strong. The
+    cap was blanket, so these read as "[Indicative]" while stating exact facts.
+    """
+    claim = _claim("sql_only", [_SQL_REF])
+    label = evidence_strength_label(
+        claim,
+        evidence_pack=_pack(),
+        sql_results=_sql_results(),
+        platform_sql_ids={_SQL_REF.artifact_id},
+    )
+    assert label == "strong"
+
+
+def test_a_planned_query_is_not_promoted_by_the_exception() -> None:
+    """The set is the whole permission: an id outside it stays indicative."""
+    claim = _claim("sql_only", [_SQL_REF])
+    label = evidence_strength_label(
+        claim,
+        evidence_pack=_pack(),
+        sql_results=_sql_results(),
+        platform_sql_ids={"sql_some_other_result"},
+    )
+    assert label == "indicative"

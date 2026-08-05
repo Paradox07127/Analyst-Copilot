@@ -12,6 +12,7 @@ from eda_platform.agents.evidence_interleave import (
     InMemoryEvidenceResolver,
 )
 from eda_platform.agents.narrative_reviewer import review_narrative
+from eda_platform.agents.narrator import narrate_report
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.column_roles import ColumnRoleSet
 from eda_platform.core.llm import LLMClient, LLMResultMetadata, is_offline_client
@@ -36,6 +37,7 @@ from eda_platform.schemas.reports import (
     ReportSeverity,
     required_report_sections,
 )
+from eda_platform.tools.domain_metrics import background_section_for
 from eda_platform.tools.evidence import (
     EvidenceArtifactSummary,
     EvidencePack,
@@ -154,6 +156,7 @@ def generate_agentic_report(
     llm: LLMClient,
     payload_policy: PayloadPolicy = "schema+aggregates",
     enable_semantic_audit: bool = False,
+    narrator_llm: LLMClient | None = None,
 ) -> AgenticReportResult:
     evidence_pack = build_evidence_pack(artifacts, payload_policy=payload_policy)
     question_results, sql_results = _extract_question_evidence(artifacts)
@@ -274,8 +277,25 @@ def generate_agentic_report(
         evidence_pack=evidence_pack,
         role_sets=_extract_column_role_sets(artifacts),
         sql_results=sql_results,
+        platform_sql_ids=_registry_sql_ids(question_results),
     )
     bundle.status = audit.status
+    # Narration runs last, over claims that already cleared every gate, and may
+    # only reuse their figures. A narrator failure costs prose, never a claim.
+    narration = narrate_report(bundle, llm=narrator_llm or llm)
+    if narration.attempted:
+        note = (
+            f"Wrote a connective narrative for {narration.written} of "
+            f"{narration.attempted} eligible section(s), from claims that had "
+            "already passed the gates."
+        )
+        if narration.rejected:
+            note += (
+                f" {narration.rejected} draft(s) were discarded for carrying a "
+                "figure the claims do not state, or for citing a claim that "
+                "does not exist; those sections keep their bullets."
+            )
+        audit.semantic_notes.append(note)
     bundle.audit = audit
     # Persist all write-time evidence reads in one transcript.
     exchanges: list[InterleaveExchange] = []
@@ -1483,21 +1503,31 @@ def _inject_question_claims(
     focus_section = _section(bundle, _SELECTED_FOCUS_SECTION)
     analysis_section = _section(bundle, _AGENT_ANALYSIS_SECTION)
     for question in question_results:
-        _upsert_focus_item(
-            focus_section,
-            ReportFocusItem(
-                question=question.question,
-                outcome=question.outcome or question.status,
-                question_id=question.question_id,
-            ),
-        )
+        # A background metric describes the data; filing it as an analysis focus
+        # and promoting it into the summary is how a barely-off-even HHI became
+        # the World Cup report's headline (2026-08-04). `qbg_` keeps it out of
+        # the Executive Summary picker, which selects on the `qfind_`/`qbiz_`
+        # prefixes.
+        background = background_section_for(question.metric_id)
+        if background is None:
+            _upsert_focus_item(
+                focus_section,
+                ReportFocusItem(
+                    question=question.question,
+                    outcome=question.outcome or question.status,
+                    question_id=question.question_id,
+                    reason=question.failure_reason,
+                ),
+            )
+        target = _section(bundle, background) if background else analysis_section
+        prefix = "qbg" if background else "qfind"
         for f_index, finding in enumerate(question.findings):
             if finding.dedup_role == "supporting":
                 continue
             _upsert_claim(
-                analysis_section,
+                target,
                 ReportClaim(
-                    id=f"qfind_{question.question_id}_{f_index}",
+                    id=f"{prefix}_{question.question_id}_{f_index}",
                     text=finding.text,
                     evidence=list(finding.evidence),
                     confidence="low" if question.exploratory else "high",
@@ -1523,6 +1553,19 @@ def _upsert_focus_item(section: ReportSection, item: ReportFocusItem) -> None:
     section.focus_items.append(item)
 
 
+def _registry_sql_ids(question_results: list[QuestionExecutionResult]) -> set[str]:
+    """SQL results the platform's own metric templates produced.
+
+    A registry metric carries a `metric_id` and its SQL comes from the template
+    that metric owns, so unlike a planned query its coverage is known.
+    """
+    return {
+        result.sql_result_artifact_id
+        for result in question_results
+        if result.metric_id and result.sql_result_artifact_id
+    }
+
+
 def _apply_business_findings_fallback(
     bundle: ReportBundle,
     question_results: list[QuestionExecutionResult],
@@ -1531,12 +1574,25 @@ def _apply_business_findings_fallback(
     section = _section(bundle, _BUSINESS_FINDINGS_SECTION)
     if section.claims:
         return 0
+    # Every executed finding is already published verbatim under Agent-Performed
+    # Analysis, so copying one here produces a duplicate the exporter replaces
+    # with `See "Agent-Performed Analysis" ...`. Across three live runs the
+    # section held nothing but those stubs (2026-08-05). Filling an empty
+    # section with pointers to the next one is not filling it.
+    published = {
+        claim.text for claim in _section(bundle, _AGENT_ANALYSIS_SECTION).claims
+    }
     findings = [
         (question, finding)
         for question in question_results
         if question.status == "succeeded"
+        # A background metric is not a business finding, and `qbiz_` is a prefix
+        # the Executive Summary picker selects on: the 2026-08-05 offline run
+        # filed time coverage under Dataset Overview and this fallback put it on
+        # the cover anyway, through the other door.
+        and background_section_for(question.metric_id) is None
         for finding in question.findings
-        if finding.dedup_role != "supporting"
+        if finding.dedup_role != "supporting" and finding.text not in published
     ][:_MAX_BUSINESS_FINDING_FALLBACKS]
     for index, (question, finding) in enumerate(findings):
         section.claims.append(
@@ -1555,7 +1611,11 @@ def _apply_dataset_overview_fallback(
     evidence_pack: EvidencePack,
 ) -> int:
     section = _section(bundle, "Dataset Overview")
-    if section.claims or not evidence_pack.datasets:
+    # A background metric's line is filed here but is not an authored summary,
+    # so it must not stand in for one — otherwise routing time coverage into
+    # this section silently costs the reader the row and column counts.
+    authored = [claim for claim in section.claims if not (claim.id or "").startswith("qbg_")]
+    if authored or not evidence_pack.datasets:
         return 0
     for dataset in evidence_pack.datasets:
         section.claims.append(

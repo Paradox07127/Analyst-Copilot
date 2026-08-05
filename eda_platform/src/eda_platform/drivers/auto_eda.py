@@ -1426,6 +1426,9 @@ class ExecuteTopQuestionsStep:
                         "abstention_code": (
                             qexec.payload.get("abstention_code") if qexec is not None else None
                         ),
+                        "failure_reason": (
+                            qexec.payload.get("failure_reason") if qexec is not None else None
+                        ),
                         "interpretation_status": (
                             qexec.payload.get("interpretation_status")
                             if qexec is not None
@@ -1476,11 +1479,13 @@ class ExportAgenticReportStep:
         llm: LLMClient,
         payload_policy: PayloadPolicy,
         artifact_session_ids: dict[str, str] | None = None,
+        narrator_llm: LLMClient | None = None,
     ) -> None:
         self.artifact_ids = artifact_ids
         self.artifact_session_ids = artifact_session_ids or {}
         self.business_context = business_context
         self.llm = llm
+        self.narrator_llm = narrator_llm
         self.payload_policy: PayloadPolicy = payload_policy
 
     def cache_key(self, ctx: SessionContext) -> str:
@@ -1492,6 +1497,13 @@ class ExportAgenticReportStep:
                 "business_context": self.business_context,
                 "payload_policy": self.payload_policy,
                 "llm": llm_execution_fingerprint(self.llm),
+                # Swapping only the narrator must still miss the checkpoint,
+                # or the report comes back written by the previous model.
+                "narrator_llm": (
+                    llm_execution_fingerprint(self.narrator_llm)
+                    if self.narrator_llm is not None
+                    else None
+                ),
             }
         )
 
@@ -1510,6 +1522,7 @@ class ExportAgenticReportStep:
             session_id=ctx.session_id,
             business_context=self.business_context,
             llm=self.llm,
+            narrator_llm=self.narrator_llm,
             payload_policy=self.payload_policy,
         )
         for event in report.llm_events:
@@ -1658,6 +1671,7 @@ def run_auto_eda(
     session_id: str | None = None,
     business_context: str = "",
     llm: LLMClient | None = None,
+    narrator_llm: LLMClient | None = None,
     payload_policy: PayloadPolicy = "schema+aggregates",
     on_trace_event: Callable[[TraceEvent], None] | None = None,
     ml_target_column: str | None = None,
@@ -2184,6 +2198,7 @@ def run_auto_eda(
                     report_parent_ids,
                     business_context=business_context,
                     llm=llm,
+                    narrator_llm=narrator_llm,
                     payload_policy=payload_policy,
                 )
             ],
@@ -2271,6 +2286,7 @@ def generate_report_on_demand(
     result: AutoEDAResult,
     *,
     llm: LLMClient | None = None,
+    narrator_llm: LLMClient | None = None,
     payload_policy: PayloadPolicy = "schema+aggregates",
     budget_policy: SessionBudgetPolicy | None = None,
     cancel_check: Callable[[], bool] | None = None,
@@ -2345,6 +2361,7 @@ def generate_report_on_demand(
                 [artifact.id for artifact in source_artifacts],
                 business_context=result.business_context,
                 llm=run_llm,
+                narrator_llm=narrator_llm,
                 payload_policy=payload_policy,
                 artifact_session_ids={
                     artifact.id: artifact.session_id for artifact in source_artifacts

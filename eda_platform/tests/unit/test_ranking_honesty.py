@@ -165,12 +165,22 @@ def test_parse_order_by_edges() -> None:
     # First key of a multi-key ORDER BY still fixes the primary order.
     assert _parse_order_by("select a from t order by b desc, c") == ("b", "descending")
     assert _parse_order_by("select a from t order by 2 desc") == ("2", "descending")
-    # Bail-outs: no clause, window-only clause, several clauses, expressions.
+    # Only the clause outside every parenthesis orders the result, so a nested
+    # one neither counts nor disqualifies. Widened 2026-08-05: counting the
+    # ORDER BY inside each `RANK() OVER (...)` made a correctly sorted 48-team
+    # result read as unordered, and the fallback published the range of
+    # `team_id` as the report's opening finding. `_ranking_basis` still checks
+    # the parsed key against the rows, so a wrong parse cannot become a claim.
+    assert (
+        _parse_order_by("select * from (select a from t order by b) order by c desc")
+        == ("c", "descending")
+    )
+    assert _parse_order_by(
+        "select rank() over (order by b desc) as r from t order by r desc"
+    ) == ("r", "descending")
+    # Bail-outs: no clause, a clause that only exists inside a window, expressions.
     assert _parse_order_by("select a from t") is None
     assert _parse_order_by("select rank() over (order by b desc) from t") is None
-    assert (
-        _parse_order_by("select * from (select a from t order by b) order by c desc") is None
-    )
     assert _parse_order_by("select a from t order by count(*) desc") is None
 
 

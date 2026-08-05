@@ -1,6 +1,7 @@
 /* TanStack Query hooks over the typed API client. Query keys are centralized
  * here so invalidation stays consistent across features. */
 
+import { useEffect } from "react";
 import {
   useInfiniteQuery,
   useMutation,
@@ -25,6 +26,12 @@ import {
   type ExplorationViewDto,
   type VerifiedRelationDeleteRequest,
 } from "./client";
+import {
+  clearSettingsSelection,
+  readSettingsSelection,
+  restorePatch,
+  writeSettingsSelection,
+} from "../features/settings/settings-preference-storage";
 import {
   dataOperationStorageKey,
   operationActivity,
@@ -819,10 +826,55 @@ export function useDownloadDebugLog(sessionId: string) {
   });
 }
 
+/* Once per page load, not per caller: several screens read settings, and the
+ * restore below must not race itself into a stack of identical patches. */
+let settingsRestoreAttempted = false;
+
+export function resetSettingsRestoreForTest(): void {
+  settingsRestoreAttempted = false;
+}
+
 export function useSettings() {
-  return useQuery({
+  const query = useQuery({
     queryKey: queryKeys.settings,
     queryFn: ({ signal }) => api.getSettings(signal),
+  });
+  const restore = useRestoreSettingsSelection();
+  const view = query.data;
+  useEffect(() => {
+    /* `source` is "env" until something overrides it this session, which is
+     * exactly the state a restarted server comes back in. Once the patch lands
+     * it reads "session" and this stops being true. */
+    if (!view || view.source !== "env" || settingsRestoreAttempted) return;
+    const selection = readSettingsSelection();
+    if (!selection) return;
+    const patch = restorePatch(view, selection);
+    if (!patch) return;
+    settingsRestoreAttempted = true;
+    restore.mutate(patch);
+  }, [view, restore]);
+  return query;
+}
+
+/* Separate from useUpdateSettings so a failed restore cannot surface as a
+ * failed user action, and so the stored selection is not rewritten from the
+ * response it was just restored from. */
+function useRestoreSettingsSelection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: SettingsPatch) =>
+      api.updateSettings(
+        patch,
+        queryClient.getQueryData<SettingsView>(queryKeys.settings)?.version,
+      ),
+    onSuccess: (view: SettingsView) =>
+      queryClient.setQueryData(queryKeys.settings, view),
+    onError: () => {
+      /* A remembered provider can stop being usable — a key removed from the
+       * server env, a model retired. Dropping it is better than re-sending a
+       * patch the server refuses on every load. */
+      clearSettingsSelection();
+    },
   });
 }
 
@@ -861,8 +913,10 @@ export function useUpdateSettings() {
         patch,
         queryClient.getQueryData<SettingsView>(queryKeys.settings)?.version,
       ),
-    onSuccess: (view: SettingsView) =>
-      queryClient.setQueryData(queryKeys.settings, view),
+    onSuccess: (view: SettingsView) => {
+      queryClient.setQueryData(queryKeys.settings, view);
+      writeSettingsSelection(view);
+    },
   });
 }
 
@@ -873,8 +927,13 @@ export function useResetSettings() {
       api.resetSettings(
         queryClient.getQueryData<SettingsView>(queryKeys.settings)?.version,
       ),
-    onSuccess: (view: SettingsView) =>
-      queryClient.setQueryData(queryKeys.settings, view),
+    onSuccess: (view: SettingsView) => {
+      queryClient.setQueryData(queryKeys.settings, view);
+      /* Reset means "go back to the server env"; a remembered selection would
+       * put the old one straight back on the next load. */
+      clearSettingsSelection();
+      settingsRestoreAttempted = true;
+    },
   });
 }
 

@@ -242,6 +242,7 @@ function ModelApiSection({
     save({
       provider: draft.provider,
       model: draft.model,
+      report_model: draft.report_model,
       base_url: draft.base_url,
       temperature: draft.temperature,
       max_tokens: draft.max_tokens,
@@ -257,6 +258,7 @@ function ModelApiSection({
    * rest waits for Save — so the difference has to be visible, not learned. */
   const dirty =
     draft.model !== settings.model ||
+    draft.report_model !== settings.report_model ||
     draft.base_url !== settings.base_url ||
     draft.structured_output_mode !== settings.structured_output_mode ||
     draft.temperature !== settings.temperature ||
@@ -398,6 +400,45 @@ function ModelApiSection({
               </p>
             )}
           </Field>
+
+          {/* The analysis calls its model many times per run; the report's
+           * narrative runs once and is the part a reader judges. Same provider
+           * and key either way — only the id differs. */}
+          {!offline && (
+            <Field
+              label="Report writer model"
+              htmlFor="settings-report-model"
+              hint="Leave empty to write the report with the model above."
+            >
+              {presets.length > 0 && (
+                <select
+                  id="settings-report-model"
+                  aria-label="Report writer model"
+                  className={inputClass}
+                  value={presets.includes(draft.report_model) ? draft.report_model : ""}
+                  onChange={(event) =>
+                    setDraft({ ...draft, report_model: event.target.value })
+                  }
+                >
+                  <option value="">Same as the analysis model</option>
+                  {presets.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <input
+                aria-label="Report writer model id"
+                className={`${inputClass} ${presets.length > 0 ? "mt-2" : ""} font-mono`}
+                value={draft.report_model}
+                placeholder="same as above"
+                onChange={(event) =>
+                  setDraft({ ...draft, report_model: event.target.value })
+                }
+              />
+            </Field>
+          )}
 
           <Field
             label={spec?.requires_base_url ? "Base URL (required)" : "Base URL"}

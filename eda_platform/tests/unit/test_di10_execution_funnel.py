@@ -36,9 +36,11 @@ from eda_platform.schemas.questions import (
     QuestionScore,
 )
 from eda_platform.schemas.sessions import TraceEvent
+from eda_platform.tools.domain_metrics import background_section_for
 from eda_platform.tools.loader import load_csv
 from eda_platform.tools.profiler import profile_dataset
 from eda_platform.tools.question_discovery import (
+    _AUTO_EXEC_MAX_DOMAIN_METRIC,
     auto_execution_composition,
     select_auto_execution_set,
 )
@@ -129,12 +131,12 @@ def _candidate(question_id: str, **overrides: Any) -> QuestionCandidate:
 
 
 def _domain_metric(question_id: str, **overrides: Any) -> QuestionCandidate:
-    return _candidate(
-        question_id,
-        template_id="domain_metric",
-        score=_score(deterministic=0.65, signal=0.65),
-        **overrides,
-    )
+    values: dict[str, Any] = {
+        "template_id": "domain_metric",
+        "score": _score(deterministic=0.65, signal=0.65),
+    }
+    values.update(overrides)
+    return _candidate(question_id, **values)
 
 
 def _exploratory(question_id: str, **overrides: Any) -> QuestionCandidate:
@@ -154,10 +156,13 @@ def _set(*candidates: QuestionCandidate) -> QuestionCandidateSet:
 
 
 # --------------------------------------------------------------------------- #
-# 1. domain_metric floor: all of them, unconditionally
+# 1. domain_metric lane: capped, best-scored first
 # --------------------------------------------------------------------------- #
-def test_every_domain_metric_candidate_is_selected() -> None:
-    metrics = [_domain_metric(f"q_dm_{index}") for index in range(5)]
+def test_domain_metrics_are_capped_and_taken_best_first() -> None:
+    metrics = [
+        _domain_metric(f"q_dm_{index}", score=_score(deterministic=0.9 - index / 100))
+        for index in range(5)
+    ]
     others = [
         _candidate("q_trend", template_id="trend"),
         _candidate("q_group", template_id="group_difference"),
@@ -165,9 +170,31 @@ def test_every_domain_metric_candidate_is_selected() -> None:
     ]
     selected = select_auto_execution_set(_set(*metrics, *others))
 
-    selected_ids = {candidate.question_id for candidate in selected}
-    assert {metric.question_id for metric in metrics} <= selected_ids
+    metric_ids = [c.question_id for c in selected if c.template_id == "domain_metric"]
+    assert metric_ids == ["q_dm_0", "q_dm_1"]
     assert all(candidate.status == "auto_selected" for candidate in selected)
+
+
+def test_domain_metrics_cannot_crowd_out_the_llm_questions() -> None:
+    # The World Cup run's shape: three domain-agnostic metrics (time coverage,
+    # HHI, missing hotspots) outscored every free-form question, took an
+    # uncapped floor, and left 3 of 10 slots unused while 5 LLM questions went
+    # unrun. The metric lane is now the capped one.
+    metrics = [
+        _domain_metric(f"q_dm_{index}", score=_score(deterministic=0.84 - index / 100))
+        for index in range(3)
+    ]
+    pool = [
+        _exploratory(f"q_llm_{index}", score=_score(relevance=0.9 - index / 100))
+        for index in range(9)
+    ]
+    selected = select_auto_execution_set(_set(*metrics, *pool))
+
+    assert len(selected) == 10  # the budget is spent, not abandoned
+    metric_ids = [c.question_id for c in selected if c.template_id == "domain_metric"]
+    exploratory_ids = [c.question_id for c in selected if c.exploratory]
+    assert len(metric_ids) == 2
+    assert len(exploratory_ids) == 8
 
 
 def test_domain_metric_with_confirmed_relations_still_selected() -> None:
@@ -213,13 +240,13 @@ def test_leftover_budget_is_filled_with_ranked_exploratory_questions() -> None:
     selected = select_auto_execution_set(_set(_domain_metric("q_dm_0"), *pool))
 
     exploratory_ids = [c.question_id for c in selected if c.exploratory]
-    assert len(exploratory_ids) == 4  # capped: each costs ~2 extra LLM calls
+    assert len(exploratory_ids) == 8  # spends the whole leftover budget
     assert exploratory_ids == sorted(exploratory_ids)  # best-scored first
 
 
 def test_fill_never_exceeds_the_total_budget() -> None:
     metrics = [_domain_metric(f"q_dm_{index}") for index in range(10)]
-    pool = [_exploratory(f"q_llm_{index}") for index in range(5)]
+    pool = [_exploratory(f"q_llm_{index}") for index in range(15)]
     selected = select_auto_execution_set(_set(*metrics, *pool))
 
     assert len(selected) == 10
@@ -255,7 +282,7 @@ def test_total_is_capped_and_exploratory_floor_survives() -> None:
     assert any(candidate.exploratory for candidate in selected)  # floor kept
     assert sum(
         1 for candidate in selected if candidate.template_id == "domain_metric"
-    ) == 3
+    ) == 2
 
 
 def test_default_cap_and_template_family_dedup() -> None:
@@ -338,9 +365,9 @@ def _events(workspace: Path, session_id: str) -> list[TraceEvent]:
 
 
 # --------------------------------------------------------------------------- #
-# 5. Wiring: offline run executes every domain metric + emits composition
+# 5. Wiring: offline run executes the capped metric lane + emits composition
 # --------------------------------------------------------------------------- #
-def test_auto_eda_offline_executes_all_domain_metrics_and_meters_selection(
+def test_auto_eda_offline_executes_capped_domain_metrics_and_meters_selection(
     tmp_path: Path,
 ) -> None:
     csv_path = _order_items_csv(tmp_path)
@@ -363,7 +390,8 @@ def test_auto_eda_offline_executes_all_domain_metrics_and_meters_selection(
         for candidate in candidate_set.candidates
         if candidate.template_id == "domain_metric"
     }
-    assert domain_metric_ids, "fixture should resolve >=1 domain metric"
+    # The fixture resolves more metrics than the lane admits; that is the point.
+    assert len(domain_metric_ids) > _AUTO_EXEC_MAX_DOMAIN_METRIC
 
     events = _events(workspace, "run_funnel")
     selection_events = [
@@ -373,19 +401,31 @@ def test_auto_eda_offline_executes_all_domain_metrics_and_meters_selection(
     ]
     assert len(selection_events) == 1
     summary = selection_events[0].summary
-    assert summary["n_domain_metric"] == len(domain_metric_ids)
+    assert summary["n_domain_metric"] == _AUTO_EXEC_MAX_DOMAIN_METRIC
     assert (
-        summary["n_domain_metric"] + summary["n_exploratory"] + summary["n_template"]
+        summary["n_background"]
+        + summary["n_domain_metric"]
+        + summary["n_exploratory"]
+        + summary["n_template"]
         == summary["selected_count"]
     )
-    assert domain_metric_ids <= set(summary["question_ids"])
+    # Background metrics run outside the analysis budget, so the lane cap only
+    # binds the business metrics.
+    business_metric_ids = {
+        candidate.question_id
+        for candidate in candidate_set.candidates
+        if candidate.template_id == "domain_metric"
+        and background_section_for(candidate.metric_id) is None
+    }
+    selected_metric_ids = business_metric_ids & set(summary["question_ids"])
+    assert len(selected_metric_ids) == _AUTO_EXEC_MAX_DOMAIN_METRIC
 
     executed_ids = {
         event.summary["question_id"]
         for event in events
         if event.event_type == "question_auto_execution"
     }
-    assert domain_metric_ids <= executed_ids
+    assert selected_metric_ids <= executed_ids
     # Per-question events now disclose their funnel lane.
     per_question = [
         event for event in events if event.event_type == "question_auto_execution"

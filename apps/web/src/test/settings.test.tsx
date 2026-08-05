@@ -91,6 +91,49 @@ describe("Settings page", () => {
     expect(screen.getByLabelText("Model")).toHaveValue("deepseek-v4-flash");
   });
 
+  it("offers a second model for the report and defaults it to the analysis one", async () => {
+    /* The analysis calls its model many times per run; the report's narrative
+     * runs once and is what a reader judges. One control cannot serve both. */
+    renderAppAt("/settings");
+    fireEvent.change(await screen.findByLabelText("Provider"), {
+      target: { value: "deepseek" },
+    });
+
+    const reportSelect = await screen.findByLabelText("Report writer model");
+    expect(reportSelect).toHaveValue("");
+    expect(
+      Array.from(reportSelect.querySelectorAll("option")).map((o) => o.textContent),
+    ).toEqual([
+      "Same as the analysis model",
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
+    ]);
+
+    fireEvent.change(reportSelect, { target: { value: "deepseek-v4-pro" } });
+    // The analysis model is a separate choice and must not follow it.
+    expect(screen.getByLabelText("Model")).toHaveValue("deepseek-v4-flash");
+  });
+
+  it("names the report's model on the status card once it differs", async () => {
+    server.use(
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({
+          ...defaultSettings(),
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          report_model: "deepseek-v4-pro",
+          is_ready_for_live_calls: true,
+          api_key_set: true,
+        }),
+      ),
+    );
+    renderAppAt("/settings");
+
+    const term = await screen.findByText("Report written by");
+    // The form also holds this id; the assertion is about the status card.
+    expect(term.nextElementSibling).toHaveTextContent("deepseek-v4-pro");
+  });
+
   it("offers a provider that has no pre-verified model instead of disabling it", async () => {
     /* Twelve of eighteen providers were `disabled` on this count, including
      * every local one, whose model ids no catalog can enumerate. */

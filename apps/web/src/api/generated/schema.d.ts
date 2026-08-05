@@ -7780,6 +7780,8 @@ export interface components {
             provider?: string | null;
             /** Model */
             model?: string | null;
+            /** Report Model */
+            report_model?: string | null;
             /** Base Url */
             base_url?: string | null;
             /** Temperature */
@@ -7820,6 +7822,11 @@ export interface components {
             provider: string;
             /** Model */
             model: string;
+            /**
+             * Report Model
+             * @default
+             */
+            report_model: string;
             /**
              * Base Url
              * @default

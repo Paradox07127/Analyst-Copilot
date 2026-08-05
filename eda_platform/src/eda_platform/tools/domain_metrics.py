@@ -139,6 +139,19 @@ class MetricDefinition(BaseModel):
     units: dict[str, str] = Field(default_factory=dict)
     postconditions: list[MetricPostcondition] = Field(default_factory=list)
     abstention_codes: list[str] = Field(default_factory=list)
+    # Set when the metric describes the data rather than answering a business
+    # question. Such a metric resolves on every dataset, so competing for
+    # analysis slots it always wins and always says something shallow; it runs
+    # outside the analysis budget and its answer is filed here instead.
+    background_section: str | None = None
+
+
+def background_section_for(metric_id: str | None) -> str | None:
+    """Report section a background metric's answer belongs in, if it is one."""
+    if not metric_id:
+        return None
+    definition = metric_definition(metric_id)
+    return definition.background_section if definition is not None else None
 
 
 class ResolvedMetric(BaseModel):
@@ -331,6 +344,7 @@ def _resolved(
     question_en: str,
     required_relations: list[str] | None = None,
     interpretation_note_en: str = "",
+    interpretation_en: str | None = None,
     output_units: Mapping[str, str] | None = None,
 ) -> ResolvedMetric:
     return ResolvedMetric(
@@ -343,8 +357,11 @@ def _resolved(
         sql=sql,
         question_en=question_en,
         # DI10-W1: a degraded binding (e.g. carrier-handoff late basis) appends
-        # its basis disclosure to the deterministic interpretation skeleton.
-        interpretation_en=definition.interpretation_en + interpretation_note_en,
+        # its basis disclosure to the deterministic interpretation skeleton. A
+        # metric whose output columns are named after the data it found builds
+        # that skeleton here instead; the registry cannot know the field names.
+        interpretation_en=(interpretation_en or definition.interpretation_en)
+        + interpretation_note_en,
         output_units=dict(output_units or definition.units),
     )
 
@@ -523,6 +540,31 @@ where (select min_measure from stats) >= 0
   and (select total_measure from stats) > 0
 limit 1
 """.strip()
+
+
+def missing_hotspot_interpretation(columns: Sequence[str]) -> str:
+    """Interpretation skeleton whose slots match this metric's generated SQL.
+
+    The column list is decided per dataset, so a fixed registry sentence cannot
+    name the fields. It carried none at all, and the metric published "The
+    highest-missing columns and their null shares" while its own SQL held
+    103 of 208 (2026-08-05 offline FIFA run).
+    """
+    parts = [
+        f"{column} is missing in {{missing_{safe_alias(column)}_percent}}% of rows "
+        f"({{missing_{safe_alias(column)}}} of {{row_count}})"
+        for column in columns
+    ]
+    return "; ".join(parts) + "."
+
+
+def missing_hotspot_units(columns: Sequence[str]) -> dict[str, str]:
+    units = {"row_count": "count"}
+    for column in columns:
+        alias = safe_alias(column)
+        units[f"missing_{alias}"] = "count"
+        units[f"missing_{alias}_percent"] = "percent"
+    return units
 
 
 def _missing_hotspot_sql(profile: DatasetProfile, columns: Sequence[str]) -> str:
@@ -1068,6 +1110,8 @@ def _resolve_missing_hotspots(
             referenced_columns={profile.name: columns},
             sql=_missing_hotspot_sql(profile, columns),
             question_en=(f"How severe are the missing-data hotspots ({joined}) in {display}?"),
+            interpretation_en=missing_hotspot_interpretation(columns),
+            output_units=missing_hotspot_units(columns),
         )
     return tracker.skip(definition)
 
@@ -1293,6 +1337,7 @@ DOMAIN_METRIC_REGISTRY: tuple[MetricDefinition, ...] = (
         metric_id="concentration_hhi",
         name_en="Concentration (HHI)",
         domain="generic",
+        background_section="Dataset Overview",
         requirement=MetricRequirement(roles=["dimension", "measure"]),
         interpretation_en=("Across {row_count} groups the HHI is {hhi} (top share {top_share})."),
         input_constraints=[
@@ -1331,6 +1376,7 @@ DOMAIN_METRIC_REGISTRY: tuple[MetricDefinition, ...] = (
         metric_id="missing_hotspots",
         name_en="Missing-data hotspots",
         domain="generic",
+        background_section="Data Quality Findings",
         requirement=MetricRequirement(
             notes=(
                 "Applies when at least one column has "
@@ -1343,6 +1389,7 @@ DOMAIN_METRIC_REGISTRY: tuple[MetricDefinition, ...] = (
         metric_id="time_coverage",
         name_en="Time-span coverage",
         domain="generic",
+        background_section="Dataset Overview",
         requirement=MetricRequirement(roles=["timestamp"]),
         interpretation_en=(
             "Data spans {first_timestamp} to {last_timestamp} "

@@ -18,6 +18,7 @@ from pandas.api.types import (
 from pandas.core.util.hashing import hash_pandas_object as _hash_pandas_object
 
 from eda_platform.core.ids import make_artifact_id
+from eda_platform.core.tool_guard import is_boolean_like
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, ColumnProfile, DatasetProfile
 from eda_platform.tools.frame_stats import distribution_kind, iqr_bounds
 from eda_platform.tools.loader import LoadedDataset
@@ -483,13 +484,13 @@ def _infer_semantic_type(
     warnings: list[str] = []
     non_null = series.dropna()
 
-    if _looks_like_id_name(normalized_name) and unique_percent >= 60:
+    if looks_like_id_name(normalized_name) and unique_percent >= 60:
         return "id", warnings, None
 
     if _looks_like_entity_identifier(normalized_name, entity_names) and unique_percent >= 80:
         return "id", warnings, None
 
-    if is_bool_dtype(series) or _is_boolean_like(non_null):
+    if is_bool_dtype(series) or is_boolean_like(non_null):
         return "boolean", warnings, None
 
     temporal_name = _has_temporal_name_token(normalized_name)
@@ -581,11 +582,13 @@ def _looks_like_integer_id_sequence(
     return (high - low + 1) <= _INTEGER_ID_MAX_RANGE_FACTOR * unique_count
 
 
-def _looks_like_id_name(normalized_name: str) -> bool:
+def looks_like_id_name(name: str) -> bool:
+    """Whether a column name says the column identifies rather than measures."""
+    normalized = name.lower().strip()
     return (
-        normalized_name == "id"
-        or normalized_name.endswith("_id")
-        or normalized_name.endswith(" id")
+        normalized == "id"
+        or normalized.endswith("_id")
+        or normalized.endswith(" id")
     )
 
 
@@ -597,14 +600,6 @@ def _looks_like_entity_identifier(normalized_name: str, entity_names: frozenset[
     if name in entity_names:
         return True
     return name.endswith("_name") or name.endswith("_code")
-
-
-def _is_boolean_like(series: pd.Series) -> bool:
-    if series.empty:
-        return False
-    values = {str(value).strip().lower() for value in series.unique()}
-    boolean_values = {"true", "false", "yes", "no", "y", "n", "0", "1"}
-    return len(values) <= 2 and values.issubset(boolean_values)
 
 
 _TEMPORAL_NAME_TOKENS = frozenset({"date", "time", "datetime", "timestamp", "ts"})

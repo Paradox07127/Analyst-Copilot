@@ -26064,6 +26064,17 @@
             ],
             "title": "Model"
           },
+          "report_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report Model"
+          },
           "base_url": {
             "anyOf": [
               {
@@ -26215,6 +26226,11 @@
           "model": {
             "type": "string",
             "title": "Model"
+          },
+          "report_model": {
+            "type": "string",
+            "title": "Report Model",
+            "default": ""
           },
           "base_url": {
             "type": "string",

@@ -130,6 +130,8 @@ class _Session:
     dev_mode: bool = False
     """Developer-view toggle. Presentation-only: no service branches on it."""
     analysis_depth: int = DEFAULT_ANALYSIS_DEPTH
+    report_model: str = ""
+    """Optional second model for the report narrative; "" means use `settings`."""
     version: int = 0
 
 
@@ -270,7 +272,7 @@ class SettingsService:
             llm=session.settings,
             payload_policy=session.payload_policy,
             overridden=session.touched,
-            env_overlay=_env_overlay(session.settings),
+            env_overlay=_env_overlay(session.settings, session.report_model),
             analysis_depth=session.analysis_depth,
         )
 
@@ -310,6 +312,8 @@ class SettingsService:
                 session.dev_mode = patch.dev_mode
             if patch.analysis_depth is not None:
                 session.analysis_depth = _parse_analysis_depth(patch.analysis_depth)
+            if patch.report_model is not None:
+                session.report_model = _parse_report_model(patch.report_model)
             session.touched = True
             session.version += 1
             return self._view(session)
@@ -329,6 +333,7 @@ class SettingsService:
             session.touched = False
             session.dev_mode = False
             session.analysis_depth = DEFAULT_ANALYSIS_DEPTH
+            session.report_model = ""
             session.version += 1
             return self._view(session)
 
@@ -441,6 +446,7 @@ class SettingsService:
             version=session.version,
             provider=settings.provider.value,
             model=settings.model,
+            report_model=session.report_model,
             base_url=settings.base_url,
             resolved_base_url=settings.resolved_base_url,
             temperature=settings.temperature,
@@ -708,6 +714,19 @@ def _status(settings: LLMSettings) -> LLMConfigurationStatus:
     )
 
 
+def _parse_report_model(value: str) -> str:
+    """A model id with no surrounding whitespace, or "" to use the workflow's.
+
+    Trimming instead of rejecting would let a pasted id with a stray space read
+    as valid here and then 404 at the provider, where the cause is invisible.
+    """
+    if value != value.strip():
+        raise SettingsValidationError(
+            "report_model must not have leading or trailing whitespace."
+        )
+    return value
+
+
 def _parse_analysis_depth(value: int) -> int:
     """Reject instead of silently changing the centrally mapped product tier."""
     try:
@@ -734,7 +753,7 @@ def _bounded_float(
     return float(value)
 
 
-def _env_overlay(settings: LLMSettings) -> dict[str, str]:
+def _env_overlay(settings: LLMSettings, report_model: str = "") -> dict[str, str]:
     """Session settings as the env vars `core.env` already understands, so a
     worker subprocess resolves them without a new config channel."""
     overlay = {
@@ -750,6 +769,9 @@ def _env_overlay(settings: LLMSettings) -> dict[str, str]:
     }
     if settings.api_key:
         overlay["EDA_LLM_API_KEY"] = settings.api_key
+    # Absent, not empty: an empty model id would be sent to the endpoint.
+    if report_model:
+        overlay["EDA_REPORT_LLM_MODEL"] = report_model
     return overlay
 
 

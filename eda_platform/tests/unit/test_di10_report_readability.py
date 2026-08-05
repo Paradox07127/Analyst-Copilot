@@ -178,6 +178,119 @@ def test_limitations_keep_at_most_three_same_code_warnings_itemized() -> None:
         assert f"Interpretation involving c{index}" in limitations
 
 
+def _multi_dataset_context_artifacts(
+    code: str, datasets: list[tuple[str, str | None]]
+) -> list[Artifact]:
+    """One QUALITY_CONTEXT_SET per dataset, each carrying a single condition."""
+    artifacts: list[Artifact] = []
+    for index, (dataset_name, column) in enumerate(datasets):
+        context = QualityContext(
+            context_id=f"ctx_{code}_{index}",
+            dataset_id=f"ds_{index}",
+            dataset_name=dataset_name,
+            issue_code=code,
+            severity="warn",
+            column=column,
+            observation=f"{column or 'dataset'} shows the {code} condition.",
+            report_limitation=f"{column or 'This table'} carries the {code} condition.",
+        )
+        artifacts.append(
+            Artifact(
+                id=f"qualityctx_{index:012d}",
+                type=ArtifactType.QUALITY_CONTEXT_SET,
+                project_id="project_demo",
+                session_id="run_demo",
+                payload=QualityContextSet(
+                    dataset_id=f"ds_{index}",
+                    dataset_name=dataset_name,
+                    contexts=[context],
+                ).model_dump(mode="json"),
+            )
+        )
+    return artifacts
+
+
+def test_one_condition_spread_thin_across_datasets_becomes_one_line() -> None:
+    # The World Cup run's shape: 11 datasets with one or two flagged columns
+    # each. Per-dataset aggregation needs >3 columns in ONE dataset, so it
+    # never fired and Limitations ran to 18 lines of near-identical prose.
+    artifacts = _multi_dataset_context_artifacts(
+        "id_not_unique",
+        [
+            ("matches.csv", "player_of_the_match_id"),
+            ("referees.csv", "country"),
+            ("player_stats.csv", "player_name"),
+            ("squads_and_players.csv", "player_name"),
+        ],
+    )
+    limitations = _section_text(
+        report_bundle_to_markdown(_empty_bundle(), artifacts=artifacts),
+        "## Limitations and Risks",
+    )
+
+    assert limitations.count("carries the id_not_unique condition") == 0
+    # One line, and it still names where to look.
+    assert len([line for line in limitations.splitlines() if line.startswith("- ")]) == 1
+    for dataset in ("matches.csv", "referees.csv", "squads_and_players.csv"):
+        assert dataset in limitations
+    assert "player_of_the_match_id" in limitations
+
+
+def test_a_dataset_level_condition_groups_by_dataset_name() -> None:
+    artifacts = _multi_dataset_context_artifacts(
+        "duplicate_rows",
+        [("player_stats.csv", None), ("referees.csv", None), ("stages.csv", None)],
+    )
+    limitations = _section_text(
+        report_bundle_to_markdown(_empty_bundle(), artifacts=artifacts),
+        "## Limitations and Risks",
+    )
+
+    assert len([line for line in limitations.splitlines() if line.startswith("- ")]) == 1
+    for dataset in ("player_stats.csv", "referees.csv", "stages.csv"):
+        assert dataset in limitations
+    # A dataset-level condition has one "place" per dataset, so counting both
+    # says the same number twice.
+    assert "3 datasets" in limitations
+    assert "places across" not in limitations
+
+
+def test_two_grouped_conditions_do_not_open_with_the_same_sentence() -> None:
+    # Two groups both falling back to "A profiler data-quality flag affects..."
+    # reproduces the boilerplate the grouping was meant to remove.
+    artifacts = [
+        *_multi_dataset_context_artifacts(
+            "id_not_unique",
+            [("a.csv", "k"), ("b.csv", "k"), ("c.csv", "k")],
+        ),
+        *_multi_dataset_context_artifacts(
+            "duplicate_rows", [("d.csv", None), ("e.csv", None), ("f.csv", None)]
+        ),
+    ]
+    limitations = _section_text(
+        report_bundle_to_markdown(_empty_bundle(), artifacts=artifacts),
+        "## Limitations and Risks",
+    )
+
+    openings = [line.split(" in ")[0] for line in limitations.splitlines() if line.startswith("- ")]
+    assert len(openings) == 2
+    assert len(set(openings)) == 2
+    assert "A profiler data-quality flag" not in limitations
+
+
+def test_two_occurrences_stay_itemized_rather_than_going_vague() -> None:
+    artifacts = _multi_dataset_context_artifacts(
+        "numeric_parse_failure",
+        [("match_events.csv", "minute"), ("venues.csv", "capacity")],
+    )
+    limitations = _section_text(
+        report_bundle_to_markdown(_empty_bundle(), artifacts=artifacts),
+        "## Limitations and Risks",
+    )
+
+    assert limitations.count("carries the numeric_parse_failure condition") == 2
+
+
 def test_limitations_aggregation_never_hides_critical_conditions() -> None:
     contexts = [
         *(_quality_context(i, code="high_missing", column=f"c{i}") for i in range(1, 6)),

@@ -8,6 +8,7 @@ import pytest
 from eda_platform.schemas.reports import (
     ReportAudit,
     ReportBundle,
+    ReportClaim,
     ReportStatus,
 )
 from eda_platform.tools.exporter import (
@@ -99,32 +100,51 @@ def _validated_bundle(audit: ReportAudit | None) -> ReportBundle:
     return bundle
 
 
-def test_markdown_status_line_discloses_degraded_gate() -> None:
+def _bundle_with_claims(strong: int, other: int) -> ReportBundle:
     bundle = _validated_bundle(
         ReportAudit(status=ReportStatus.VALIDATED, gate_verdict="degraded")
     )
-    markdown = report_bundle_to_markdown(bundle)
-    assert "Status: validated · Gate: degraded" in markdown
+    section = bundle.sections[0]
+    for index in range(strong):
+        section.claims.append(
+            ReportClaim(id=f"s{index}", text="x", confidence_label="strong")
+        )
+    for index in range(other):
+        section.claims.append(
+            ReportClaim(id=f"i{index}", text="x", confidence_label="indicative")
+        )
+    return bundle
 
 
-def test_markdown_status_line_omits_gate_when_pass_or_absent() -> None:
-    passing = _validated_bundle(
-        ReportAudit(status=ReportStatus.VALIDATED, gate_verdict="pass")
+def test_the_status_line_states_the_evidence_mix_not_a_verdict() -> None:
+    """Reworded 2026-08-05.
+
+    The strong tier means "measured over a whole table", and a report whose
+    claims come from analysis queries can never reach the 60% cut -- so every
+    real run printed `Gate: degraded`, which reads as a malfunction rather than
+    as what it is. The count says more than the label did, and says it without
+    implying something broke. The verdict itself stays on the audit and in the
+    Audit Notes, where the cut is also stated.
+    """
+    markdown = report_bundle_to_markdown(_bundle_with_claims(strong=4, other=8))
+    assert "Gate: degraded" not in markdown
+    assert "4 of 12 claims" in markdown
+
+
+def test_a_rejected_gate_still_says_so() -> None:
+    """A hard-gate rejection is a malfunction and must keep reading like one."""
+    bundle = _validated_bundle(
+        ReportAudit(status=ReportStatus.VALIDATED, gate_verdict="rejected")
     )
-    assert "Gate:" not in report_bundle_to_markdown(passing)
+    assert "Gate: rejected" in report_bundle_to_markdown(bundle)
 
+
+def test_a_claimless_report_states_no_mix() -> None:
     no_audit = _validated_bundle(None)
-    assert "Gate:" not in report_bundle_to_markdown(no_audit)
+    assert "claims" not in report_bundle_to_markdown(no_audit).splitlines()[2]
 
 
-def test_html_status_line_discloses_degraded_gate() -> None:
-    bundle = _validated_bundle(
-        ReportAudit(status=ReportStatus.VALIDATED, gate_verdict="degraded")
-    )
-    html = export_report_html(bundle)
-    assert "Status: validated · Gate: degraded" in html
-
-    passing = _validated_bundle(
-        ReportAudit(status=ReportStatus.VALIDATED, gate_verdict="pass")
-    )
-    assert "Gate:" not in export_report_html(passing)
+def test_html_and_markdown_share_one_status_line() -> None:
+    bundle = _bundle_with_claims(strong=4, other=8)
+    assert "4 of 12 claims" in export_report_html(bundle)
+    assert "Gate: degraded" not in export_report_html(bundle)

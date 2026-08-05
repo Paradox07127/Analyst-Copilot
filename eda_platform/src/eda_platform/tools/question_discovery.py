@@ -33,7 +33,11 @@ from eda_platform.schemas.relations import (
     RelationshipValidation,
     RelationshipValidationSet,
 )
-from eda_platform.tools.domain_metrics import applicable_metrics, metric_definition
+from eda_platform.tools.domain_metrics import (
+    applicable_metrics,
+    background_section_for,
+    metric_definition,
+)
 from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.relationship_discovery import _quote_identifier, _relation_name
 from eda_platform.tools.sql_names import safe_alias
@@ -372,9 +376,15 @@ _AUTO_EXEC_TEMPLATE_TOP_N = 2
 _AUTO_EXEC_MIN_EXPLORATORY = 1
 # Floors guarantee coverage; the fill spends what the floors left over. Without
 # it a single-domain-metric dataset executed 2 of 10 allowed slots and left every
-# high-scoring LLM business question unrun (2026-07-22 audit). Exploratory work
-# costs ~2 extra LLM calls each, so the fill is capped rather than unbounded.
-_AUTO_EXEC_MAX_EXPLORATORY = 4
+# high-scoring LLM business question unrun (2026-07-22 audit). No separate cap:
+# every other lane is taken before the fill runs, so none of them can be starved,
+# and once the domain-agnostic metrics left the budget a lower ceiling only meant
+# idle slots on a dataset with no business metrics at all.
+_AUTO_EXEC_MAX_EXPLORATORY = _AUTO_EXEC_MAX_TOTAL
+# Business metrics still compete for slots; only the domain-agnostic ones left.
+# Uncapped, the metric lane took the World Cup run's top three slots for stadium-
+# capacity HHI and a date range while five LLM questions went unrun.
+_AUTO_EXEC_MAX_DOMAIN_METRIC = 2
 
 
 def select_auto_execution_set(
@@ -384,16 +394,28 @@ def select_auto_execution_set(
     template_top_n: int = _AUTO_EXEC_TEMPLATE_TOP_N,
     min_exploratory: int = _AUTO_EXEC_MIN_EXPLORATORY,
     max_exploratory: int = _AUTO_EXEC_MAX_EXPLORATORY,
+    max_domain_metric: int = _AUTO_EXEC_MAX_DOMAIN_METRIC,
 ) -> list[QuestionCandidate]:
     """Pick the questions the run executes automatically (DI10-W2 rules above)."""
     candidates = candidate_set.candidates
 
-    # 1. domain_metric floor: all of them, deterministically ordered.
+    # 1. domain_metric lane: the best few, deterministically ordered. Background
+    # metrics leave it: they describe the data, resolve on every dataset, and
+    # cost no LLM call, so they run outside the analysis budget rather than
+    # winning slots from questions that answer something (2026-08-04 FIFA run).
+    resolved_metrics = [
+        candidate
+        for candidate in candidates
+        if candidate.template_id == "domain_metric" and candidate.sql_template is not None
+    ]
+    background_metrics = [
+        candidate for candidate in resolved_metrics if is_background_metric(candidate)
+    ]
     domain_metrics = sorted(
         (
             candidate
-            for candidate in candidates
-            if candidate.template_id == "domain_metric" and candidate.sql_template is not None
+            for candidate in resolved_metrics
+            if not is_background_metric(candidate)
         ),
         key=lambda item: (-item.score.deterministic_score, item.question_id),
     )
@@ -430,18 +452,27 @@ def select_auto_execution_set(
         selected.append(candidate.model_copy(update={"status": "auto_selected"}))
         selected_ids.add(candidate.question_id)
 
-    for candidate in domain_metrics[:max_total]:
+    for candidate in background_metrics:
+        take(candidate)
+    background_ids = {candidate.question_id for candidate in background_metrics}
+
+    def analysis_count() -> int:
+        return sum(
+            1 for candidate in selected if candidate.question_id not in background_ids
+        )
+
+    for candidate in domain_metrics[: min(max_domain_metric, max_total)]:
         take(candidate)
     # The exploratory floor is reserved BEFORE the template top-up so the cap
     # can never squeeze it out.
     for candidate in exploratory_pool[:min_exploratory]:
-        if len(selected) >= max_total:
+        if analysis_count() >= max_total:
             break
         take(candidate)
     used_templates: set[str] = set()
     template_taken = 0
     for candidate in template_pool:
-        if template_taken >= template_top_n or len(selected) >= max_total:
+        if template_taken >= template_top_n or analysis_count() >= max_total:
             break
         family = candidate.template_id or candidate.origin
         if family in used_templates or candidate.question_id in selected_ids:
@@ -455,20 +486,31 @@ def select_auto_execution_set(
     exploratory_ids = {item.question_id for item in exploratory_pool}
     exploratory_taken = sum(1 for candidate in selected if candidate.question_id in exploratory_ids)
     for candidate in exploratory_pool:
-        if len(selected) >= max_total or exploratory_taken >= max_exploratory:
+        if analysis_count() >= max_total or exploratory_taken >= max_exploratory:
             break
         if candidate.question_id in selected_ids:
             continue
         take(candidate)
         exploratory_taken += 1
-    return selected[:max_total]
+    analysis = [c for c in selected if c.question_id not in background_ids][:max_total]
+    kept = {c.question_id for c in analysis} | background_ids
+    return [c for c in selected if c.question_id in kept]
+
+
+def is_background_metric(candidate: QuestionCandidate) -> bool:
+    return background_section_for(candidate.metric_id) is not None
 
 
 def auto_execution_composition(
     selected: Sequence[QuestionCandidate],
 ) -> dict[str, int]:
     """Selection make-up for trace telemetry (n_* keys sum to selected_count)."""
-    n_domain_metric = sum(1 for candidate in selected if candidate.template_id == "domain_metric")
+    n_background = sum(1 for candidate in selected if is_background_metric(candidate))
+    n_domain_metric = sum(
+        1
+        for candidate in selected
+        if candidate.template_id == "domain_metric" and not is_background_metric(candidate)
+    )
     n_exploratory = sum(
         1
         for candidate in selected
@@ -476,9 +518,10 @@ def auto_execution_composition(
     )
     return {
         "selected_count": len(selected),
+        "n_background": n_background,
         "n_domain_metric": n_domain_metric,
         "n_exploratory": n_exploratory,
-        "n_template": len(selected) - n_domain_metric - n_exploratory,
+        "n_template": len(selected) - n_background - n_domain_metric - n_exploratory,
     }
 
 

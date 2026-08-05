@@ -42,6 +42,11 @@ class FakePlanLLM:
         self.call_count = 0
 
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
+        # Report generation also narrates the finished bundle. Only plan
+        # attempts spend the rewrite budget these tests are about, so a
+        # non-plan request is answered without touching the counter.
+        if schema is not ReportPlanDraft:
+            return cast(T, schema())
         index = min(self.call_count, len(self.plans) - 1)
         self.call_count += 1
         return cast(T, self.plans[index])

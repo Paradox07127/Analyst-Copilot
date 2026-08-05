@@ -195,6 +195,50 @@ def check_column_exists(
 
 
 _SQL_JOIN_RE = re.compile(r"\bjoin\b", re.IGNORECASE)
+_CTE_NAME_RE = re.compile(r"(?:\bwith\b|,)\s*(\"[^\"]+\"|[A-Za-z_]\w*)\s+as\s*\(", re.IGNORECASE)
+# `LATERAL` and `ONLY` modify the reference that follows rather than being one.
+# A single-table credit-card query pivoted with `CROSS JOIN LATERAL (VALUES ...)`
+# was refused because the scan counted `LATERAL` as its second table (2026-08-05).
+_TABLE_REF_RE = re.compile(
+    r"\b(?:from|join)\s+(?:(?:lateral|only)\s+)*"
+    r"(\"[^\"]+\"|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(\()?",
+    re.IGNORECASE,
+)
+# `EXTRACT(year FROM ts)` and `SUBSTRING(s FROM 1)` put a column where a table
+# reference otherwise sits. Bodies without nested parentheses cover the forms
+# the planner actually emits.
+_FROM_IN_FUNCTION_RE = re.compile(
+    r"\b(?:extract|substring|trim|overlay|position)\s*\([^()]*\)", re.IGNORECASE
+)
+# Prose inside a CASE arm is not structure. One live query advised avoiding
+# "transitions from low-elevation venues" and the scan read `low` as a table.
+_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+
+
+def _sql_structure(sql: str) -> str:
+    """The statement with literals and comments blanked, offsets preserved."""
+    blank = lambda match: " " * len(match.group(0))  # noqa: E731
+    return _STRING_LITERAL_RE.sub(blank, _SQL_COMMENT_RE.sub(blank, sql))
+
+
+def sql_base_tables(sql: str) -> set[str]:
+    """Table names a statement reads, excluding its own CTEs.
+
+    A CTE joined back to the table that fed it is single-table analysis, which
+    is what the FIFA run's banded-comparison questions were doing when the
+    `\\bjoin\\b` test killed all three of them (2026-08-04).
+    """
+    scanned = _FROM_IN_FUNCTION_RE.sub(" ", _sql_structure(sql))
+    cte_names = {name.strip('"').lower() for name in _CTE_NAME_RE.findall(scanned)}
+    referenced = {
+        name.strip('"').lower()
+        # A name followed by "(" is a table function (`unnest(...)`,
+        # `read_csv(...)`): it produces rows without naming a relation.
+        for name, call in _TABLE_REF_RE.findall(scanned)
+        if not call
+    }
+    return referenced - cte_names
 
 
 def check_sql_joins_declared(
@@ -209,7 +253,9 @@ def check_sql_joins_declared(
     allowed = ", ".join(sorted(confirmed)) or "(no confirmed joins in the whitelist)"
     violations: list[GuardViolation] = []
     sql_text = sql if isinstance(sql, str) else ""
-    if _SQL_JOIN_RE.search(sql_text) and not required_relations:
+    joins = _SQL_JOIN_RE.search(_sql_structure(sql_text)) is not None
+    crosses_tables = len(sql_base_tables(sql_text)) > 1
+    if joins and crosses_tables and not required_relations:
         violations.append(
             GuardViolation(
                 field=field,
@@ -256,8 +302,14 @@ def check_column_semantic_type(
     if exists is not None:
         return exists
     column_name = cast(str, column)
-    semantic_type = infer_column_semantic_type(cast(pd.Series, frame[column_name]))
+    series = cast(pd.Series, frame[column_name])
+    semantic_type = infer_column_semantic_type(series)
     if semantic_type in allowed_semantic_types:
+        return None
+    # A 0/1 flag is a number and a category at once. This vocabulary has no
+    # boolean, so the profiler's judgement of the same column ("boolean") had no
+    # way to reach a guard demanding "categorical" (2026-08-04 FIFA run 2).
+    if "categorical" in allowed_semantic_types and is_boolean_like(series.dropna()):
         return None
     allowed = ", ".join(allowed_semantic_types)
     return GuardViolation(
@@ -267,6 +319,21 @@ def check_column_semantic_type(
         fix_hint=(fix_hint or f"Choose a column whose semantic type is one of: {allowed}."),
         problem=f"column semantic type is `{semantic_type}`.",
     )
+
+
+_BOOLEAN_LIKE_VALUES = frozenset({"true", "false", "yes", "no", "y", "n", "0", "1"})
+
+
+def is_boolean_like(series: pd.Series) -> bool:
+    """Whether a column carries a two-valued flag, whatever its dtype.
+
+    Shared with the profiler so a column cannot be boolean in the profile and
+    something else at the guard.
+    """
+    if series.empty:
+        return False
+    values = {str(value).strip().lower() for value in series.unique()}
+    return len(values) <= 2 and values.issubset(_BOOLEAN_LIKE_VALUES)
 
 
 def infer_column_semantic_type(series: pd.Series) -> ColumnSemanticType:

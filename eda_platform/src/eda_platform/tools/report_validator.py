@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import operator
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -42,6 +42,20 @@ _NUMBER_PATTERN = re.compile(
     r"|(?<![\w.-])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?"
     r"|(?<![\w.-])-?\d+(?:\.\d+)?%?"
 )
+# "2026-06-11T00:00:00" was tokenized as the magnitudes 2026, 0 and 0, and every
+# claim naming a date failed numeric_mismatch against evidence that had no such
+# figures (both 2026-08-04 FIFA runs). A date literal names a day; only a bare
+# number claims a quantity.
+_DATE_LITERAL_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+)
+
+
+def _blank_date_literals(text: str) -> str:
+    """Blank out date literals, preserving offsets for the threshold lookbehind."""
+    return _DATE_LITERAL_PATTERN.sub(lambda match: " " * len(match.group(0)), text)
+
+
 _ROW_LOCATOR_PATTERN = re.compile(
     r"^(?:rows|rows_preview)(?:\[(?P<index>\d+)\])?"
     r"(?:\.(?P<field>[A-Za-z_][\w]*))?$"
@@ -1090,6 +1104,7 @@ def _threshold_subject(prefix_text: str, value: float) -> str | None:
 
 def _numeric_tokens_from_text(text: str) -> list[_NumericToken]:
     tokens: list[_NumericToken] = []
+    text = _blank_date_literals(text)
     for match in _NUMBER_PATTERN.finditer(text):
         raw_token = match.group(0)
         is_percent = raw_token.endswith("%")
@@ -1229,6 +1244,7 @@ def evidence_strength_label(
     *,
     evidence_pack: EvidencePack | None,
     sql_results: dict[str, SqlResult],
+    platform_sql_ids: Collection[str] = (),
 ) -> EvidenceStrength:
     """F6 claim tier with number binding (cross-review 2026-07-23).
 
@@ -1248,12 +1264,16 @@ def evidence_strength_label(
         if not verifying:
             return "exploratory"
         strengths = {
-            _evidence_ref_strength(claim.evidence[index], evidence_pack, sql_results)
+            _evidence_ref_strength(
+                claim.evidence[index], evidence_pack, sql_results, platform_sql_ids
+            )
             for index in verifying
         }
     else:
         strengths = {
-            _evidence_ref_strength(evidence, evidence_pack, sql_results)
+            _evidence_ref_strength(
+                evidence, evidence_pack, sql_results, platform_sql_ids
+            )
             for evidence in claim.evidence
         }
     if "strong" in strengths:
@@ -1315,6 +1335,7 @@ def _evidence_ref_strength(
     evidence: EvidenceRef,
     evidence_pack: EvidencePack | None,
     sql_results: dict[str, SqlResult],
+    platform_sql_ids: Collection[str] = (),
 ) -> EvidenceStrength | None:
     """Strength one ref contributes, or None when it resolves nothing.
 
@@ -1331,7 +1352,12 @@ def _evidence_ref_strength(
         cells = _sql_result_numbers_with_policy(
             evidence, sql_results[evidence.artifact_id]
         )
-        return "indicative" if cells else None
+        if not cells:
+            return None
+        # The cap is about a SqlResult not proving its own coverage. A registry
+        # metric's SQL was written by the platform against a table it chose, so
+        # the coverage is known the same way the profiler's is.
+        return "strong" if evidence.artifact_id in platform_sql_ids else "indicative"
     if evidence_pack is None:
         return None
     summary = evidence_pack.artifact_index.get(evidence.artifact_id)
@@ -1387,6 +1413,7 @@ def apply_semantic_gate(
     partial_ratio_threshold: float = DEFAULT_PARTIAL_RATIO,
     min_buckets: int = DEFAULT_MIN_BUCKETS,
     strong_ratio_cut: float = STRONG_RATIO_CUT,
+    platform_sql_ids: Collection[str] = (),
 ) -> SemanticGateOutcome:
     """Label claims with F6 evidence-strength tiers and grade the bundle.
 
@@ -1407,7 +1434,10 @@ def apply_semantic_gate(
     for section in bundle.sections:
         for claim in section.claims:
             strength = evidence_strength_label(
-                claim, evidence_pack=evidence_pack, sql_results=sql_results
+                claim,
+                evidence_pack=evidence_pack,
+                sql_results=sql_results,
+                platform_sql_ids=platform_sql_ids,
             )
             claim.confidence_label = strength
             if not (claim.id or "").startswith(_LEGACY_QFOCUS_PREFIX):

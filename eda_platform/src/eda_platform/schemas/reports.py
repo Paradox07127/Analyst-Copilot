@@ -236,11 +236,17 @@ class ReportFocusItem(BaseModel):
     question: str
     outcome: str
     question_id: str = ""
+    # Why a non-answered question produced nothing; empty when it answered.
+    reason: str = ""
 
 
 class ReportSection(BaseModel):
     title: str
     body: str = ""
+    # Connective prose over this section's claims, written after they passed
+    # every gate and held to their figures. Empty when narration was off,
+    # unavailable, or rejected.
+    narrative: str = ""
     claims: list[ReportClaim] = Field(default_factory=list)
     # Default keeps pre-F4 persisted bundles loadable.
     focus_items: list[ReportFocusItem] = Field(default_factory=list)
@@ -284,9 +290,16 @@ def merge_duplicate_sections(sections: list[ReportSection]) -> list[ReportSectio
     for section in sections:
         existing = merged.get(section.title)
         if existing is None:
-            existing = ReportSection(title=section.title, body=section.body, claims=[])
+            existing = ReportSection(
+                title=section.title,
+                body=section.body,
+                narrative=section.narrative,
+                claims=[],
+            )
             merged[section.title] = existing
             order.append(section.title)
+        elif not existing.narrative:
+            existing.narrative = section.narrative
         seen_ids = {claim.id for claim in existing.claims if claim.id}
         for claim in section.claims:
             if claim.id and claim.id in seen_ids:

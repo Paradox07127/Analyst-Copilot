@@ -13,6 +13,7 @@ import {
   useReport,
 } from "../../api/hooks";
 import { useJobActivity } from "../../app/job-activity";
+import { sessionSectionPath } from "../../app/paths";
 import {
   EmptyState,
   ErrorState,
@@ -55,8 +56,8 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-/* The exporter prints the gate verdict as prose in the report body; it is the
- * run's trust signal, so it is hoisted here and explained on demand. */
+/* The exporter prints these as prose in the report body; they are the run's
+ * trust signal, so they are hoisted here and explained on demand. */
 function GateSignal({ verdict }: { verdict: string }) {
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -64,13 +65,42 @@ function GateSignal({ verdict }: { verdict: string }) {
         {`Gate ${verdict}`}
       </Badge>
       <Hint label="Evidence gate">
-        The check the report runs against its own claims after writing them.{" "}
-        <strong>pass</strong> — at least 60% of claims reached the strongest
-        evidence tier. <strong>degraded</strong> — the report was published, but
-        fewer than that did; most claims are indicative or exploratory.{" "}
-        <strong>rejected</strong> — a validator raised a critical finding.
-        Degraded is a legitimate outcome, not an error: read the Claim Ledger
-        before quoting a figure.
+        {verdict === "rejected" ? (
+          <>
+            A validator raised a critical finding while checking the report
+            against its own claims, so the report was not cleared. Read the
+            Validator Findings before quoting anything from it.
+          </>
+        ) : (
+          /* A report written before 2026-08-05 carries this verdict in its
+           * stored markdown and always will, so its own meaning has to stay
+           * available rather than being read as the rejection above. */
+          <>
+            Written before this report started stating its evidence mix.{" "}
+            <strong>degraded</strong> meant fewer than 60% of its claims reached
+            the strongest evidence tier — a legitimate outcome, not an error.
+            Read the Claim Ledger before quoting a figure.
+          </>
+        )}
+      </Hint>
+    </span>
+  );
+}
+
+/* Replaced the blanket "Gate: degraded" badge on 2026-08-05: the strongest tier
+ * means a claim was measured over a whole table, and an analysis report's claims
+ * mostly come from analysis queries, so every real run wore a badge that read
+ * like a malfunction. The count is the same information without the implication. */
+function EvidenceMix({ summary }: { summary: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-status-neutral">
+      {summary}
+      <Hint label="Evidence mix">
+        A claim counts as measured over a whole table when it rests on a
+        profile, a quality scan, an analysis table, a statistical test, or one
+        of the platform&apos;s own metric queries. The rest rest on queries the
+        agent planned for this run — legitimate, and worth checking in the Claim
+        Ledger before quoting a figure.
       </Hint>
     </span>
   );
@@ -431,6 +461,7 @@ export function Component() {
             <h1 className="text-xl font-semibold">Report</h1>
             {report.data && <StatusBadge status={report.data.status} />}
             {outline?.gate && <GateSignal verdict={outline.gate} />}
+            {outline?.evidence && <EvidenceMix summary={outline.evidence} />}
           </div>
           <p className="max-w-2xl text-sm text-status-neutral">
             Read the decision-ready story first, then verify its claims in the
@@ -526,6 +557,11 @@ export function Component() {
                       <ReportBody
                         markdown={outline.narrative}
                         inspectableIds={outline.inspectableIds}
+                        qualityHref={sessionSectionPath(
+                          projectId,
+                          sessionId,
+                          "quality",
+                        )}
                         selectedId={
                           inspecting?.sessionId === sessionId
                             ? inspecting.artifactId

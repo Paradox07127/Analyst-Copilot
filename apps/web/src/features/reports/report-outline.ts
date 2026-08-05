@@ -1,10 +1,13 @@
 /* Reads the structure the exporter itself writes — headings, the
- * `Status: … · Gate: …` line, the Claim Ledger table — so the reader chrome
+ * `Status: …` line, the Claim Ledger table — so the reader chrome
  * can navigate and cite. The prose is never rewritten: number formatting in
  * the body is the exporter's job, not this file's. */
 
+/* Three shapes, in the exporter's own order: the status, an optional rejected
+ * gate, and an optional evidence mix. The mix replaced the blanket
+ * `Gate: degraded` on 2026-08-05, so both must parse. */
 const STATUS_LINE =
-  /^Status:\s*([A-Za-z][\w-]*)(?:\s*·\s*Gate:\s*([A-Za-z][\w-]*))?\s*$/;
+  /^Status:\s*([A-Za-z][\w-]*)(?:\s*·\s*Gate:\s*([A-Za-z][\w-]*))?(?:\s*·\s*(.+?))?\s*$/;
 const HEADING = /^(#{2,3})\s+(.+?)\s*#*$/;
 const FENCE = /^\s*(?:```|~~~)/;
 /* exporter.py opens each Data Map / analysis line with `- \`<artifact id>\``.
@@ -60,6 +63,9 @@ export type ReportOutline = {
   narrativeWords: number;
   status: string | null;
   gate: string | null;
+  /** How much of the report was measured over a whole table, as the exporter
+   *  phrased it; null when the report published no claims. */
+  evidence: string | null;
   headings: ReportHeading[];
   words: number;
   ledger: ClaimLedgerRow[];
@@ -101,6 +107,7 @@ export function readReportOutline(markdown: string): ReportOutline {
   const seenHeadings = new Set<string>();
   let status: string | null = null;
   let gate: string | null = null;
+  let evidence: string | null = null;
   let fenced = false;
   let inLedger = false;
   let inReference = false;
@@ -128,6 +135,7 @@ export function readReportOutline(markdown: string): ReportOutline {
       if (match) {
         status = match[1] ?? null;
         gate = match[2] ?? null;
+        evidence = match[3] ?? null;
         /* Dropped from the body because the page header shows the same pair
          * as badges a few lines above it. */
         continue;
@@ -198,6 +206,7 @@ export function readReportOutline(markdown: string): ReportOutline {
     narrativeWords,
     status,
     gate,
+    evidence,
     headings,
     words,
     ledger,

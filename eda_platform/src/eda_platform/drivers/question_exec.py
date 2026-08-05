@@ -70,6 +70,7 @@ from eda_platform.tools.domain_metrics import (
 )
 from eda_platform.tools.evidence import PayloadPolicy
 from eda_platform.tools.loader import LoadedDataset, load_csv
+from eda_platform.tools.profiler import looks_like_id_name
 from eda_platform.tools.relationship_discovery import _relation_name
 from eda_platform.tools.report_validator import full_coverage_evidence_refs
 from eda_platform.tools.sql_runner import SqlCatalog, build_catalog, run_sql
@@ -684,6 +685,7 @@ def _agent_qexec_artifact(
             question_id=candidate.question_id,
             question=candidate.question_en,
             origin=candidate.origin,
+            metric_id=candidate.metric_id,
             project_id=project_id,
             session_id=session_id,
             parent_ids=[*parent_ids, *evidence_ids],
@@ -698,6 +700,7 @@ def _agent_qexec_artifact(
             question_id=candidate.question_id,
             question=candidate.question_en,
             origin=candidate.origin,
+            metric_id=candidate.metric_id,
             project_id=project_id,
             session_id=session_id,
             parent_ids=[*parent_ids, *evidence_ids],
@@ -710,6 +713,7 @@ def _agent_qexec_artifact(
             question_id=candidate.question_id,
             question=candidate.question_en,
             origin=candidate.origin,
+            metric_id=candidate.metric_id,
             project_id=project_id,
             session_id=session_id,
             parent_ids=parent_ids,
@@ -756,6 +760,7 @@ def _agent_qexec_artifact(
         question_id=candidate.question_id,
         question=candidate.question_en,
         origin=candidate.origin,
+        metric_id=candidate.metric_id,
         execution_mode="agent",
         tool_calls=agent_result.tool_calls,
         tool_names=unique_tool_names,
@@ -850,6 +855,7 @@ def _execute_template_question(
                 question_id=candidate.question_id,
                 question=candidate.question_en,
                 origin=candidate.origin,
+                metric_id=candidate.metric_id,
                 project_id=project_id,
                 session_id=session_id,
                 parent_ids=parent_ids,
@@ -871,6 +877,7 @@ def _execute_template_question(
                 question_id=candidate.question_id,
                 question=candidate.question_en,
                 origin=candidate.origin,
+                metric_id=candidate.metric_id,
                 sql=candidate.sql_template,
                 project_id=project_id,
                 session_id=session_id,
@@ -913,6 +920,7 @@ def _execute_template_question(
                 question_id=candidate.question_id,
                 question=candidate.question_en,
                 origin=candidate.origin,
+                metric_id=candidate.metric_id,
                 sql=candidate.sql_template,
                 project_id=project_id,
                 session_id=session_id,
@@ -944,6 +952,7 @@ def _execute_llm_question(
                 question_id=candidate.question_id,
                 question=candidate.question_en,
                 origin=candidate.origin,
+                metric_id=candidate.metric_id,
                 project_id=project_id,
                 session_id=session_id,
                 parent_ids=parent_ids,
@@ -1035,6 +1044,7 @@ def _execute_llm_question(
                 question_id=candidate.question_id,
                 question=candidate.question_en,
                 origin=candidate.origin,
+                metric_id=candidate.metric_id,
                 project_id=project_id,
                 session_id=session_id,
                 parent_ids=parent_ids,
@@ -1083,6 +1093,7 @@ def _successful_qexec_artifact(
             question_id=candidate.question_id,
             question=candidate.question_en,
             origin=candidate.origin,
+            metric_id=candidate.metric_id,
             sql=SqlResult.model_validate(sql_artifact.payload).sql,
             project_id=project_id,
             session_id=session_id,
@@ -1113,6 +1124,7 @@ def _successful_qexec_artifact(
         question_id=candidate.question_id,
         question=candidate.question_en,
         origin=candidate.origin,
+        metric_id=candidate.metric_id,
         plan_summary=plan_summary,
         sql=sql_result.sql,
         sql_result_artifact_id=sql_artifact.id,
@@ -1219,6 +1231,7 @@ def _failed_qexec_artifact(
     outcome: Literal["abstained", "failed", "awaiting_approval"] = "failed",
     abstention_code: str | None = None,
     exploratory: bool = False,
+    metric_id: str | None = None,
     execution_mode: Literal["pipeline", "agent"] = "pipeline",
     tool_calls: int = 0,
     tool_names: list[str] | None = None,
@@ -1239,6 +1252,7 @@ def _failed_qexec_artifact(
         abstention_code=abstention_code,
         error=error,
         exploratory=exploratory,
+        metric_id=metric_id,
     )
     payload = result.model_dump(mode="json")
     return Artifact(
@@ -1488,6 +1502,15 @@ def _match_domain_metric_definition(
     return best
 
 
+def _format_timestamp(value: object) -> str:
+    """Calendar day of a timestamp; the zero time-of-day is noise, not data."""
+    text = str(value).strip()
+    return text[:10] if _ISO_DATE_PREFIX.match(text) else text
+
+
+_ISO_DATE_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
 def _domain_metric_finding(
     candidate: QuestionCandidate,
     artifact_id: str,
@@ -1504,10 +1527,19 @@ def _domain_metric_finding(
     evidence: list[EvidenceRef] = []
     filled = template
     for name in dict.fromkeys(_TEMPLATE_PLACEHOLDER.findall(template)):
+        declared_unit = units.get(name)
+        # A timestamp answers "when", not "how much". Requiring it to parse as a
+        # number abandoned the whole time-coverage finding and left a generic
+        # fallback to publish one of its five fields (2026-08-04 FIFA runs).
+        if declared_unit == "timestamp":
+            stamp = row.get(name)
+            if stamp is None:
+                return None
+            filled = filled.replace(f"{{{name}}}", _format_timestamp(stamp))
+            continue
         value = _number(row.get(name))
         if value is None:  # pragma: no cover - guarded by the matcher
             return None
-        declared_unit = units.get(name)
         if declared_unit is None and f"{{{name}}}%" in template:
             # Historical SqlResult artifacts predate produced-unit metadata.
             declared_unit = "percent"
@@ -1559,7 +1591,16 @@ def _findings_for(candidate: QuestionCandidate, sql_artifact: Artifact) -> list[
     if candidate.template_id == "trend" and len(rows) >= 2:
         return [_trend_finding(candidate, sql_artifact.id, rows)]
     if candidate.template_id in {"group_difference", "cross_table_aggregation"}:
-        return [_ranked_group_finding(candidate, sql_artifact.id, rows, sql=result.sql)]
+        return [
+            _ranked_group_finding(
+                candidate,
+                sql_artifact.id,
+                rows,
+                sql=result.sql,
+                total_rows=result.row_count,
+                truncated=result.truncated,
+            )
+        ]
     if candidate.template_id == "correlation_probe":
         return [_single_value_finding(candidate, sql_artifact.id, rows[0], "pearson")]
     if candidate.template_id == "quality_missing":
@@ -1570,7 +1611,16 @@ def _findings_for(candidate: QuestionCandidate, sql_artifact: Artifact) -> list[
         finding = _intent_finding(candidate, sql_artifact.id, rows[0], intent)
         if finding is not None:
             return [finding]
-    return [_generic_finding(candidate, sql_artifact.id, rows, sql=result.sql)]
+    return [
+        _generic_finding(
+            candidate,
+            sql_artifact.id,
+            rows,
+            sql=result.sql,
+            total_rows=result.row_count,
+                truncated=result.truncated,
+        )
+    ]
 
 
 def _evidence_unit(unit: str | None) -> Literal["raw", "percent", "currency"]:
@@ -1646,6 +1696,8 @@ def _ranked_group_finding(
     rows: list[dict[str, object]],
     *,
     sql: str = "",
+    total_rows: int | None = None,
+    truncated: bool = False,
 ) -> QuestionFinding:
     top = rows[0]
     group_column = _first_group_column(top)
@@ -1656,7 +1708,14 @@ def _ranked_group_finding(
         or _first_prefixed_column(top, "avg_")
     )
     if group_column is None or metric_column is None:
-        return _generic_finding(candidate, artifact_id, rows, sql=sql)
+        return _generic_finding(
+            candidate,
+            artifact_id,
+            rows,
+            sql=sql,
+            total_rows=total_rows,
+            truncated=truncated,
+        )
     return _ranked_finding(
         candidate,
         artifact_id,
@@ -1664,6 +1723,8 @@ def _ranked_group_finding(
         label_column=group_column,
         metric_column=metric_column,
         sql=sql,
+        total_rows=total_rows,
+        truncated=truncated,
     )
 
 
@@ -1695,6 +1756,8 @@ def _generic_finding(
     rows: list[dict[str, object]],
     *,
     sql: str = "",
+    total_rows: int | None = None,
+    truncated: bool = False,
 ) -> QuestionFinding:
     """Summarize a free-form SQL result by reading the whole ranked table."""
     top = rows[0]
@@ -1714,6 +1777,8 @@ def _generic_finding(
             label_column=label_column,
             metric_column=metric_column,
             sql=sql,
+            total_rows=total_rows,
+            truncated=truncated,
         )
     value = _number(top.get(metric_column))
     if value is None:
@@ -1740,6 +1805,8 @@ def _ranked_finding(
     label_column: str | None,
     metric_column: str,
     sql: str = "",
+    total_rows: int | None = None,
+    truncated: bool = False,
 ) -> QuestionFinding:
     """Claim a ranking only on an ordering the executed SQL actually declares.
 
@@ -1765,8 +1832,17 @@ def _ranked_finding(
             if share_finding is not None:
                 return share_finding
     basis = _ranking_basis(sql, rows)
-    if basis is None:
-        return _unranked_rows_finding(candidate, artifact_id, rows, sql=sql)
+    # A preview is not the result: its first rows only lead the whole ordering
+    # when nothing was cut off behind them.
+    if basis is None or _is_partial(rows, total_rows, truncated):
+        return _unranked_rows_finding(
+            candidate,
+            artifact_id,
+            rows,
+            sql=sql,
+            total_rows=total_rows,
+            truncated=truncated,
+        )
     basis_column, direction = basis
     leaders = rows[:3]
     values = [value for row in leaders if (value := _number(row.get(basis_column))) is not None]
@@ -1785,14 +1861,21 @@ def _ranked_finding(
     ]
     label_columns = [
         column for column in _group_by_columns(sql, rows[0]) if column != basis_column
-    ]
+    ] or _identifying_columns(rows, basis_column)
     if not label_columns and label_column is not None and label_column != basis_column:
         label_columns = [label_column]
     if label_columns:
         labels = [_row_label(row, label_columns) for row in leaders]
         if len(set(labels)) < len(labels):
             # Indistinguishable labels cannot support a ranked claim.
-            return _unranked_rows_finding(candidate, artifact_id, rows, sql=sql)
+            return _unranked_rows_finding(
+                candidate,
+                artifact_id,
+                rows,
+                sql=sql,
+                total_rows=total_rows,
+                truncated=truncated,
+            )
         for index, row in enumerate(leaders):
             for column in label_columns:
                 label_value = _number(row.get(column))
@@ -1805,9 +1888,23 @@ def _ranked_finding(
                             value=label_value,
                         )
                     )
+        size_column = _group_size_column(rows[0], sql, exclude=basis_column)
+        if size_column is not None:
+            for index, row in enumerate(leaders):
+                size = _number(row.get(size_column))
+                if size is not None:
+                    evidence.append(
+                        EvidenceRef(
+                            kind="sql",
+                            artifact_id=artifact_id,
+                            locator=f"rows_preview[{index}].{size_column}",
+                            value=size,
+                        )
+                    )
         parts = [
-            f"{label} ({basis_column} {value:.4g}{suffix})"
-            for label, value in zip(labels, values, strict=False)
+            f"{label} ({basis_column} {value:.4g}{suffix}"
+            f"{_group_size_suffix(row, size_column)})"
+            for label, value, row in zip(labels, values, leaders, strict=False)
         ]
         lead_in = "top is" if direction == "descending" else "smallest is"
         body = f"{lead_in} {parts[0]}"
@@ -1851,16 +1948,37 @@ def _unquote_identifier(token: str) -> str:
     return token
 
 
+def _paren_depth(sql: str, index: int) -> int:
+    """Nesting depth at `index`, ignoring parentheses inside string literals."""
+    depth = 0
+    in_literal = False
+    for character in sql[:index]:
+        if character == "'":
+            in_literal = not in_literal
+        elif not in_literal and character == "(":
+            depth += 1
+        elif not in_literal and character == ")":
+            depth -= 1
+    return depth
+
+
 def _parse_order_by(sql: str) -> tuple[str, str] | None:
     """Primary sort key and direction from the SQL's single top-level ORDER BY.
 
-    Conservative: returns ``None`` for zero or multiple ORDER BY occurrences
-    (subqueries, window functions) or any clause shape beyond plain
-    column/position keys with optional ASC/DESC, NULLS, LIMIT and OFFSET.
+    Only occurrences outside every parenthesis count. A window function carries
+    its own ``ORDER BY`` inside ``OVER (...)``, and counting those made a
+    perfectly ordered 48-team result look unordered; the fallback then published
+    the range of ``team_id`` as the report's opening finding (2026-08-05 run).
+    Still conservative about the clause shape: plain column/position keys with
+    optional ASC/DESC, NULLS, LIMIT and OFFSET, and nothing else.
     """
     if not sql:
         return None
-    matches = list(_ORDER_BY_KEYWORD.finditer(sql))
+    matches = [
+        match
+        for match in _ORDER_BY_KEYWORD.finditer(sql)
+        if _paren_depth(sql, match.start()) == 0
+    ]
     if len(matches) != 1:
         return None
     tail = _ORDER_BY_TAIL.match(sql[matches[0].end() :])
@@ -1945,44 +2063,177 @@ def _row_label(row: dict[str, object], columns: list[str]) -> str:
     return " / ".join(f"{column}={row.get(column)}" for column in columns)
 
 
+# Beyond three keys the rows are cells of a multi-dimensional table, not a list
+# of nameable things, and the label becomes longer than the claim around it.
+_MAX_LABEL_COLUMNS = 3
+
+
+def _identifying_columns(
+    rows: list[dict[str, object]], basis_column: str
+) -> list[str]:
+    """Shortest leading column run that tells every row apart, or nothing.
+
+    SQL puts group keys before aggregates, so the identity of a row is a prefix.
+    Taking only the first key published "top is result_type" for a row that was
+    result_type=Regular, and gave up entirely on three rows that all began with
+    "UEFA" (2026-08-04 FIFA run 2).
+    """
+    columns = [column for column in rows[0] if column != basis_column]
+    # A result whose first column is already a measure has no leading key to
+    # name rows with; anything picked here would label a row by its own value.
+    if not columns or all(_number(row.get(columns[0])) is not None for row in rows):
+        return []
+    for size in range(1, min(_MAX_LABEL_COLUMNS, len(columns)) + 1):
+        prefix = columns[:size]
+        keys = {tuple(str(row.get(column)) for column in prefix) for row in rows}
+        if len(keys) == len(rows):
+            return prefix
+    return []
+
+
+def _is_partial(
+    rows: list[dict[str, object]], total_rows: int | None, truncated: bool
+) -> bool:
+    """Whether the rows in hand are less than the result.
+
+    The flag is authoritative; the count comparison only covers producers that
+    report a size without setting it.
+    """
+    return truncated or (total_rows is not None and total_rows > len(rows))
+
+
 def _unranked_rows_finding(
     candidate: QuestionCandidate,
     artifact_id: str,
     rows: list[dict[str, object]],
     *,
     sql: str = "",
+    total_rows: int | None = None,
+    truncated: bool = False,
 ) -> QuestionFinding:
-    """Neutral multi-row summary: the SQL proves no ordering, so none is claimed."""
+    """Multi-row summary when no ordering is claimable.
+
+    An ordering needs the whole result behind it, but a spread does not: min and
+    max are computed from the rows rather than read off their order, so they
+    survive a missing ORDER BY. They do not survive truncation, which is the one
+    case left with nothing to say beyond how much there was.
+    """
+    count = total_rows if total_rows is not None else len(rows)
     group_columns = _group_by_columns(sql, rows[0])
-    evidence = [
-        EvidenceRef(
-            kind="sql",
-            artifact_id=artifact_id,
-            locator="derived: len(rows_preview)",
-            value=len(rows),
-        )
-    ]
-    cells: list[str] = []
-    for column, value in rows[0].items():
-        number = _number(value)
-        if number is None:
-            cells.append(f"{column}={value}")
-        else:
-            cells.append(f"{column}={_format_number(number)}")
-            evidence.append(
+    grouped = f" grouped by {', '.join(group_columns)}" if group_columns else ""
+    if _is_partial(rows, total_rows, truncated):
+        kept = f" only the first {len(rows)} were kept, so" if count > len(rows) else ""
+        return QuestionFinding(
+            text=(
+                f"{candidate.question_en} Returned {count} rows{grouped};{kept} "
+                "neither a ranking nor a range over the whole result can be "
+                "stated from the rows on hand."
+            ),
+            evidence=[
                 EvidenceRef(
                     kind="sql",
                     artifact_id=artifact_id,
-                    locator=f"rows_preview[0].{column}",
-                    value=number,
+                    locator="derived: row_count",
+                    value=float(count),
                 )
-            )
-    grouped = f" grouped by {', '.join(group_columns)}" if group_columns else ""
-    text = (
-        f"{candidate.question_en} Returned {len(rows)} rows{grouped} "
-        f"(no ranking basis in the SQL); example row: {', '.join(cells)}."
+            ],
+        )
+    spread = _spread_finding(
+        candidate, artifact_id, rows, count=count, grouped=grouped
     )
-    return QuestionFinding(text=text, evidence=evidence)
+    if spread is not None:
+        return spread
+    return QuestionFinding(
+        text=f"{candidate.question_en} Returned {count} rows{grouped}.",
+        evidence=[
+            EvidenceRef(
+                kind="sql",
+                artifact_id=artifact_id,
+                locator="derived: row_count",
+                value=float(count),
+            )
+        ],
+    )
+
+
+def _spread_finding(
+    candidate: QuestionCandidate,
+    artifact_id: str,
+    rows: list[dict[str, object]],
+    *,
+    count: int,
+    grouped: str,
+) -> QuestionFinding | None:
+    """Range of the result's headline measure, with the rows holding each end.
+
+    An identifier is not a measure: reporting that `team_id` runs 1 to 48 says
+    only that there are 48 teams, and it opened the 2026-08-05 report.
+    """
+    metric_column = _rank_metric_column(rows[0], skip=looks_like_id_name)
+    if metric_column is None or len(rows) < 2:
+        return None
+    valued = [
+        (index, value)
+        for index, row in enumerate(rows)
+        if (value := _number(row.get(metric_column))) is not None
+    ]
+    if len(valued) < 2:
+        return None
+    low_index, low = min(valued, key=lambda item: item[1])
+    high_index, high = max(valued, key=lambda item: item[1])
+    if low == high:
+        return None
+    label_columns = _identifying_columns(rows, metric_column)
+    where = ""
+    if label_columns:
+        where = (
+            f", from {_row_label(rows[low_index], label_columns)} "
+            f"to {_row_label(rows[high_index], label_columns)}"
+        )
+    return QuestionFinding(
+        text=(
+            f"{candidate.question_en} Across {count} rows{grouped}, "
+            f"{metric_column} ranges from {_format_number(low)} to "
+            f"{_format_number(high)}{where} (the SQL declares no ordering, so "
+            "this is a range, not a ranking)."
+        ),
+        evidence=[
+            EvidenceRef(
+                kind="sql",
+                artifact_id=artifact_id,
+                locator=f"rows_preview[{low_index}].{metric_column}",
+                value=low,
+            ),
+            EvidenceRef(
+                kind="sql",
+                artifact_id=artifact_id,
+                locator=f"rows_preview[{high_index}].{metric_column}",
+                value=high,
+            ),
+        ],
+    )
+
+
+def _group_size_column(
+    row: dict[str, object], sql: str, *, exclude: str
+) -> str | None:
+    """The COUNT(*) column of a grouped result, when the SQL declares one.
+
+    A ranking on a summed magnitude is partly a ranking on group size: the
+    FIFA xG question put a 95-match bucket above a 1-match one whose per-match
+    gap was fourteen times larger. The reader cannot see that without n.
+    """
+    for column in row:
+        if column != exclude and _is_count_metric(column, sql):
+            return column
+    return None
+
+
+def _group_size_suffix(row: dict[str, object], size_column: str | None) -> str:
+    if size_column is None:
+        return ""
+    size = _number(row.get(size_column))
+    return "" if size is None else f", {size_column} {size:g}"
 
 
 # A ranked result whose metric is a row count over few labels is a distribution,
@@ -2074,13 +2325,16 @@ def _cluster_note(values: list[float]) -> str:
     return ""
 
 
-def _rank_metric_column(row: dict[str, object]) -> str | None:
+def _rank_metric_column(
+    row: dict[str, object], *, skip: Callable[[str], bool] | None = None
+) -> str | None:
+    excluded = skip or (lambda _name: False)
     for prefix in ("total_", "avg_"):
         column = _first_prefixed_column(row, prefix)
-        if column is not None:
+        if column is not None and not excluded(column):
             return column
     for column, value in row.items():
-        if column == "row_count":
+        if column == "row_count" or excluded(column):
             continue
         if _number(value) is not None:
             return column

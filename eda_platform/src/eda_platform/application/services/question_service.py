@@ -792,7 +792,11 @@ class QuestionService:
                     qexec_artifact_id=artifact.id,
                     execution_session_id=execution_session_id,
                     abstention_code=str(abstention) if abstention else None,
-                    failure_reason=_failure_headline(payload.get("error")),
+                    # The artifact now derives this, and unlike the headline
+                    # scan it also explains an abstention. Artifacts written
+                    # before the field existed still fall back to the scan.
+                    failure_reason=str(payload.get("failure_reason") or "")
+                    or _failure_headline(payload.get("error")),
                 )
         return executions
 

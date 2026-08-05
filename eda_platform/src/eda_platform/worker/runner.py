@@ -31,7 +31,11 @@ from eda_platform.core.cancellation import (
     current_cancellation_token,
 )
 from eda_platform.core.config import require_absolute_workspace
-from eda_platform.core.env import API_KEY_ENV_VARS, load_llm_settings_from_env_file
+from eda_platform.core.env import (
+    API_KEY_ENV_VARS,
+    load_llm_settings_from_env_file,
+    load_report_llm_settings_from_env_file,
+)
 from eda_platform.core.kernel import SessionCancelled
 from eda_platform.core.llm import (
     CancellableLLMClient,
@@ -293,6 +297,7 @@ def _run_auto_eda_job(
             session_id=str(job["session_id"]),
             business_context=str(params.get("business_context", "")),
             llm=_build_llm(params),
+            narrator_llm=_build_report_llm(params),
             payload_policy=_payload_policy(params),
             ml_target_column=params.get("ml_target_column"),
             ml_time_column=params.get("ml_time_column"),
@@ -335,6 +340,7 @@ def _run_auto_eda_job(
             session_id=str(job["session_id"]),
             business_context=str(params.get("business_context", "")),
             llm=_build_llm(params),
+            narrator_llm=_build_report_llm(params),
             payload_policy=_payload_policy(params),
             ml_target_column=params.get("ml_target_column"),
             ml_time_column=params.get("ml_time_column"),
@@ -792,6 +798,7 @@ def _run_report_generate_job(
     generated = generate_report_on_demand(
         loaded.result,
         llm=_build_llm(params),
+        narrator_llm=_build_report_llm(params),
         payload_policy=_payload_policy(params),
         cancel_check=cancel_check,
     )
@@ -1536,6 +1543,26 @@ def _build_llm(
         client = OfflineLLMClient()
     else:
         client = create_llm_client(load_llm_settings_from_env_file())
+    return _with_cancellation(client, cancellation)
+
+
+def _build_report_llm(
+    params: dict,
+    *,
+    cancellation: CancellationToken | None = None,
+) -> LLMClient | None:
+    """The narrator's client, or None when no report override is configured."""
+    if params.get("llm") == "offline":
+        return None
+    settings = load_report_llm_settings_from_env_file()
+    if settings == load_llm_settings_from_env_file():
+        return None
+    return _with_cancellation(create_llm_client(settings), cancellation)
+
+
+def _with_cancellation(
+    client: LLMClient, cancellation: CancellationToken | None
+) -> LLMClient:
     actual_cancellation = cancellation or current_cancellation_token()
     if actual_cancellation is None:
         return client

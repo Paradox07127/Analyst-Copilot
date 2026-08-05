@@ -637,9 +637,17 @@ def test_tampered_finding_value_is_pruned_by_validator(tmp_path: Path) -> None:
     assert result.audit.status is ReportStatus.VALIDATED
 
 
-def test_business_findings_fallback_injects_when_llm_returns_no_business_claims(
+def test_business_findings_fallback_skips_findings_the_report_already_states(
     tmp_path: Path,
 ) -> None:
+    """Narrowed 2026-08-05: the fallback used to copy findings in regardless.
+
+    Every executed finding is published verbatim under Agent-Performed Analysis
+    first, so each copy was a duplicate that the exporter's dedup replaced with
+    `See "Agent-Performed Analysis" ...`. Across three live FIFA runs the section
+    never held anything else. The reader keeps the findings; only the pointers
+    to them are gone.
+    """
     base = _base_artifacts(tmp_path)
     profile = base[0]
     artifacts = [*base, _sql_result_artifact(), *_qexec_artifacts()]
@@ -652,13 +660,12 @@ def test_business_findings_fallback_injects_when_llm_returns_no_business_claims(
         llm=FakeReportPlanLLM(_minimal_plan(profile.id)),
     )
 
+    analysis = _section(result, "Agent-Performed Analysis")
     business = _section(result, "Business Findings")
-    assert business.claims
-    assert len(business.claims) <= 3
-    for claim in business.claims:
-        assert claim.evidence
-        assert claim.id.startswith("qbiz_")
-    assert any(
+    assert analysis.claims, "the findings must still reach the reader"
+    published = {claim.text for claim in analysis.claims}
+    assert all(claim.text not in published for claim in business.claims)
+    assert not any(
         "Injected" in note and "Business Findings" in note for note in result.audit.semantic_notes
     )
     assert result.bundle.status is ReportStatus.VALIDATED

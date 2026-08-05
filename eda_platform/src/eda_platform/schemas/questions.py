@@ -296,6 +296,88 @@ class QuestionFinding(BaseModel):
     dedup_cluster_key: str | None = None
 
 
+_ABSTENTION_REASONS: dict[str, str] = {
+    "approval_required": (
+        "This question is waiting for your approval before it can run."
+    ),
+    "agent_no_evidence": (
+        "The agent produced an answer but no evidence artifact behind it, so the "
+        "answer was not published."
+    ),
+    "agent_answer_unverified": (
+        "The agent's answer could not be checked against the evidence it cited."
+    ),
+    "answer_schema_mismatch": (
+        "The answer did not have the shape this question requires, so it could "
+        "not be read as a result."
+    ),
+    "metric_contract_failed": (
+        "The computed metric failed its sanity check, for example a share "
+        "outside 0-100% or a duration that cannot occur."
+    ),
+}
+_GUARD_PROBLEM_HEADING = "What was wrong:"
+_MAX_FAILURE_REASON_CHARS = 300
+# Database and planner errors name functions, argument types and candidate
+# overloads: written for whoever debugs the planner, and three of them were
+# pasted into a business report (2026-08-05 run). The detail stays in `error`
+# and on the Trace page; the reader gets what it means for the question.
+_TECHNICAL_ERROR_REASONS: tuple[tuple[str, str], ...] = (
+    (
+        "binding failed",
+        "The generated query did not fit this data's column types, so it could "
+        "not run.",
+    ),
+    (
+        "produced invalid sql",
+        "The generated query could not be run against this data, and the retry "
+        "did not fix it.",
+    ),
+)
+
+
+def _guard_problems(error: str) -> str:
+    """The 'What was wrong' bullets of a tool-guard message, without the repair
+    protocol that follows them -- that half is addressed to the model."""
+    start = error.find(_GUARD_PROBLEM_HEADING)
+    if start == -1:
+        return ""
+    problems: list[str] = []
+    for line in error[start + len(_GUARD_PROBLEM_HEADING) :].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("- "):
+            break
+        # "- `field` got 'rule': explanation." keeps only the explanation.
+        _, separator, explanation = stripped.partition("': ")
+        problems.append((explanation if separator else stripped[2:]).strip())
+    return " ".join(problems)
+
+
+def question_failure_reason(*, error: str | None, abstention_code: str | None) -> str:
+    """One reader-facing sentence for a question that produced no answer."""
+    mapped = _ABSTENTION_REASONS.get(abstention_code or "")
+    if mapped:
+        return mapped
+    text = (error or "").strip()
+    if not text:
+        return "The run recorded no reason for this failure."
+    problems = _guard_problems(text)
+    if not problems:
+        lowered = text.lower()
+        for marker, sentence in _TECHNICAL_ERROR_REASONS:
+            if marker in lowered:
+                return sentence
+    # An unmapped error is still more specific than a generic apology, but only
+    # its first sentence: the rest is a stack trace or a retry protocol.
+    reason = problems or text.splitlines()[0]
+    reason = reason.replace("`", "")
+    if len(reason) > _MAX_FAILURE_REASON_CHARS:
+        reason = reason[: _MAX_FAILURE_REASON_CHARS - 1].rstrip() + "…"
+    return reason
+
+
 class QuestionExecutionResult(BaseModel):
     """Outcome of executing one question; artifact prefix `qexec`."""
 
@@ -317,11 +399,18 @@ class QuestionExecutionResult(BaseModel):
     outcome: Literal["answered", "abstained", "failed", "awaiting_approval"] | None = None
     abstention_code: str | None = None
     error: str | None = None
+    # `error` is addressed to the model that must retry ("Return corrected
+    # parameters..."); this is the one sentence a reader gets instead. Derived,
+    # never authored, so no failure path can forget to explain itself.
+    failure_reason: str = ""
     # Validator-gated interpretation; evidence remains the number source.
     interpretation: str = ""
     interpretation_status: Literal["validated", "fallback", "absent"] = "absent"
     # Mirrors the originating candidate's exploratory status.
     exploratory: bool = False
+    # Registry metric this answered, when it came from the domain-metric lane.
+    # The report routes a background metric's answer by it.
+    metric_id: str | None = None
     # Required report disclosures for this execution.
     limitations: list[str] = Field(default_factory=list)
 
@@ -329,6 +418,10 @@ class QuestionExecutionResult(BaseModel):
     def _derive_legacy_outcome(self) -> QuestionExecutionResult:
         if self.outcome is None:
             self.outcome = "answered" if self.status == "succeeded" else "failed"
+        if not self.failure_reason and self.outcome != "answered":
+            self.failure_reason = question_failure_reason(
+                error=self.error, abstention_code=self.abstention_code
+            )
         return self
 
     @field_validator("question_id", "question")

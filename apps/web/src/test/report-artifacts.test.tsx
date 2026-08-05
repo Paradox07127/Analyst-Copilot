@@ -23,6 +23,26 @@ describe("Report page with real API", () => {
     expect(screen.getByText(/Generated/)).toBeInTheDocument();
   });
 
+  it("links the Quality page a grouped limitation defers to", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/report", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          status: "validated",
+          markdown:
+            "## Limitations and Risks\n\n- An identifier repeats in 4 places "
+            + "across 4 datasets: matches.csv (full list on the Quality page).",
+          generated_at: "2026-07-22T12:00:00Z",
+        }),
+      ),
+    );
+
+    renderAppAt("/projects/p1/sessions/r1/report");
+
+    const link = await screen.findByRole("link", { name: "the Quality page" });
+    expect(link).toHaveAttribute("href", "/projects/p1/sessions/r1/quality");
+  });
+
   it("renders markdown images as links, never as <img> beacons", async () => {
     server.use(
       http.get("/api/v1/sessions/:sessionId/report", ({ params }) =>
@@ -93,7 +113,7 @@ describe("Report page with real API", () => {
 const EVIDENCE_REPORT = [
   "# EDA Agent Report",
   "",
-  "Status: validated · Gate: degraded",
+  "Status: validated · 4 of 12 claims measured over a whole table, the rest from analysis queries",
   "",
   "## Executive Summary",
   "",
@@ -113,13 +133,13 @@ const EVIDENCE_REPORT = [
   "",
 ].join("\n");
 
-function serveEvidenceReport() {
+function serveEvidenceReport(overrides: { markdown?: string } = {}) {
   server.use(
     http.get("/api/v1/sessions/:sessionId/report", ({ params }) =>
       HttpResponse.json({
         session_id: String(params["sessionId"]),
         status: "validated",
-        markdown: EVIDENCE_REPORT,
+        markdown: overrides.markdown ?? EVIDENCE_REPORT,
         generated_at: "2026-07-22T12:00:00Z",
       }),
     ),
@@ -127,7 +147,11 @@ function serveEvidenceReport() {
 }
 
 describe("Report reading chrome", () => {
-  it("hoists the gate verdict out of the body and explains it", async () => {
+  it("hoists the evidence mix out of the body and explains it", async () => {
+    /* Reworded 2026-08-05: the exporter no longer prints a blanket
+     * `Gate: degraded`, which every real run wore and which read as a
+     * malfunction. It states how much of the report was measured over a whole
+     * table instead, and this chrome has to keep hoisting that line. */
     const user = userEvent.setup();
     serveEvidenceReport();
     renderAppAt("/projects/p1/sessions/r1/report");
@@ -135,16 +159,40 @@ describe("Report reading chrome", () => {
     expect(
       await screen.findByRole("heading", { name: "EDA Agent Report" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Gate degraded")).toBeInTheDocument();
+    expect(
+      screen.getByText(/4 of 12 claims measured over a whole table/),
+    ).toBeInTheDocument();
     /* The prose line is not left behind to say it a second time. */
     expect(screen.queryByText(/Status: validated/)).not.toBeInTheDocument();
     expect(screen.getByText("validated")).toBeInTheDocument();
 
     await user.click(
+      screen.getByRole("button", { name: "What is Evidence mix?" }),
+    );
+    expect(screen.getByRole("note")).toHaveTextContent(
+      /queries the agent planned for this run/,
+    );
+  });
+
+  it("still explains a stored report's old gate verdict", async () => {
+    /* A report's markdown is frozen in its artifact, so every run written
+     * before 2026-08-05 keeps `Gate: degraded` forever. The badge must go on
+     * meaning what it meant then, not the rejection wording that replaced it. */
+    const user = userEvent.setup();
+    serveEvidenceReport({
+      markdown: EVIDENCE_REPORT.replace(
+        /^Status:.*$/m,
+        "Status: validated · Gate: degraded",
+      ),
+    });
+    renderAppAt("/projects/p1/sessions/r1/report");
+
+    expect(await screen.findByText("Gate degraded")).toBeInTheDocument();
+    await user.click(
       screen.getByRole("button", { name: "What is Evidence gate?" }),
     );
     expect(screen.getByRole("note")).toHaveTextContent(
-      /Degraded is a legitimate outcome/,
+      /legitimate outcome, not an error/,
     );
   });
 

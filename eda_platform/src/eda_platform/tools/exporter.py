@@ -28,6 +28,9 @@ from eda_platform.tools.evidence_display import evidence_display_context, eviden
 # Sections whose empty-state body is replaced by a deterministic synthesis
 # rendered from quality/chart artifacts (m4-plan §6 Day-0 patches).
 _LIMITATIONS_SECTION = "Limitations and Risks"
+# Separates the deterministic scan from the claims beside it, so the "validated
+# findings" sentence is not read as covering the scan's bullets too.
+_QUALITY_SCAN_LEAD_IN = "The data-quality scan additionally flagged:"
 _APPENDIX_SECTION = "Appendix: Charts and Technical Summary"
 # Fallback body injected upstream (agents/reporting.py) for claimless sections.
 _EMPTY_SECTION_BODY = "No validated conclusion is available for this section."
@@ -52,6 +55,13 @@ _HIGH_RISK_QUALITY_CODES = {
 QUALITY_AGGREGATE_THRESHOLD = 3
 # Aggregate issue codes that cross the report-wide threshold.
 CROSS_DATASET_AGGREGATE_THRESHOLD = 6
+# The two thresholds above both need one dataset to carry several flagged
+# columns. A run over many small tables has the opposite shape -- eleven
+# datasets, one flagged column each -- so neither fired and Limitations ran to
+# eighteen near-identical lines. This floor groups by code across datasets and
+# names every place it occurred, so grouping costs no location information.
+SPARSE_CODE_GROUP_FLOOR = 3
+_MAX_GROUPED_LOCATIONS = 8
 # High-risk column footers collapse the same way once this many datasets are
 # affected (one line per dataset otherwise).
 HIGH_RISK_FOOTER_DATASET_THRESHOLD = 3
@@ -65,6 +75,32 @@ _QUALITY_CODE_AGGREGATE_PHRASES = {
     "likely_id_column": "{scope} look like identifier columns with limited analytical meaning",
     "mixed_type_string": (
         "Mixed value types were observed in {scope}; type coercion may distort aggregates"
+    ),
+    "id_not_unique": (
+        "An identifier repeats in {scope}, so joining or counting on it multiplies rows"
+    ),
+    "id_missing": (
+        "An identifier is blank on some rows in {scope}, so those rows cannot be joined "
+        "or traced"
+    ),
+    "duplicate_rows": (
+        "Rows repeat in {scope}, so counts and totals over them may be inflated"
+    ),
+    "empty_column": "{scope} are entirely missing, so nothing here can rest on them",
+    "numeric_parse_failure": (
+        "Some values are not numbers in {scope}, so they drop out of any calculation"
+    ),
+    "date_parse_failure": (
+        "Some values are not readable dates in {scope}, so they drop out of any "
+        "time-based view"
+    ),
+    "high_cardinality_category": (
+        "{scope} have almost as many distinct values as rows, so grouping by them "
+        "produces mostly single-row groups"
+    ),
+    "non_finite_numeric": (
+        "Infinite or undefined values appear in {scope} and distort any statistic "
+        "computed over them"
     ),
 }
 _QUALITY_AGGREGATE_FALLBACK_PHRASE = (
@@ -409,7 +445,7 @@ def _limitation_lines() -> list[str]:
     ]
 
 
-def _neutralize_markdown_inline(text: str) -> str:
+def neutralize_markdown_inline(text: str) -> str:
     """Neutralize markdown syntax in untrusted text so it cannot fabricate
     report structure (links, code spans, headings, line breaks)."""
     collapsed = " ".join(text.split())
@@ -419,11 +455,25 @@ def _neutralize_markdown_inline(text: str) -> str:
 
 
 def render_status_line(bundle: ReportBundle) -> str:
-    """Status plus semantic-gate verdict, so "validated" cannot mask a
-    degraded or rejected gate outcome (A3)."""
+    """Status, a rejected gate, and how much of the report is full-table measured.
+
+    "Gate: degraded" used to stand here for any strong-claim ratio under the
+    60% cut. The strong tier means a claim was measured over a whole table, and
+    an analysis report's claims mostly come from analysis queries, so every real
+    run printed it and it read as a malfunction. The count carries the same
+    information without the implication; the verdict and its cut stay on the
+    audit and in the Audit Notes. A rejection is a malfunction and still says so.
+    """
     line = f"Status: {bundle.status.value}"
-    if bundle.audit is not None and bundle.audit.gate_verdict != "pass":
-        line += f" · Gate: {bundle.audit.gate_verdict}"
+    if bundle.audit is not None and bundle.audit.gate_verdict == "rejected":
+        line += " · Gate: rejected"
+    claims = [claim for section in bundle.sections for claim in section.claims]
+    if claims:
+        strong = sum(1 for claim in claims if claim.confidence_label == "strong")
+        line += (
+            f" · {strong} of {len(claims)} claims measured over a whole table, "
+            "the rest from analysis queries"
+        )
     return line
 
 
@@ -455,6 +505,8 @@ def report_bundle_to_markdown(
         body = display_section_body(section, context)
         if body:
             lines.extend([body, ""])
+        if section.narrative:
+            lines.extend([display_narrative(section.narrative), ""])
         if section.title == _LIMITATIONS_SECTION and context.execution_disclosures:
             # DI10-W5 red line: any execution that ran over an auto-confirmed
             # join must disclose it here, whatever else the section holds.
@@ -462,8 +514,13 @@ def report_bundle_to_markdown(
         if section.focus_items:
             # F4: structured focus entries, one list item per executed question.
             lines.extend(
-                f'- Analysis focus: "{_neutralize_markdown_inline(item.question)}" '
+                f'- Analysis focus: "{neutralize_markdown_inline(item.question)}" '
                 f"(outcome: {item.outcome})"
+                + (
+                    f" — {neutralize_markdown_inline(item.reason)}"
+                    if item.reason
+                    else ""
+                )
                 for item in section.focus_items
             )
             lines.append("")
@@ -538,6 +595,22 @@ def report_bundle_to_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def display_narrative(narrative: str) -> str:
+    """Section prose, rendered the way the claims under it are.
+
+    Claim text is stored raw and formatted at render, so a narrative written
+    from that text carries the raw figures: a reader met a seventeen-digit
+    p-value directly above the same number written as 0.0882 (2026-08-05).
+
+    Deliberately not scrubbed, unlike a claim. A claim naming its own evidence
+    inline reads as hash soup, but the narrative's trailing "(evidence: ...)" is
+    the reader's only handle for jumping to what a sentence rests on, and the
+    app renders those ids as buttons. The formatter leaves code spans alone, so
+    that suffix survives it.
+    """
+    return format_numbers_in_text(narrative)
+
+
 def narrative_markdown(markdown: str) -> str:
     """Return only the narrative part of a rendered report markdown."""
     index = markdown.find(_CLAIM_LEDGER_HEADING)
@@ -570,7 +643,7 @@ def display_claim_text(claim: ReportClaim, section_title: str) -> str:
     return format_numbers_in_text(scrub_internal_ids(text))
 
 
-def _claim_number_signature(text: str) -> frozenset[str]:
+def claim_number_signature(text: str) -> frozenset[str]:
     """Normalized set of number tokens outside citations/code spans."""
     unquoted = _PROTECTED_SPAN_PATTERN.sub(" ", text)
     tokens: set[str] = set()
@@ -612,7 +685,7 @@ def _duplicate_claim_dispositions(
         if section.title in _DEDUP_EXEMPT_SECTIONS:
             continue
         for claim in section.claims:
-            numbers = _claim_number_signature(claim.text)
+            numbers = claim_number_signature(claim.text)
             if not numbers:
                 continue
             entries.append(
@@ -844,16 +917,23 @@ def _section_body(
     column_totals: dict[str, int] | None = None,
 ) -> str:
     """Return the body to render, synthesizing empty-state sections when possible."""
-    if section.claims or section.body != _EMPTY_SECTION_BODY:
-        return section.body
     if title == _LIMITATIONS_SECTION:
+        # The quality scan is not a fallback for a missing claim; it is the rest
+        # of the answer. Treating it as one let a single surviving claim drop
+        # the whole inventory (2026-08-04, comparing the two FIFA runs).
         synthesized = _limitations_body(
             quality_sets,
             dataset_names or {},
             quality_context_sets or [],
             column_totals or {},
         )
-        return synthesized if synthesized else section.body
+        if not synthesized:
+            return section.body
+        if section.claims or section.body != _EMPTY_SECTION_BODY:
+            return f"{section.body}\n\n{_QUALITY_SCAN_LEAD_IN}\n\n{synthesized}"
+        return synthesized
+    if section.claims or section.body != _EMPTY_SECTION_BODY:
+        return section.body
     if title == _APPENDIX_SECTION:
         synthesized = _appendix_body(charts)
         return synthesized if synthesized else section.body
@@ -890,6 +970,12 @@ def _limitations_body(
             code, _QUALITY_AGGREGATE_FALLBACK_PHRASE
         ).format(scope=scope, code=code)
         lines.append(f"- {phrase}{_QUALITY_AGGREGATE_SUFFIX}")
+    sparse_grouped, sparse_lines = _sparse_code_groups(
+        quality_context_sets or [],
+        dataset_names,
+        skip_codes=globally_aggregated | _FOOTER_OWNED_CODES,
+    )
+    lines.extend(sparse_lines)
     # Place dataset quality context before deterministic scan results.
     for _artifact, context_set in quality_context_sets or []:
         name = dataset_names.get(context_set.dataset_id, context_set.dataset_name)
@@ -899,6 +985,7 @@ def _limitations_body(
             name=name,
             column_total=total,
             exclude_codes=globally_aggregated | _FOOTER_OWNED_CODES,
+            drop_codes=sparse_grouped,
         ):
             if line in seen:
                 continue
@@ -963,15 +1050,68 @@ def _limitations_body(
     return "\n".join(lines)
 
 
+def _sparse_code_groups(
+    quality_context_sets: list[tuple[Artifact, QualityContextSet]],
+    dataset_names: dict[str, str],
+    *,
+    skip_codes: set[str],
+) -> tuple[set[str], list[str]]:
+    """One line per condition that recurs thinly across datasets, naming where.
+
+    Critical conditions are never folded in: a grouped line reads as background,
+    and a critical one has to keep its own.
+    """
+    locations: dict[str, list[str]] = {}
+    column_scoped: set[str] = set()
+    for _artifact, context_set in quality_context_sets:
+        name = dataset_names.get(context_set.dataset_id, context_set.dataset_name)
+        for context in context_set.contexts:
+            if context.severity == "critical" or context.issue_code in skip_codes:
+                continue
+            where = f"{name} `{context.column}`" if context.column else name
+            if context.column:
+                column_scoped.add(context.issue_code)
+            locations.setdefault(context.issue_code, []).append(where)
+    grouped: set[str] = set()
+    lines: list[str] = []
+    for code, places in sorted(locations.items()):
+        shown = list(dict.fromkeys(places))
+        dataset_count = len({place.split(" `")[0] for place in shown})
+        # One dataset carrying several flagged columns already has a better
+        # sentence from the per-dataset path ("5 of 8 columns"); this is only
+        # for the shape that path cannot see.
+        if len(shown) < SPARSE_CODE_GROUP_FLOOR or dataset_count < 2:
+            continue
+        grouped.add(code)
+        remaining = len(shown) - _MAX_GROUPED_LOCATIONS
+        listed = ", ".join(shown[:_MAX_GROUPED_LOCATIONS])
+        if remaining > 0:
+            listed += f", and {remaining} more"
+        # A dataset-level condition has exactly one place per dataset, so
+        # counting both would state the same number twice.
+        scope = (
+            f"{len(shown)} places across {dataset_count} datasets"
+            if code in column_scoped
+            else f"{dataset_count} datasets"
+        )
+        phrase = _QUALITY_CODE_AGGREGATE_PHRASES.get(
+            code, _QUALITY_AGGREGATE_FALLBACK_PHRASE
+        ).format(scope=scope, code=code)
+        lines.append(f"- {phrase}: {listed}{_QUALITY_AGGREGATE_SUFFIX}")
+    return grouped, lines
+
+
 def _quality_context_lines(
     context_set: QualityContextSet,
     *,
     name: str,
     column_total: int,
     exclude_codes: set[str] | None = None,
+    drop_codes: set[str] | None = None,
 ) -> list[str]:
     """Render one dataset's quality contexts with same-code aggregation (DI10 W3)."""
     exclude_codes = exclude_codes or set()
+    drop_codes = drop_codes or set()
     itemized: list[QualityContext] = []
     by_code: dict[str, list[QualityContext]] = {}
     for context in context_set.contexts:
@@ -981,6 +1121,10 @@ def _quality_context_lines(
         # column condition (empty_column) prints once per column here and once
         # more in its footer.
         if context.column and context.issue_code in exclude_codes:
+            continue
+        # A sparse group already named this exact place, dataset-level ones
+        # included; repeating it here would state the same fact twice.
+        if context.severity != "critical" and context.issue_code in drop_codes:
             continue
         # Critical conditions and dataset-level (columnless) conditions are
         # never aggregated away.

@@ -672,3 +672,70 @@ def test_an_unrelated_setting_change_keeps_the_learned_dialect(tmp_path: Path) -
     service.update_settings(SettingsPatch(temperature=0.7))
 
     assert learned_repairs(LLMProvider.OPENAI_COMPATIBLE, "my-finetune:latest") == (repair,)
+
+
+# --------------------------------------------------------------------------- #
+# Report narrative model: a second, optional choice alongside the workflow one
+# --------------------------------------------------------------------------- #
+def test_report_model_defaults_to_empty_meaning_same_as_the_workflow(
+    client: TestClient,
+) -> None:
+    assert client.get("/api/v1/settings").json()["report_model"] == ""
+
+
+def test_report_model_round_trips_and_reaches_the_worker_overlay(
+    workspace: Path,
+) -> None:
+    service = SettingsService(
+        defaults=LLMSettings(provider=LLMProvider.DEEPSEEK, model="deepseek-v4-flash")
+    )
+    view = service.update_settings(SettingsPatch(report_model="deepseek-v4"))
+
+    assert view.report_model == "deepseek-v4"
+    # The workflow model is untouched: two choices, not one moved.
+    assert view.model == "deepseek-v4-flash"
+    overlay = service.resolve().env_overlay
+    assert overlay["EDA_REPORT_LLM_MODEL"] == "deepseek-v4"
+    assert overlay["EDA_LLM_MODEL"] == "deepseek-v4-flash"
+    _ = workspace
+
+
+def test_an_unset_report_model_puts_nothing_in_the_overlay(workspace: Path) -> None:
+    # An empty override must not reach the worker as an empty model id.
+    service = SettingsService(
+        defaults=LLMSettings(provider=LLMProvider.DEEPSEEK, model="deepseek-v4-flash")
+    )
+    assert "EDA_REPORT_LLM_MODEL" not in service.resolve().env_overlay
+    _ = workspace
+
+
+def test_clearing_the_report_model_returns_to_the_workflow_model(
+    workspace: Path,
+) -> None:
+    service = SettingsService(
+        defaults=LLMSettings(provider=LLMProvider.DEEPSEEK, model="deepseek-v4-flash")
+    )
+    service.update_settings(SettingsPatch(report_model="deepseek-v4"))
+    view = service.update_settings(SettingsPatch(report_model=""))
+
+    assert view.report_model == ""
+    assert "EDA_REPORT_LLM_MODEL" not in service.resolve().env_overlay
+    _ = workspace
+
+
+def test_a_report_model_that_is_only_whitespace_is_rejected(workspace: Path) -> None:
+    service = SettingsService(
+        defaults=LLMSettings(provider=LLMProvider.DEEPSEEK, model="deepseek-v4-flash")
+    )
+    with pytest.raises(SettingsValidationError):
+        service.update_settings(SettingsPatch(report_model="   x"))
+    _ = workspace
+
+
+def test_reset_clears_the_report_model(workspace: Path) -> None:
+    service = SettingsService(
+        defaults=LLMSettings(provider=LLMProvider.DEEPSEEK, model="deepseek-v4-flash")
+    )
+    service.update_settings(SettingsPatch(report_model="deepseek-v4"))
+    assert service.reset().report_model == ""
+    _ = workspace

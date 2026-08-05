@@ -1857,6 +1857,9 @@ class SettingsView(BaseModel):
     version: int = 0
     provider: str
     model: str
+    report_model: str = ""
+    """Model that writes the report's narrative. Empty means "same as `model`";
+    the analysis calls a cheap model many times, the narrative runs once."""
     base_url: str = ""
     resolved_base_url: str = ""
     temperature: float = 0.2
@@ -1900,6 +1903,8 @@ class SettingsPatch(BaseModel):
 
     provider: str | None = None
     model: str | None = None
+    report_model: str | None = None
+    """Empty string clears the override; omitted keeps the current value."""
     base_url: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None

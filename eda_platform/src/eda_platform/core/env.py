@@ -88,6 +88,66 @@ def load_llm_settings_from_env_file(
     )
 
 
+REPORT_LLM_ENV_PREFIX = "EDA_REPORT_LLM_"
+
+
+def load_report_llm_settings_from_env_file(
+    path: Path | str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> LLMSettings:
+    """Workflow settings with the ``EDA_REPORT_LLM_*`` overrides applied.
+
+    The narrative runs once per report and is what a reader judges the product
+    by, while question discovery runs a cheap model many times; they should not
+    be forced to share one choice. Unset means "same as the workflow" -- the
+    override never fires implicitly.
+    """
+    merged = parse_env_file(DEFAULT_ENV_PATH if path is None else path)
+    merged.update(dict(os.environ if environ is None else environ))
+    base = load_llm_settings_from_env_file(path=path, environ=environ)
+
+    override_model = merged.get(f"{REPORT_LLM_ENV_PREFIX}MODEL", "").strip()
+    raw_provider = merged.get(f"{REPORT_LLM_ENV_PREFIX}PROVIDER", "").strip()
+    if not raw_provider:
+        return base.model_copy(
+            update={
+                "model": override_model or base.model,
+                **_tuning_overrides(merged),
+            }
+        )
+    # A different provider means a different endpoint and credential, so the
+    # workflow's model id and key cannot travel with it.
+    provider = _provider(raw_provider)
+    return base.model_copy(
+        update={
+            "provider": provider,
+            "model": override_model or _default_model(provider),
+            "api_key": _first_non_empty(
+                merged.get(f"{REPORT_LLM_ENV_PREFIX}API_KEY"),
+                _provider_api_key(provider, merged),
+            ),
+            "base_url": merged.get(f"{REPORT_LLM_ENV_PREFIX}BASE_URL", ""),
+            **_tuning_overrides(merged),
+        }
+    )
+
+
+def _tuning_overrides(merged: Mapping[str, str]) -> dict[str, object]:
+    """Report-scoped sampling knobs the operator actually set."""
+    overrides: dict[str, object] = {}
+    temperature = merged.get(f"{REPORT_LLM_ENV_PREFIX}TEMPERATURE", "").strip()
+    if temperature:
+        overrides["temperature"] = _float_value(temperature, 0.2)
+    max_tokens = merged.get(f"{REPORT_LLM_ENV_PREFIX}MAX_TOKENS", "").strip()
+    if max_tokens:
+        overrides["max_tokens"] = _int_value(max_tokens, 6000)
+    timeout = merged.get(f"{REPORT_LLM_ENV_PREFIX}TIMEOUT_SECONDS", "").strip()
+    if timeout:
+        overrides["timeout_seconds"] = _float_value(timeout, 180.0)
+    return overrides
+
+
 def load_provider_api_keys_from_env_file(
     path: Path | str | None = None,
     *,

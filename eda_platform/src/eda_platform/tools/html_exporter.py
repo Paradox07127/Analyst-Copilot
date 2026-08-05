@@ -13,6 +13,7 @@ from eda_platform.tools.evidence_display import evidence_display_context, eviden
 from eda_platform.tools.exporter import (
     _LIMITATIONS_SECTION,
     display_claim_text,
+    display_narrative,
     display_section_body,
     render_status_line,
     section_render_context,
@@ -57,16 +58,21 @@ def export_report_html(
         body = display_section_body(section, context)
         if body:
             parts.extend(_body_html(body))
+        if section.narrative:
+            parts.extend(_body_html(display_narrative(section.narrative)))
         if section.title == _LIMITATIONS_SECTION and context.execution_disclosures:
             parts.extend(_body_html("\n".join(context.execution_disclosures)))
         if section.focus_items:
             # F4: one list item per executed question, never a single blob.
             parts.append('<ul class="focus-items">')
             for item in section.focus_items:
+                reason = (
+                    f" &mdash; {escape(item.reason)}" if item.reason else ""
+                )
                 parts.append(
                     '<li class="focus-item">'
                     f'Analysis focus: "{escape(item.question)}" '
-                    f"(outcome: {escape(item.outcome)})</li>"
+                    f"(outcome: {escape(item.outcome)}){reason}</li>"
                 )
             parts.append("</ul>")
         if section.claims:

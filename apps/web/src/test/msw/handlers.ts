@@ -1886,6 +1886,7 @@ export function defaultSettings(): SettingsView {
     version: 0,
     provider: "offline",
     model: "offline-deterministic",
+    report_model: "",
     base_url: "",
     resolved_base_url: "",
     temperature: 0.2,

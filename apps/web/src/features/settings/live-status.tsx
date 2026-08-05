@@ -98,6 +98,14 @@ export function LiveStatusCard({
           <dt className="text-status-neutral">Sent to the model</dt>
           <dd>{state === "offline" ? "nothing" : payloadLabel}</dd>
         </div>
+        {/* The heading names one model. With a report override two are in
+         * play, and a status card that hides the second one is wrong. */}
+        {state !== "offline" && settings.report_model && (
+          <div className="flex gap-1.5">
+            <dt className="text-status-neutral">Report written by</dt>
+            <dd className="font-mono">{settings.report_model}</dd>
+          </div>
+        )}
         <div className="flex gap-1.5">
           <dt className="text-status-neutral">Set in</dt>
           <dd>

@@ -6,6 +6,7 @@
 
 import { Children, isValidElement, useMemo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import { Link } from "react-router";
 import remarkGfm from "remark-gfm";
 import { Badge, type Tone } from "../../components/ui";
 import { EvidenceLaneBadge } from "../exploration/ExplorationView";
@@ -41,6 +42,11 @@ const QUALIFIERS: Record<string, { tone: Tone; meaning: string }> = {
 };
 
 const QUALIFIER_PREFIX = /^\[([^\]]{1,60})\]\s+/;
+
+/* exporter.py:_QUALITY_AGGREGATE_SUFFIX. A grouped limitation names the
+ * condition and a few places, then defers the rest to this phrase — which was
+ * plain text, so the reader had to go find the page themselves. */
+const QUALITY_PAGE_PHRASE = "the Quality page";
 
 export function splitQualifiers(text: string): {
   labels: string[];
@@ -121,15 +127,36 @@ export function ReportBody({
   inspectableIds,
   selectedId,
   onInspect,
+  qualityHref,
 }: {
   markdown: string;
   inspectableIds: Set<string>;
   selectedId: string | null;
   onInspect: (artifactId: string) => void;
+  /** Where "the Quality page" should go; omitted outside a session route. */
+  qualityHref?: string;
 }) {
   const components = useMemo<Components>(() => {
     const inspectable = (token: string) =>
       isArtifactIdShape(token) && inspectableIds.has(token);
+
+    const withQualityLink = (children: ReactNode): ReactNode => {
+      if (!qualityHref) return children;
+      return Children.map(children, (part) => {
+        if (typeof part !== "string" || !part.includes(QUALITY_PAGE_PHRASE))
+          return part;
+        const [before, ...after] = part.split(QUALITY_PAGE_PHRASE);
+        return (
+          <>
+            {before}
+            <Link to={qualityHref} className="text-primary hover:underline">
+              {QUALITY_PAGE_PHRASE}
+            </Link>
+            {after.join(QUALITY_PAGE_PHRASE)}
+          </>
+        );
+      });
+    };
 
     const withQualifiers = (children: ReactNode) => {
       /* Children.toArray keys every element, so slicing the array below does
@@ -175,7 +202,7 @@ export function ReportBody({
         </h3>
       ),
       li: ({ node, children, ...props }) => (
-        <li {...props}>{withQualifiers(children)}</li>
+        <li {...props}>{withQualityLink(withQualifiers(children))}</li>
       ),
       td: ({ node, children, ...props }) => {
         const tokens = childText(children)
@@ -216,7 +243,7 @@ export function ReportBody({
         );
       },
     };
-  }, [inspectableIds, selectedId, onInspect]);
+  }, [inspectableIds, selectedId, onInspect, qualityHref]);
 
   return (
     <article className="report-markdown min-w-0">

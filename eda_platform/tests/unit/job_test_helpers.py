@@ -29,6 +29,11 @@ def run_claimed_job(
     job = store.get_job(job_id)
     if job is None:
         raise AssertionError(f"seeded job does not exist: {job_id}")
+    # `params_json` is not in the base DDL; JobLifecycleRepository adds it on
+    # construction. Building the repository first is what makes the column
+    # exist -- otherwise this helper only worked when some earlier test in the
+    # same process happened to build one against the same workspace.
+    lifecycle = JobLifecycleRepository(store)
     with sqlite3.connect(store.db_path) as conn:
         conn.execute(
             "update jobs set params_json = ? where job_id = ? and status = 'queued'",
@@ -41,7 +46,6 @@ def run_claimed_job(
             """,
             (job_id, str(job["session_id"])),
         )
-    lifecycle = JobLifecycleRepository(store)
     claim = lifecycle.claim_launch(job_id, owner="test-direct-runner")
     lifecycle.acknowledge_spawn(
         claim,
