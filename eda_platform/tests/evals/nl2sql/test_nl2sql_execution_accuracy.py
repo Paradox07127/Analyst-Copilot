@@ -30,6 +30,7 @@ from .nl2sql_eval_harness import (
     execute_readonly,
     golden_sql_provider,
     load_golden_cases,
+    question_sql_provider,
     results_equivalent,
     run_execution_accuracy,
 )
@@ -288,3 +289,65 @@ def test_unsafe_candidate_sql_is_recorded_as_failure() -> None:
     assert not first.passed
     assert first.error is not None and UnsafeQueryError.__name__ in first.error
     assert result.outcomes[1].passed
+
+
+class _ScriptedPlanLLM:
+    """Answers `m3_build_plan` with the golden SQL, refuses everything else.
+
+    Proves the question-path plumbing without a provider: the case is scored
+    only if `execute_question_candidate` really reached the planner, ran the
+    SQL, and surfaced a SqlResult.
+    """
+
+    def __init__(self, sql_by_question: dict[str, str]) -> None:
+        self.sql_by_question = sql_by_question
+        self.tasks: list[str] = []
+
+    def structured(self, *, task: str, schema: type, payload: dict):  # type: ignore[no-untyped-def]
+        self.tasks.append(task)
+        if task != "m3_build_plan":
+            raise RuntimeError(f"this double answers only the planner, not {task}")
+        sql = self.sql_by_question[payload["message"]]
+        return schema.model_validate(
+            {
+                "question": payload["message"],
+                "dataset_names": sorted(payload["catalog"]),
+                "columns": sorted(next(iter(payload["catalog"].values()))),
+                "filters": [],
+                "sql": sql,
+                "method": "scripted",
+                "rationale": "scripted",
+                "needs_approval": False,
+                "estimated_scan": "small",
+            }
+        )
+
+    def text(self, *, task: str, payload: dict) -> str:
+        return "fake"
+
+    def last_usage(self) -> None:
+        return None
+
+
+def test_the_question_path_provider_reaches_the_planner_and_returns_sql() -> None:
+    cases = [case for case in load_golden_cases() if case.category == "single_table_aggregate"]
+    assert cases, "the golden set must keep at least one single-table aggregate"
+    llm = _ScriptedPlanLLM({case.question: case.golden_sql for case in cases})
+
+    result = run_execution_accuracy(cases, question_sql_provider(llm))
+
+    assert result.accuracy == 1.0, [outcome.error for outcome in result.failed]
+    # One plan per case. The path also asks for an interpretation of the rows,
+    # which chat never does -- that is a cost difference, not a scoring one.
+    assert llm.tasks.count("m3_build_plan") == len(cases)
+
+
+def test_the_question_path_records_a_refusal_instead_of_aborting_the_run() -> None:
+    """A question the planner cannot answer must fail its case, not the eval."""
+    cases = [load_golden_cases()[0]]
+    llm = _ScriptedPlanLLM({})  # KeyError inside the provider
+
+    result = run_execution_accuracy(cases, question_sql_provider(llm))
+
+    assert result.accuracy == 0.0
+    assert result.failed[0].reason == "candidate generation/execution failed"

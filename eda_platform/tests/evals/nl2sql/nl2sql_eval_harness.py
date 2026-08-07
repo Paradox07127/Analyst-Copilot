@@ -36,9 +36,14 @@ from typing import Any
 
 import pandas as pd
 
+from eda_platform.agents.planner import build_plan
 from eda_platform.core.llm import StructuredLLM
-from eda_platform.drivers.chat import run_chat_turn
+from eda_platform.drivers.chat import build_value_context, run_chat_turn
+from eda_platform.drivers.question_exec import execute_question_candidate
+from eda_platform.schemas.artifacts import ArtifactType
+from eda_platform.schemas.questions import QuestionCandidate, QuestionScore
 from eda_platform.tools.loader import LoadedDataset, load_csv
+from eda_platform.tools.profiler import profile_dataset
 from eda_platform.tools.sql_runner import SqlCatalog, build_catalog
 
 _EVAL_DIR = Path(__file__).parent
@@ -176,8 +181,109 @@ def golden_sql_provider(case: GoldenNL2SQLCase, datasets: Sequence[LoadedDataset
     return case.golden_sql
 
 
+def question_sql_provider(llm: StructuredLLM) -> SqlProvider:
+    """Candidate SQL from the auto-EDA question path, on the inputs it really gets.
+
+    Both paths call the same `build_plan`, but not with the same context: chat
+    passes a masked value profile and the project's semantic seeds, and this one
+    passes neither -- `execute_question_candidate` takes no payload policy, so it
+    cannot decide whether column values may be sent, and auto-EDA's call site
+    omits the seeds its own batch path forwards.
+
+    Scoring both providers on one question set turns that difference into a
+    measured number. The call below mirrors `auto_eda.ExecuteTopQuestionsStep`
+    argument for argument; adding anything here would measure a pipeline that
+    does not exist.
+    """
+
+    def provider(case: GoldenNL2SQLCase, datasets: Sequence[LoadedDataset]) -> str:
+        candidate = QuestionCandidate(
+            question_id=f"q_{case.case_id}",
+            question_en=case.question,
+            origin="llm",
+            target_datasets=[dataset.record.name for dataset in datasets],
+            score=QuestionScore(
+                data_availability=1.0,
+                statistical_signal=0.5,
+                quality_risk=0.0,
+                join_risk=0.0,
+                deterministic_score=0.6,
+            ),
+        )
+        artifacts = execute_question_candidate(
+            candidate,
+            datasets=datasets,
+            project_id="nl2sql_eval",
+            session_id=f"eval_{case.case_id}",
+            parent_ids=[],
+            llm=llm,
+            confirmed_joins=[],
+        )
+        for artifact in artifacts:
+            if artifact.type is ArtifactType.SQL_RESULT:
+                return str(artifact.payload["sql"])
+        qexec = next(
+            (a for a in artifacts if a.type is ArtifactType.QUESTION_EXECUTION_RESULT), None
+        )
+        reason = str(qexec.payload.get("error") if qexec is not None else "no artifact")
+        raise RuntimeError(f"question path produced no SQL for {case.case_id}: {reason[:200]}")
+
+    return provider
+
+
+def plan_sql_provider(
+    llm: StructuredLLM, *, with_value_context: bool = False
+) -> SqlProvider:
+    """Candidate SQL straight from the planner, with or without value hints.
+
+    The two variants differ in exactly one argument, which is the one the two
+    product surfaces disagree on: chat passes a masked top-5 value profile per
+    column, and the auto-EDA question path passes nothing, because
+    `execute_question_candidate` takes no payload policy and so cannot decide
+    whether values may leave the process. Scoring both says what that argument
+    is worth instead of arguing about it.
+    """
+
+    def provider(case: GoldenNL2SQLCase, datasets: Sequence[LoadedDataset]) -> str:
+        catalog = build_catalog(datasets)
+        columns = {
+            catalog.relations[dataset.record.name]: {
+                str(column) for column in dataset.frame.columns
+            }
+            for dataset in datasets
+        }
+        value_context = None
+        if with_value_context:
+            profiles = [
+                profile_dataset(dataset, project_id="nl2sql_eval", session_id=case.case_id)
+                for dataset in datasets
+            ]
+            value_context = build_value_context(
+                datasets,
+                profiles,
+                catalog.relations,
+                project_id="nl2sql_eval",
+                session_id=case.case_id,
+            )
+        plan = build_plan(
+            case.question,
+            llm=llm,
+            catalog_columns=columns,
+            value_context=value_context,
+            engine=catalog.engine,
+        )
+        return plan.sql
+
+    return provider
+
+
 def chat_sql_provider(llm: StructuredLLM) -> SqlProvider:
     """Candidate SQL from the real chat path (M3 intent -> plan -> SQL chain).
+
+    Kept for the offline discriminative-power tests. Not used for live scoring:
+    chat now explores before it answers -- three to ten statements per question,
+    with the answering one not reliably last -- and execution accuracy needs a
+    single candidate query to compare (2026-08-06).
 
     This is the live-LLM integration point: pass any client satisfying the
     ``StructuredLLM`` protocol (``create_llm_client(load_llm_settings_from_env_file())``

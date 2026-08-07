@@ -8,7 +8,19 @@ default here is offline.
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+LIVE_FLAG = "EDA_LIVE_LLM_TEST"
+LIVE_MARKER = "live_llm"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        f"{LIVE_MARKER}: opts out of the offline default; needs {LIVE_FLAG}=1 and credentials.",
+    )
 
 _LLM_ENV_KEYS = (
     "EDA_LLM_API_KEY",
@@ -36,12 +48,26 @@ _LLM_ENV_KEYS = (
 
 @pytest.fixture(autouse=True)
 def offline_llm_by_default(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """Force the offline provider unless a test opts in explicitly."""
-    monkeypatch.setenv("EDA_LLM_PROVIDER", "offline")
-    for key in _LLM_ENV_KEYS:
-        monkeypatch.setenv(key, "")
+    """Force the offline provider unless a test opts in explicitly.
+
+    Opting in takes both halves: the `live_llm` marker on the test and
+    `EDA_LIVE_LLM_TEST=1` in the environment. Requiring both is why the flag
+    alone does not arm a whole-suite run -- and why the eval that needed real
+    credentials sat unrunnable, passing its own skip gate only to be blanked
+    here and fail as "not configured" (found 2026-08-06).
+    """
+    live = (
+        request.node.get_closest_marker(LIVE_MARKER) is not None
+        and os.environ.get(LIVE_FLAG) == "1"
+    )
+    if not live:
+        monkeypatch.setenv("EDA_LLM_PROVIDER", "offline")
+        for key in _LLM_ENV_KEYS:
+            monkeypatch.setenv(key, "")
     # A test that forgets to pass a workspace must never write into the real
     # repository workspace. Point the default at a throwaway dir instead;
     # tests that exercise fallback resolution explicitly delete this override.
