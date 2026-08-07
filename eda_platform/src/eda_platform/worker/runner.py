@@ -1518,6 +1518,7 @@ def _replay_targets(
 
 
 def _source_code_version(store: ArtifactStore, project_id: str, session_id: str) -> str:
+    """The source run's producer label, inherited so a derived run names its origin."""
     manifest = None
     with suppress(OSError, ValueError):
         manifest = store.read_manifest(project_id, session_id)

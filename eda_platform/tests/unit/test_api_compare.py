@@ -440,3 +440,36 @@ def test_an_unfinished_family_member_makes_an_absent_count_unavailable(
     assert charts["left"]["state"] == "value"
     assert charts["right"]["state"] == "unavailable"
     assert charts["delta"] is None
+
+
+def test_a_producer_label_is_not_a_comparability_dimension(tmp_path: Path) -> None:
+    """`code_version` never moved with the code, so Compare could not judge on it.
+
+    Every writer was a constant: "local" from auto-EDA and question batches,
+    "<name>-orchestrator-v2" from the two orchestrators, and derived runs
+    inherit whichever of those their source held. Two runs built from entirely
+    different code therefore always matched on this dimension, and the verdict
+    read "controlled" for something nobody had checked. The field still names
+    the producer and is still reported per side; it no longer votes.
+    """
+    store = ArtifactStore(tmp_path)
+    store.ensure_project("demo", name="Demo")
+    labels = {"left": "local", "right": "investigation-orchestrator-v2"}
+    for session_id, label in labels.items():
+        _seed_run(store, "demo", session_id, datasets=[("a", 100, 4)])
+        store.write_manifest(
+            SessionManifest(
+                session_id=session_id,
+                project_id="demo",
+                input_hashes={"a": "hash"},
+                code_version=label,
+            )
+        )
+        store.refresh_session_index("demo", session_id)
+
+    comparability = _compare(TestClient(create_app(tmp_path)), "left", "right").json()[
+        "comparability"
+    ]
+
+    assert "code_version" not in comparability["changed_dimensions"]
+    assert "code_version" not in comparability["unknown_dimensions"]

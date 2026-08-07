@@ -1726,7 +1726,7 @@ def run_auto_eda(
         session_id=actual_session_id,
         project_id=project_id,
         input_hashes={},
-        code_version=_current_code_version(),
+        code_version="auto-eda",
         model_versions=manifest_model_versions(llm),
         title=build_run_title([Path(path).name for path in file_paths]) or None,
     )
@@ -1837,7 +1837,7 @@ def run_auto_eda(
         session_id=actual_session_id,
         project_id=project_id,
         input_hashes={loaded.record.name: loaded.record.content_hash for loaded in loaded_datasets},
-        code_version=_current_code_version(),
+        code_version="auto-eda",
         model_versions=manifest_model_versions(llm),
         title=build_run_title([loaded.record.name for loaded in loaded_datasets]) or None,
     )
@@ -3014,8 +3014,3 @@ def _merged_relationship_validations(
         for validation in validation_set.validations:
             by_label[validation.pair.label()] = validation
     return RelationshipValidationSet(validations=[by_label[label] for label in sorted(by_label)])
-
-
-def _current_code_version() -> str:
-    """Return the local build marker without spawning a Git subprocess."""
-    return "local"

@@ -276,9 +276,11 @@ class CompareService:
         right_row = self._store.get_session_index_row(right.session_id) or {}
         left_runtime, left_warnings = _runtime_view(left_row)
         right_runtime, right_warnings = _runtime_view(right_row)
+        # `code_version` is deliberately absent: every writer was a constant, so
+        # it named the producer rather than the build, and two runs of different
+        # code always matched on it. It is still reported per side, just not voted on.
         dimensions = {
             "input_hashes": (left_runtime.input_hashes, right_runtime.input_hashes),
-            "code_version": (left_runtime.code_version, right_runtime.code_version),
             "seed": (left_runtime.seed, right_runtime.seed),
             "model_versions": (left_runtime.model_versions, right_runtime.model_versions),
             "prompt_template_version": (

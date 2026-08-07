@@ -17,6 +17,9 @@ class SessionManifest(BaseModel):
     session_id: str
     project_id: str
     input_hashes: dict[str, str]
+    # Names the pipeline that produced the run -- every writer is a constant, and
+    # none of them moves with the build. Auto-EDA used to report "local" here,
+    # which reads as a build identifier and never was one.
     code_version: str
     model_versions: dict[str, str] = Field(default_factory=dict)
     seed: int = 42
