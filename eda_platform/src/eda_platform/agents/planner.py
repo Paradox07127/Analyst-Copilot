@@ -7,9 +7,11 @@ from eda_platform.core.llm import StructuredLLM
 from eda_platform.core.query import DuckDBQueryEngine, validate_select_statement
 from eda_platform.core.tool_guard import (
     GuardViolation,
+    JoinScope,
     ToolGuardError,
     check_enum,
     check_non_empty,
+    check_sql_join_scope,
     raise_for_violations,
 )
 from eda_platform.schemas.plans import AnalysisPlan
@@ -25,6 +27,8 @@ def build_plan(
     engine: DuckDBQueryEngine | None = None,
     previous_error: str | None = None,
     on_guard_rejected: Callable[[ToolGuardError], None] | None = None,
+    join_scope: JoinScope | None = None,
+    approval_available: bool = True,
 ) -> AnalysisPlan:
     error_context = previous_error
     for attempt in range(2):
@@ -35,9 +39,10 @@ def build_plan(
             value_context=value_context,
             semantic_seeds=semantic_seeds,
             previous_error=error_context,
+            approval_available=approval_available,
         )
         try:
-            _validate_plan(plan, catalog_columns, engine=engine)
+            _validate_plan(plan, catalog_columns, engine=engine, join_scope=join_scope)
         except ToolGuardError as exc:
             if on_guard_rejected is not None:
                 on_guard_rejected(exc)
@@ -62,7 +67,21 @@ def _request_plan(
     value_context: dict[str, list[str]] | None,
     semantic_seeds: list[dict[str, str]] | None,
     previous_error: str | None,
+    approval_available: bool = True,
 ) -> AnalysisPlan:
+    # Asking for approval only makes sense where someone can grant it. Chat
+    # registers the flag with ApprovalService and surfaces a pending frame; an
+    # automatic run has nobody, and inviting the flag there cost three of the
+    # twenty golden questions, all of them cross-table (2026-08-06 NL2SQL eval).
+    approval_rule = (
+        "Set needs_approval=true for high-cost or cross-table work."
+        if approval_available
+        else (
+            "No one can approve a plan in this run, so needs_approval=false is the "
+            "only usable answer. Fit the work inside it: aggregate rather than "
+            "return rows, and narrow the columns."
+        )
+    )
     payload: dict[str, Any] = {
         "message": message,
         "catalog": {
@@ -73,7 +92,7 @@ def _request_plan(
         "instructions": (
             "Create one read-only DuckDB SQL plan. Use only listed datasets and columns. "
             "Prefer a single-table aggregate unless the user explicitly requests otherwise. "
-            "Set needs_approval=true for high-cost or cross-table work."
+            f"{approval_rule}"
         ),
     }
     if previous_error is not None:
@@ -90,15 +109,47 @@ def _validate_plan(
     catalog_columns: dict[str, set[str]],
     *,
     engine: DuckDBQueryEngine | None,
+    join_scope: JoinScope | None = None,
 ) -> None:
     validate_plan_references(plan, catalog_columns)
     plan.sql = validate_select_statement(plan.sql)
+    if join_scope is not None:
+        raise_for_violations(
+            "m3_build_plan",
+            [
+                check_sql_join_scope(
+                    "plan.sql",
+                    plan.sql,
+                    required_relations=join_scope.required_relations,
+                    confirmed_joins=join_scope.confirmed_joins,
+                )
+            ],
+        )
     if engine is not None:
         engine.dry_run(plan.sql)
 
 
 def validate_plan_references(plan: AnalysisPlan, catalog_columns: dict[str, set[str]]) -> None:
     guard_plan_references(plan, catalog_columns)
+
+
+def _column_is_known(
+    column: str,
+    available_columns: set[str],
+    datasets: list[str],
+    catalog_columns: dict[str, set[str]],
+) -> bool:
+    """Whether a declared column exists, bare or qualified by its own dataset.
+
+    A join has to qualify its columns in the SQL, and the model mirrors that in
+    `columns`; comparing against bare names alone read `orders.amount` as a
+    hallucination. The qualifier still has to name a dataset this plan declared
+    and actually hold the column, so this widens the vocabulary, not the guard.
+    """
+    if column in available_columns:
+        return True
+    qualifier, separator, bare = column.rpartition(".")
+    return bool(separator) and qualifier in datasets and bare in catalog_columns.get(qualifier, ())
 
 
 def guard_plan_references(plan: AnalysisPlan, catalog_columns: dict[str, set[str]]) -> None:
@@ -138,7 +189,11 @@ def guard_plan_references(plan: AnalysisPlan, catalog_columns: dict[str, set[str
         if dataset in catalog_columns:
             available_columns.update(catalog_columns[dataset])
 
-    unknown_columns = [column for column in plan.columns if column not in available_columns]
+    unknown_columns = [
+        column
+        for column in plan.columns
+        if not _column_is_known(column, available_columns, datasets, catalog_columns)
+    ]
     if unknown_columns:
         violations.append(
             GuardViolation(

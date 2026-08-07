@@ -175,18 +175,21 @@ def test_a_repeated_first_column_widens_the_label_instead_of_giving_up() -> None
     assert "UEFA" in text and "I" in text, text
 
 
-def test_a_truncated_result_still_refuses_to_rank() -> None:
-    """A preview is not the result; its first rows prove nothing about the rest.
+def test_a_truncated_ranking_discloses_that_it_is_only_the_leaders() -> None:
+    """Widening the label must not become a licence to overstate a partial result.
 
-    Ordering is only meaningful over the whole result, so widening the label
-    must not become a licence to rank a partial one.
+    This asserted "refuses to rank" until 2026-08-06. The premise was wrong:
+    `sql_runner` previews with `select * from (<statement>) limit n`, so on an
+    ordering the engine applied, the preview is the head and the leaders hold.
+    What truncation really costs is everything about the rest of the result, so
+    that is what has to be said out loud.
     """
     text = _finding_text(
         _candidate("Which player profiles emerge?"),
         _sql_artifact(_CONFED_ROWS, sql=_CONFED_SQL, truncated=True),
     )
-    assert "Ranked by" not in text, text
-    assert "top is" not in text, text
+    assert "Ranked by" in text, text
+    assert "the result was cut off" in text, text
 
 
 def test_c_a_truncated_summary_reports_the_real_row_count() -> None:
@@ -303,3 +306,62 @@ def test_d_a_spread_never_measures_an_identifier() -> None:
         _sql_artifact(_TEAM_ROWS, sql="select team_id, absolute_rank_discrepancy from x"),
     )
     assert "team_id ranges" not in text, text
+
+
+# The live Olist fraud-screen query: 2109 matching payments, ordered, preview
+# capped at 50. `sql_runner` builds the preview as
+# `select * from (<statement>) limit 51`, so a truncated preview is the *head*
+# of the ordering, not a sample of it.
+_TRUNCATED_SQL = (
+    "SELECT op.order_id, op.payment_installments FROM olist_order_payments_dataset op "
+    "ORDER BY op.payment_installments DESC"
+)
+_TRUNCATED_ROWS: list[dict[str, object]] = [
+    {"order_id": f"o{index:03d}", "payment_installments": 24 - index} for index in range(50)
+]
+
+
+def test_a_truncated_ranking_still_names_its_leaders() -> None:
+    """Cutting off the tail cannot change who is first.
+
+    A 2026-08-06 replay of the stored runs caught this: four questions that had
+    named their top rows went silent, because the partial-result guard refused a
+    ranking and a range together. Truncation costs the range -- the smallest
+    value is behind the cut -- and leaves the leaders provable.
+    """
+    artifact = _sql_artifact(_TRUNCATED_ROWS, sql=_TRUNCATED_SQL, truncated=True)
+    artifact.payload["row_count"] = 2109
+
+    finding = _findings_for(_candidate("Which payments look anomalous?"), artifact)[0]
+
+    assert "Ranked by payment_installments descending" in finding.text
+    assert "top is o000" in finding.text
+    # ... and it must not let the reader take the leaders for the whole result.
+    assert "2109" in finding.text
+
+
+def test_a_truncated_ranking_does_not_describe_a_spread_it_cannot_see() -> None:
+    """The bunching note is computed over the preview; say nothing rather than
+    describe the whole result from its first fifty rows."""
+    artifact = _sql_artifact(_TRUNCATED_ROWS, sql=_TRUNCATED_SQL, truncated=True)
+    artifact.payload["row_count"] = 2109
+
+    finding = _findings_for(_candidate("Which payments look anomalous?"), artifact)[0]
+
+    assert "closely bunched" not in finding.text
+    assert "ranges from" not in finding.text
+
+
+def test_an_unordered_truncated_result_still_refuses_to_rank() -> None:
+    """No ORDER BY means the preview's first row leads nothing."""
+    artifact = _sql_artifact(
+        _TRUNCATED_ROWS,
+        sql="SELECT op.order_id, op.payment_installments FROM olist_order_payments_dataset op",
+        truncated=True,
+    )
+    artifact.payload["row_count"] = 2109
+
+    finding = _findings_for(_candidate("Which payments look anomalous?"), artifact)[0]
+
+    assert "Ranked by" not in finding.text
+    assert "only the first 50 were kept" in finding.text

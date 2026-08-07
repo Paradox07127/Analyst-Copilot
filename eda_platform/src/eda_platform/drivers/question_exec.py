@@ -38,7 +38,12 @@ from eda_platform.core.semantic_resources import load_semantic_seeds_safe
 from eda_platform.core.session_metrics import persist_run_metrics
 from eda_platform.core.store import ArtifactStore
 from eda_platform.core.tool_calling_probe import tool_calling_readiness
-from eda_platform.core.tool_guard import ToolGuardError, check_sql_joins_declared
+from eda_platform.core.tool_guard import (
+    JoinScope,
+    ToolGuardError,
+    check_declared_relations_confirmed,
+    check_sql_joins_declared,
+)
 from eda_platform.drivers.cancellation import raise_if_cancelled
 from eda_platform.drivers.report_artifacts import build_agentic_report_artifacts
 from eda_platform.schemas.artifacts import (
@@ -48,6 +53,7 @@ from eda_platform.schemas.artifacts import (
     EvidenceRef,
     SqlResult,
 )
+from eda_platform.schemas.plans import AnalysisPlan
 from eda_platform.schemas.questions import (
     QuestionCandidate,
     QuestionCandidateSet,
@@ -74,6 +80,13 @@ from eda_platform.tools.profiler import looks_like_id_name
 from eda_platform.tools.relationship_discovery import _relation_name
 from eda_platform.tools.report_validator import full_coverage_evidence_refs
 from eda_platform.tools.sql_runner import SqlCatalog, build_catalog, run_sql
+
+_APPROVAL_UNAVAILABLE_FEEDBACK = (
+    "The previous plan set needs_approval=true, but this run executes without a "
+    "user who can approve it, so that plan cannot be run at all. Answer the same "
+    "question with needs_approval=false: aggregate instead of returning rows, "
+    "narrow the columns, or add a filter. Do not change the question."
+)
 
 
 @dataclass(frozen=True)
@@ -358,7 +371,7 @@ def _run_question_batch(
         session_id=actual_session_id,
         project_id=project_id,
         input_hashes={dataset.record.name: dataset.record.content_hash for dataset in datasets},
-        code_version=_current_code_version(),
+        code_version="question-batch",
         model_versions=manifest_model_versions(run_llm),
         title=follow_up_session_title(
             store,
@@ -960,21 +973,62 @@ def _execute_llm_question(
                 exploratory=candidate.exploratory,
             )
         ]
+    # A relation the user never confirmed cannot be repaired by a rewrite, so it
+    # is settled before the planner is paid for an answer it cannot change.
+    relation_violations = check_declared_relations_confirmed(
+        "question",
+        required_relations=candidate.required_relations,
+        confirmed_joins=confirmed_joins,
+    )
+    if relation_violations:
+        guard_error = ToolGuardError("execute_question_candidate", relation_violations)
+        if on_guard_rejected is not None:
+            on_guard_rejected(guard_error)
+        return [
+            _failed_qexec_artifact(
+                question_id=candidate.question_id,
+                question=candidate.question_en,
+                origin=candidate.origin,
+                metric_id=candidate.metric_id,
+                project_id=project_id,
+                session_id=session_id,
+                parent_ids=parent_ids,
+                error=guard_error.to_model_feedback()[:1000],
+                exploratory=candidate.exploratory,
+            )
+        ]
     catalog = build_catalog(datasets)
-    try:
-        plan = build_plan(
+
+    def plan_question(previous_error: str | None = None) -> AnalysisPlan:
+        return build_plan(
             candidate.question_en,
             llm=llm,
             catalog_columns=_catalog_columns(datasets, catalog),
             engine=catalog.engine,
+            previous_error=previous_error,
             on_guard_rejected=on_guard_rejected,
+            join_scope=JoinScope(
+                required_relations=tuple(candidate.required_relations),
+                confirmed_joins=tuple(confirmed_joins),
+            ),
+            approval_available=False,
         )
+
+    try:
+        plan = plan_question()
+        if plan.needs_approval:
+            # The planner is told to raise this flag for costly work, and an
+            # automatic run has nobody to answer it -- three stored runs lost a
+            # question here. The scan is bounded by the engine's row cap and
+            # query timeout either way, so the flag is a request, not the fence.
+            plan = plan_question(_APPROVAL_UNAVAILABLE_FEEDBACK)
         if plan.needs_approval:
             return [
                 _failed_qexec_artifact(
                     question_id=candidate.question_id,
                     question=candidate.question_en,
                     origin=candidate.origin,
+                    metric_id=candidate.metric_id,
                     sql=plan.sql,
                     project_id=project_id,
                     session_id=session_id,
@@ -985,30 +1039,6 @@ def _execute_llm_question(
                     ),
                     outcome="awaiting_approval",
                     abstention_code="approval_required",
-                    exploratory=candidate.exploratory,
-                )
-            ]
-        # Apply the join guard to generated SQL as well as templates.
-        join_violations = check_sql_joins_declared(
-            "plan.sql",
-            plan.sql,
-            required_relations=candidate.required_relations,
-            confirmed_joins=confirmed_joins,
-        )
-        if join_violations:
-            guard_error = ToolGuardError("execute_question_candidate", join_violations)
-            if on_guard_rejected is not None:
-                on_guard_rejected(guard_error)
-            return [
-                _failed_qexec_artifact(
-                    question_id=candidate.question_id,
-                    question=candidate.question_en,
-                    origin=candidate.origin,
-                    sql=plan.sql,
-                    project_id=project_id,
-                    session_id=session_id,
-                    parent_ids=parent_ids,
-                    error=guard_error.to_model_feedback()[:1000],
                     exploratory=candidate.exploratory,
                 )
             ]
@@ -1832,9 +1862,7 @@ def _ranked_finding(
             if share_finding is not None:
                 return share_finding
     basis = _ranking_basis(sql, rows)
-    # A preview is not the result: its first rows only lead the whole ordering
-    # when nothing was cut off behind them.
-    if basis is None or _is_partial(rows, total_rows, truncated):
+    if basis is None:
         return _unranked_rows_finding(
             candidate,
             artifact_id,
@@ -1843,6 +1871,11 @@ def _ranked_finding(
             total_rows=total_rows,
             truncated=truncated,
         )
+    # The preview is `select * from (<statement>) limit n`, so on an ordering the
+    # engine really applied it holds the head. Truncation therefore costs the
+    # range -- the far end is behind the cut -- and leaves the leaders provable.
+    # Refusing both cost four stored questions their answer (2026-08-06 replay).
+    partial = _is_partial(rows, total_rows, truncated)
     basis_column, direction = basis
     leaders = rows[:3]
     values = [value for row in leaders if (value := _number(row.get(basis_column))) is not None]
@@ -1913,15 +1946,34 @@ def _ranked_finding(
         all_values = [
             value for row in rows if (value := _number(row.get(basis_column))) is not None
         ]
-        cluster = _cluster_note(all_values) if direction == "descending" else ""
-        text = f"{candidate.question_en} Ranked by {basis_column} {direction}: {body}{cluster}."
+        # The bunching note describes a spread, which a truncated preview has not seen.
+        cluster = "" if partial else _cluster_note(all_values) if direction == "descending" else ""
+        text = (
+            f"{candidate.question_en} Ranked by {basis_column} {direction}: "
+            f"{body}{cluster}{_leaders_only_note(partial, rows, total_rows)}."
+        )
     else:
         noun = "top" if direction == "descending" else "smallest"
+        ranked = total_rows if total_rows is not None else len(rows)
         text = (
             f"{candidate.question_en} Ranked by {basis_column} {direction}: the {noun} "
-            f"{basis_column} is {values[0]:.4g}{suffix} (first of {len(rows)} ranked results)."
+            f"{basis_column} is {values[0]:.4g}{suffix} (first of {ranked} ranked results)."
         )
     return QuestionFinding(text=text, evidence=evidence)
+
+
+def _leaders_only_note(
+    partial: bool, rows: list[dict[str, object]], total_rows: int | None
+) -> str:
+    """Names the whole result behind a ranking whose tail was not returned."""
+    if not partial:
+        return ""
+    count = total_rows if total_rows is not None else len(rows)
+    # A producer may set the flag without inflating the count, and then the size
+    # of what was cut off is unknown -- "the leading 4 of 4" is not a disclosure.
+    if count <= len(rows):
+        return f" (the leading {len(rows)} ranked rows; the result was cut off)"
+    return f" (the leading {len(rows)} of {count} ranked rows; the rest was not returned)"
 
 
 _ORDER_BY_KEYWORD = re.compile(r"\border\s+by\b", re.IGNORECASE)
@@ -2509,8 +2561,3 @@ def _generate_batch_session_id(source_session_id: str, question_ids: Sequence[st
 def generate_batch_session_id(source_session_id: str, question_ids: Sequence[str]) -> str:
     """Generate a batch run ID before execution so callers can prepare run-scoped resources."""
     return _generate_batch_session_id(source_session_id, question_ids)
-
-
-def _current_code_version() -> str:
-    """Return the local build marker without spawning a Git subprocess."""
-    return "local"

@@ -241,6 +241,86 @@ def sql_base_tables(sql: str) -> set[str]:
     return referenced - cte_names
 
 
+@dataclass(frozen=True)
+class JoinScope:
+    """The cross-table reach one question is allowed, for guards inside a repair loop.
+
+    Absent (``None`` at a call site) means unrestricted: the chat planner works
+    against whatever the user has approved interactively and has no card to read.
+    """
+
+    required_relations: tuple[str, ...] = ()
+    confirmed_joins: tuple[str, ...] = ()
+
+
+def _confirmed_summary(confirmed_joins: Iterable[str]) -> str:
+    labels = sorted(str(label) for label in confirmed_joins)
+    return ", ".join(labels) or "(no confirmed joins in the whitelist)"
+
+
+def check_sql_join_scope(
+    field: str,
+    sql: Any,
+    *,
+    required_relations: Sequence[str],
+    confirmed_joins: Iterable[str],
+) -> GuardViolation | None:
+    """Reject SQL reaching across base tables the question never declared.
+
+    Repairable by rewriting the statement, so this half runs inside the
+    planner's retry loop; ``check_declared_relations_confirmed`` does not.
+    """
+    sql_text = sql if isinstance(sql, str) else ""
+    if required_relations:
+        return None
+    joins = _SQL_JOIN_RE.search(_sql_structure(sql_text)) is not None
+    if not joins or len(sql_base_tables(sql_text)) <= 1:
+        return None
+    return GuardViolation(
+        field=field,
+        got="SQL containing a JOIN with no declared required_relations",
+        allowed=(
+            "JOIN SQL only for questions declaring confirmed whitelist "
+            f"relations. Confirmed joins: {_confirmed_summary(confirmed_joins)}"
+        ),
+        fix_hint=(
+            "Declare the join in required_relations using a confirmed "
+            "whitelist label, or rewrite the SQL without a JOIN."
+        ),
+        problem="SQL joins tables but the question declares no required_relations.",
+    )
+
+
+def check_declared_relations_confirmed(
+    field: str,
+    *,
+    required_relations: Sequence[str],
+    confirmed_joins: Iterable[str],
+) -> list[GuardViolation]:
+    """Reject declared relations the user has not confirmed on the whitelist.
+
+    Reads only the question card, so re-asking the model cannot change the
+    answer: check it once, before spending a call on a plan.
+    """
+    confirmed = {str(label) for label in confirmed_joins}
+    allowed = _confirmed_summary(confirmed)
+    return [
+        GuardViolation(
+            field=f"{field}.required_relations[{index}]",
+            got=label,
+            allowed=allowed,
+            fix_hint=(
+                f"Use only confirmed join whitelist labels: {allowed}. "
+                "Ask the user to confirm the join on the Knowledge page, "
+                "or drop the relation and ask a single-table question."
+            ),
+            problem="required relation is not a confirmed join in the whitelist.",
+        )
+        for index, label in enumerate(required_relations)
+        if label not in confirmed
+    ]
+
+
 def check_sql_joins_declared(
     field: str,
     sql: Any,
@@ -248,46 +328,21 @@ def check_sql_joins_declared(
     required_relations: Sequence[str],
     confirmed_joins: Iterable[str],
 ) -> list[GuardViolation]:
-    """Reject SQL joins that are not covered by declared relations."""
-    confirmed = {str(label) for label in confirmed_joins}
-    allowed = ", ".join(sorted(confirmed)) or "(no confirmed joins in the whitelist)"
-    violations: list[GuardViolation] = []
-    sql_text = sql if isinstance(sql, str) else ""
-    joins = _SQL_JOIN_RE.search(_sql_structure(sql_text)) is not None
-    crosses_tables = len(sql_base_tables(sql_text)) > 1
-    if joins and crosses_tables and not required_relations:
-        violations.append(
-            GuardViolation(
-                field=field,
-                got="SQL containing a JOIN with no declared required_relations",
-                allowed=(
-                    "JOIN SQL only for questions declaring confirmed whitelist "
-                    f"relations. Confirmed joins: {allowed}"
-                ),
-                fix_hint=(
-                    "Declare the join in required_relations using a confirmed "
-                    "whitelist label, or rewrite the SQL without a JOIN."
-                ),
-                problem="SQL joins tables but the question declares no required_relations.",
-            )
-        )
-    for index, label in enumerate(required_relations):
-        if label in confirmed:
-            continue
-        violations.append(
-            GuardViolation(
-                field=f"{field}.required_relations[{index}]",
-                got=label,
-                allowed=allowed,
-                fix_hint=(
-                    f"Use only confirmed join whitelist labels: {allowed}. "
-                    "Ask the user to confirm the join on the Knowledge page, "
-                    "or drop the relation and ask a single-table question."
-                ),
-                problem="required relation is not a confirmed join in the whitelist.",
-            )
-        )
-    return violations
+    """Both join checks at once, for deterministic SQL with no repair channel."""
+    scope = check_sql_join_scope(
+        field,
+        sql,
+        required_relations=required_relations,
+        confirmed_joins=confirmed_joins,
+    )
+    return [
+        *([scope] if scope is not None else []),
+        *check_declared_relations_confirmed(
+            field,
+            required_relations=required_relations,
+            confirmed_joins=confirmed_joins,
+        ),
+    ]
 
 
 def check_column_semantic_type(

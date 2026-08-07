@@ -38,7 +38,14 @@ class Intent(BaseModel):
 class AnalysisPlan(BaseModel):
     question: str
     dataset_names: list[str] = Field(default_factory=list)
-    columns: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Source columns this query reads, exactly as the catalog spells them. "
+            "May be qualified as dataset.column. Never an alias the query creates: "
+            "for `sum(amount) AS total_amount` list `amount`, not `total_amount`."
+        ),
+    )
     filters: list[str] = Field(default_factory=list)
     sql: str
     method: str
