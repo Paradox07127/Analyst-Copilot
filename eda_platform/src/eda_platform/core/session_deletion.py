@@ -621,17 +621,18 @@ class SessionDeletionCoordinator:
         deletion that has already committed. A stray scratch tree is harmless;
         a blocked deletion is not.
         """
-        scratch = self._safe_path(
-            str(
-                PurePosixPath("_sandbox")
-                / "code_agent"
-                / operation.project_id
-                / operation.session_id
+        for agent_root in ("code_agent", "question_agent"):
+            scratch = self._safe_path(
+                str(
+                    PurePosixPath("_sandbox")
+                    / agent_root
+                    / operation.project_id
+                    / operation.session_id
+                )
             )
-        )
-        if scratch.is_symlink() or not scratch.is_dir():
-            return
-        remove_tree(scratch, ignore_errors=True)
+            if scratch.is_symlink() or not scratch.is_dir():
+                continue
+            remove_tree(scratch, ignore_errors=True)
 
     def _mark_done(self, op_id: str) -> None:
         operation = self._load_operation(op_id)

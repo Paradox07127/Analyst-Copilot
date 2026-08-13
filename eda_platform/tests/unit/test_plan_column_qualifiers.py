@@ -64,6 +64,59 @@ def test_a_hallucinated_bare_column_is_still_refused() -> None:
         guard_plan_references(_plan(["revenue"]), _CATALOG)
 
 
+def test_explicit_output_aliases_are_repaired_to_source_columns() -> None:
+    plan = AnalysisPlan(
+        question="Aggregate order amount by month.",
+        dataset_names=["ecommerce_orders"],
+        columns=["month", "total_amount"],
+        filters=[],
+        sql=(
+            "select substr(order_date, 1, 7) as month, sum(amount) as total_amount "
+            "from ecommerce_orders group by month order by month"
+        ),
+        method="monthly aggregate",
+        rationale="Month totals.",
+        estimated_scan="small",
+    )
+
+    guard_plan_references(
+        plan,
+        {"ecommerce_orders": {"order_date", "amount", "order_id"}},
+    )
+
+    assert plan.columns == ["amount", "order_date"]
+
+
+def test_unknown_metadata_is_not_repaired_unless_it_is_an_explicit_alias() -> None:
+    plan = _plan(["made_up_output"])
+    with pytest.raises(ToolGuardError, match="made_up_output"):
+        guard_plan_references(plan, _CATALOG)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select 1 as month /* amount as total_amount */ from ecommerce_orders",
+        "select 'amount as total_amount' as month from ecommerce_orders",
+        "select 1 as month -- amount as total_amount\nfrom ecommerce_orders",
+    ],
+)
+def test_alias_repair_ignores_literals_and_comments(sql: str) -> None:
+    plan = AnalysisPlan(
+        question="Aggregate order amount by month.",
+        dataset_names=["ecommerce_orders"],
+        columns=["month", "total_amount"],
+        filters=[],
+        sql=sql,
+        method="monthly aggregate",
+        rationale="Month totals.",
+        estimated_scan="small",
+    )
+
+    with pytest.raises(ToolGuardError, match="total_amount"):
+        guard_plan_references(plan, {"ecommerce_orders": {"amount", "order_date"}})
+
+
 def test_the_plan_schema_says_what_columns_means() -> None:
     """The field the guard checks was never described to the model that fills it.
 

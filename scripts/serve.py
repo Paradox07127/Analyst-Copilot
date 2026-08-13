@@ -8,10 +8,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 
-from eda_platform.core.config import WorkspaceConfigError, resolve_workspace_path
+from eda_platform.core.config import (
+    DeploymentConfigError,
+    WorkspaceConfigError,
+    deployment_config,
+    resolve_workspace_path,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIST = REPO_ROOT / "apps" / "web" / "dist"
@@ -64,7 +70,26 @@ def resolve_config(argv: list[str] | None = None) -> ServeConfig:
             f"web build not found at {dist} — run `npm run build --prefix apps/web` first"
         )
     workspace = resolve_workspace(args.workspace)
+    try:
+        deployment = deployment_config(repo_root=REPO_ROOT)
+    except DeploymentConfigError as exc:
+        raise ServeConfigError(str(exc)) from exc
+    if deployment.mode == "local" and not _is_loopback_bind(args.host):
+        raise ServeConfigError(
+            "Local mode may bind only to loopback; configure authenticated remote mode "
+            "before using a non-loopback address."
+        )
     return ServeConfig(host=args.host, port=args.port, dist=dist, workspace=workspace)
+
+
+def _is_loopback_bind(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:

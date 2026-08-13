@@ -970,17 +970,21 @@ class JobLifecycleRepository:
         )
         if cursor.rowcount != 1:
             return False
-        self._update_run_terminal(
+        session_status = self._update_run_terminal(
             conn,
             job_id=claim.job_id,
             session_id=str(row[2]),
             status=effective,
         )
-        summary = (
-            {}
-            if error_code is None
-            else {"error_code": error_code, "error_message": error_message}
-        )
+        summary: dict[str, object] = {"session_status": session_status}
+        if session_status == "limited":
+            summary["detail"] = (
+                "Resource preflight stopped this run before data ingestion."
+            )
+        if error_code is not None:
+            summary.update(
+                {"error_code": error_code, "error_message": error_message}
+            )
         self._insert_event(
             conn,
             job_id=claim.job_id,
@@ -1000,12 +1004,30 @@ class JobLifecycleRepository:
         job_id: str,
         session_id: str,
         status: str,
-    ) -> None:
-        session_status = {
+    ) -> str:
+        requested_session_status = {
             "completed": "completed",
             "failed": "failed",
             "cancelled": "cancelled",
         }[status]
+        current = conn.execute(
+            """
+            select status from sessions
+            where session_id = ? and active_job_id = ? and storage_state = 'live'
+            """,
+            (session_id, job_id),
+        ).fetchone()
+        if current is None:
+            raise RuntimeError("Session terminal ownership handshake failed.")
+        # A handler can finish normally after deliberately stopping at a
+        # resource preflight boundary.  The process-level job has completed,
+        # but the analysis session has not; preserve that domain outcome
+        # instead of repainting it as a successful analysis.
+        session_status = (
+            "limited"
+            if status == "completed" and str(current[0]) == "limited"
+            else requested_session_status
+        )
         cursor = conn.execute(
             """
             update sessions set
@@ -1017,6 +1039,7 @@ class JobLifecycleRepository:
         )
         if cursor.rowcount != 1:
             raise RuntimeError("Session terminal ownership handshake failed.")
+        return session_status
 
     def _insert_event(
         self,

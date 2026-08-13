@@ -64,7 +64,7 @@ def _proposal(index: int = 0) -> HypothesisProposal:
 def _settings() -> LLMSettings:
     return LLMSettings(
         provider=LLMProvider.OPENAI_COMPATIBLE,
-        base_url="https://api.example.com/v1",
+        base_url="http://127.0.0.1:18080/v1",
         api_key="sk-test",
         model="gpt-5.6-terra",
         max_tokens=256,
@@ -111,7 +111,7 @@ def test_thirteen_proposals_are_a_malformed_response_not_a_raw_validation_error(
         }
     )
     monkeypatch.setattr(
-        "eda_platform.core.llm.request.urlopen",
+        "eda_platform.core.llm.credential_safe_urlopen",
         lambda req, timeout=0: _Resp(_chat_completion(over_cap)),  # noqa: ARG005
     )
 
@@ -331,7 +331,7 @@ def test_two_transport_failures_are_retried_and_the_third_attempt_succeeds(
         TimeoutError("timed out"),
         error.URLError("connection refused"),
     )
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", endpoint)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", endpoint)
 
     text = OpenAICompatibleLLMClient(_settings()).text(task="t", payload={})
 
@@ -349,7 +349,7 @@ def test_a_transport_failure_that_never_clears_still_raises(
         TimeoutError("timed out"),
         TimeoutError("timed out"),
     )
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", endpoint)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", endpoint)
 
     with pytest.raises(RuntimeError, match="did not respond within"):
         OpenAICompatibleLLMClient(_settings()).text(task="t", payload={})
@@ -381,7 +381,7 @@ def test_an_http_rejection_is_never_retried_as_a_transport_fault(
             raise exc
 
     endpoint = _Unauthorized()
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", endpoint)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", endpoint)
 
     with pytest.raises(RuntimeError, match="HTTP 401"):
         OpenAICompatibleLLMClient(_settings()).text(task="t", payload={})

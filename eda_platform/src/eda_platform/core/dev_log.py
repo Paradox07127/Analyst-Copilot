@@ -7,6 +7,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -17,7 +18,6 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 LLM_DEBUG_FILENAME = "llm_debug.jsonl"
-PREVIEW_CHARS = 2_000
 _FULL_CAPTURE_ENV = "EDA_LLM_DEBUG_FULL"
 
 # Summary keys that carry the metrics developers scan for; anything else in a
@@ -107,9 +107,17 @@ def _preview(value: Any) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     if os.environ.get(_FULL_CAPTURE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
         return text
-    if len(text) > PREVIEW_CHARS:
-        return text[:PREVIEW_CHARS] + f"… [truncated {len(text) - PREVIEW_CHARS} chars]"
-    return text
+    shape: dict[str, Any] = {
+        "redacted": True,
+        "type": type(value).__name__,
+        "chars": len(text),
+        "sha256": sha256(text.encode("utf-8")).hexdigest()[:12],
+    }
+    if isinstance(value, dict):
+        shape["keys"] = sorted(str(key) for key in value)[:32]
+    elif isinstance(value, list | tuple):
+        shape["items"] = len(value)
+    return json.dumps(shape, ensure_ascii=False, sort_keys=True)
 
 
 def _serialized_bytes(value: Any) -> int:
@@ -312,5 +320,3 @@ def read_llm_debug(session_dir: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return records
-
-

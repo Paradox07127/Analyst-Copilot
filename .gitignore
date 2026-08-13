@@ -61,7 +61,6 @@ eda_platform/*.zip
 
 # Local-only material excluded from the public clean-history repository.
 /docs/
-/CHANGELOG.md
 /CLAUDE.md
 /.impeccable.md
 /eda_platform/tests/fixtures/scoreboard_corpus/

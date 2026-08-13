@@ -462,7 +462,7 @@ def test_azure_uses_api_key_header_not_bearer(monkeypatch: pytest.MonkeyPatch) -
         captured.update(req.headers)
         return _FakeResp()
 
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", _fake_urlopen)
     settings = LLMSettings(
         provider=LLMProvider.AZURE_OPENAI,
         api_key="azkey",
@@ -548,7 +548,7 @@ def test_socket_timeout_becomes_actionable_runtime_error(monkeypatch) -> None:
     def _raise_timeout(*args, **kwargs):
         raise TimeoutError("The read operation timed out")
 
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", _raise_timeout)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", _raise_timeout)
 
     with pytest.raises(RuntimeError) as excinfo:
         client._post_json("/chat/completions", {})

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ResourceLimitAction = Literal["limited", "reject"]
 ResourcePreflightStatus = Literal["accepted", "limited", "rejected"]
-ResourceComputeMode = Literal["exact_in_memory", "metadata_only"]
+ResourceComputeMode = Literal["exact_in_memory", "streaming_exact", "metadata_only"]
 ResourceMeasurement = Literal["exact", "estimated", "unavailable"]
 DatasetRole = Literal["analysis", "raw_lineage"]
 PeakRssMethod = Literal[
@@ -108,8 +108,11 @@ class EdaResourcePreflight(_StrictModel):
             raise ValueError("effective_dataset_workers exceeds policy maximum")
         if self.input_dataset_count != len(self.datasets):
             raise ValueError("input_dataset_count must equal len(datasets)")
-        if self.status == "accepted" and self.compute_mode != "exact_in_memory":
-            raise ValueError("accepted preflight must use exact_in_memory mode")
+        if self.status == "accepted" and self.compute_mode not in {
+            "exact_in_memory",
+            "streaming_exact",
+        }:
+            raise ValueError("accepted preflight must use an exact compute mode")
         if self.status != "accepted" and self.compute_mode != "metadata_only":
             raise ValueError("limited/rejected preflight must use metadata_only mode")
         return self
@@ -161,7 +164,7 @@ class AutoEdaResourceUsage(_StrictModel):
     preprocessing_duration_seconds: float = Field(default=0.0, ge=0.0)
     ingest_duration_seconds: float = Field(default=0.0, ge=0.0)
     processing_mode: Literal[
-        "exact_in_memory", "metadata_only", "unknown"
+        "exact_in_memory", "streaming_exact", "metadata_only", "unknown"
     ] = "unknown"
     preflight_status: Literal[
         "accepted", "limited", "rejected", "unavailable"

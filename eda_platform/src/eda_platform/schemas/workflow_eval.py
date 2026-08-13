@@ -59,9 +59,7 @@ class WorkflowEvalSpec(BaseModel):
     input_files: list[str] = Field(default_factory=list)
     business_context: str = ""
     probe_questions: list[WorkflowEvalProbe] = Field(default_factory=list)
-    baseline_policy: WorkflowEvalBaselinePolicy = Field(
-        default_factory=WorkflowEvalBaselinePolicy
-    )
+    baseline_policy: WorkflowEvalBaselinePolicy = Field(default_factory=WorkflowEvalBaselinePolicy)
     expected_dataset_count: int | None = Field(default=None, ge=0)
     expected_answers: list[ExpectedAnswer] = Field(default_factory=list)
     expected_abstentions: list[ExpectedAbstention] = Field(default_factory=list)
@@ -79,6 +77,8 @@ class WorkflowEvalSpec(BaseModel):
     max_failures: int = Field(default=0, ge=0)
     max_tokens: int | None = Field(default=None, ge=0)
     max_duration_seconds: float | None = Field(default=None, gt=0.0)
+    required_milestones: list[EvalMilestone] = Field(default_factory=list)
+    minefields: list[EvalMinefield] = Field(default_factory=list)
 
 
 class SemanticEscape(BaseModel):
@@ -88,8 +88,8 @@ class SemanticEscape(BaseModel):
     matched_texts: list[str] = Field(default_factory=list)
 
 
-class WorkflowEvalResult(BaseModel):
-    """Quality/cost result for one completed workflow run."""
+class WorkflowQualityResult(BaseModel):
+    """One component score; never a standalone release verdict."""
 
     schema_version: int = 1
     case_name: str
@@ -123,17 +123,19 @@ class WorkflowEvalResult(BaseModel):
 class WorkflowEvalSuiteResult(BaseModel):
     """Repeated-run rollup used to balance quality, stability, latency and cost."""
 
-    schema_version: int = 1
+    schema_version: int = 2
     case_name: str
     spec_digest: str
     passed: bool
     gate_failures: list[str] = Field(default_factory=list)
-    runs: list[WorkflowEvalResult]
+    quality_results: list[WorkflowQualityResult]
     stability_rate: float
     duration_mean_seconds: float
     duration_p95_seconds: float
     tokens_mean: float
     tokens_max: int
+    trials: list[WorkflowEvalTrial] = Field(default_factory=list)
+    protocol_digest: str | None = None
 
 
 class WorkflowEvalComparison(BaseModel):
@@ -160,9 +162,7 @@ class WorkflowEvalCase(BaseModel):
     dataset_refs: list[str] = Field(default_factory=list)
     business_context: str = ""
     probe_questions: list[WorkflowEvalProbe] = Field(default_factory=list)
-    baseline_policy: WorkflowEvalBaselinePolicy = Field(
-        default_factory=WorkflowEvalBaselinePolicy
-    )
+    baseline_policy: WorkflowEvalBaselinePolicy = Field(default_factory=WorkflowEvalBaselinePolicy)
     expected_dataset_count: int | None = Field(default=None, ge=0)
     expected_answers: list[ExpectedAnswer] = Field(default_factory=list)
     expected_abstentions: list[ExpectedAbstention] = Field(default_factory=list)
@@ -180,7 +180,8 @@ class WorkflowEvalCase(BaseModel):
     max_failures: int = Field(default=0, ge=0)
     max_tokens: int | None = Field(default=None, ge=0)
     max_duration_seconds: float | None = Field(default=None, gt=0.0)
-    source_spec_schema_version: int = 1
+    required_milestones: list[EvalMilestone] = Field(default_factory=list)
+    minefields: list[EvalMinefield] = Field(default_factory=list)
 
 
 class WorkflowEvalEnvironment(BaseModel):
@@ -195,6 +196,10 @@ class WorkflowEvalEnvironment(BaseModel):
     code_revision: str = "unknown"
     policy_versions: dict[str, str] = Field(default_factory=dict)
     pricing_catalog_version: str | None = None
+    harness_version: str = "workflow-eval-v2"
+    tool_registry_digest: str = "unknown"
+    sandbox_policy_digest: str = "unknown"
+    budget_policy: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowEvalTrialManifest(BaseModel):
@@ -229,9 +234,7 @@ class WorkflowEvalUsage(BaseModel):
     budget_settled_calls: int | None = Field(default=None, ge=0)
     budget_rejected_calls: int | None = Field(default=None, ge=0)
     budget_uncertain_calls: int | None = Field(default=None, ge=0)
-    budget_reconciliation: Literal[
-        "verified", "unverifiable", "not_applicable"
-    ] | None = None
+    budget_reconciliation: Literal["verified", "unverifiable", "not_applicable"] | None = None
 
 
 class WorkflowEvalScore(BaseModel):
@@ -258,7 +261,7 @@ class WorkflowEvalStep(BaseModel):
         "report_claim",
         "validation",
     ]
-    status: Literal["succeeded", "failed", "abstained", "skipped"]
+    status: Literal["succeeded", "failed", "abstained", "awaiting_approval", "skipped"]
     depends_on: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -270,6 +273,43 @@ class WorkflowEvalStepDAG(BaseModel):
 
     schema_version: int = 1
     steps: list[WorkflowEvalStep] = Field(default_factory=list)
+
+
+class EvalActionSpan(BaseModel):
+    """Normalized action/state trajectory reconstructed from durable trace events."""
+
+    schema_version: int = 1
+    span_id: str
+    parent_span_id: str | None = None
+    operation: str
+    event_type: str
+    status: Literal["succeeded", "failed", "pending"]
+    tool_name: str | None = None
+    canonical_arguments_digest: str | None = None
+    result_digest: str | None = None
+    error_type: str | None = None
+    approval_decision: str | None = None
+    retry_attempt: str | None = None
+    handoff_target: str | None = None
+    state_before_digest: str | None = None
+    state_after_digest: str | None = None
+    artifact_refs: list[str] = Field(default_factory=list)
+
+
+class EvalMilestone(BaseModel):
+    """Required observable state transition for a benchmark case."""
+
+    milestone_id: str
+    event_type: str | None = None
+    operation_pattern: str | None = None
+
+
+class EvalMinefield(BaseModel):
+    """Forbidden observable action or policy outcome."""
+
+    minefield_id: str
+    event_type: str | None = None
+    operation_pattern: str | None = None
 
 
 class WorkflowEvalFailureNode(BaseModel):
@@ -301,6 +341,8 @@ class WorkflowEvalTrial(BaseModel):
     trace_ref: str | None = None
     artifact_refs: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    artifact_digests: dict[str, str] = Field(default_factory=dict)
+    action_spans: list[EvalActionSpan] = Field(default_factory=list)
     usage: WorkflowEvalUsage = Field(default_factory=WorkflowEvalUsage)
     scores: list[WorkflowEvalScore] = Field(default_factory=list)
     failure_nodes: list[WorkflowEvalFailureNode] = Field(default_factory=list)
@@ -314,10 +356,30 @@ class WorkflowEvalTrial(BaseModel):
         return self
 
 
-class WorkflowEvalConversion(BaseModel):
-    """Lossless legacy-spec split into benchmark, environment, and manifest."""
+class CompiledWorkflowEvalCase(BaseModel):
+    """Benchmark case compiled with an execution environment and trial identity."""
 
     schema_version: int = 1
     case: WorkflowEvalCase
     environment: WorkflowEvalEnvironment
     manifest: WorkflowEvalTrialManifest
+
+
+class WorkflowEvalMutationResult(BaseModel):
+    """One executable grader mutation and whether the hard gates detected it."""
+
+    mutation_id: str
+    detected: bool
+    failure_codes: list[str] = Field(default_factory=list)
+
+
+class WorkflowEvalGraderCertificate(BaseModel):
+    """Meta-eval certificate proving clean acceptance and mutation recall."""
+
+    schema_version: int = 1
+    grader_id: str = "workflow-eval-hard-gates"
+    protocol_digest: str
+    clean_oracle_passed: bool
+    mutation_recall: float = Field(ge=0.0, le=1.0)
+    release_eligible: bool
+    mutations: list[WorkflowEvalMutationResult] = Field(default_factory=list)

@@ -18,6 +18,7 @@ from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.question_exec import _agent_qexec_artifact
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.questions import (
+    QuestionAnswerContract,
     QuestionCandidate,
     QuestionExecutionResult,
     QuestionScore,
@@ -393,6 +394,150 @@ def test_a_verified_agent_answer_is_stamped_validated() -> None:
 
     assert persisted.outcome == "answered"
     assert persisted.interpretation_status == "validated"
+
+
+def test_prediction_agent_abstains_without_model_evidence() -> None:
+    candidate = _candidate().model_copy(update={"analysis_mode": "prediction"})
+    code_artifact = Artifact(
+        id=make_artifact_id("code", {"seed": "prediction-proxy"}),
+        type=ArtifactType.CODE_EXECUTION_RESULT,
+        project_id="project_demo",
+        session_id="question_run",
+        payload={"status": "succeeded", "stdout_json": {"summary": "rate only"}},
+    )
+    artifact = _agent_qexec_artifact(
+        candidate,
+        agent_result=AgentRunResult(
+            status="completed",
+            answer="The observed rate was 1%.",
+            artifacts=[code_artifact],
+            tool_calls=1,
+            tool_names=["run_open_analysis"],
+        ),
+        project_id="project_demo",
+        session_id="question_run",
+        parent_ids=[],
+    )
+
+    persisted = QuestionExecutionResult.model_validate(artifact.payload)
+    assert persisted.outcome == "abstained"
+    assert persisted.abstention_code == "method_contract_failed"
+    assert persisted.contract_status == "failed"
+
+
+def test_prediction_method_contract_cannot_be_downgraded_by_candidate_contract() -> None:
+    candidate = _candidate().model_copy(
+        update={
+            "analysis_mode": "prediction",
+            "answer_contract": QuestionAnswerContract(
+                kind="threshold",
+                required_column_tokens=["rate"],
+            ),
+        }
+    )
+    proxy_payload = {
+        "columns": ["rate"],
+        "rows_preview": [{"rate": 0.99}],
+        "row_count": 1,
+        "truncated": False,
+        "sql": "SELECT 0.99 AS rate",
+    }
+    proxy = Artifact(
+        id=make_artifact_id("sql", proxy_payload),
+        type=ArtifactType.SQL_RESULT,
+        project_id="project_demo",
+        session_id="question_run",
+        payload=proxy_payload,
+    )
+
+    artifact = _agent_qexec_artifact(
+        candidate,
+        agent_result=AgentRunResult(
+            status="completed",
+            answer="The proxy rate was 99%.",
+            artifacts=[proxy],
+            tool_calls=1,
+            tool_names=["run_sql"],
+        ),
+        project_id="project_demo",
+        session_id="question_run",
+        parent_ids=[],
+    )
+
+    persisted = QuestionExecutionResult.model_validate(artifact.payload)
+    assert persisted.outcome == "abstained"
+    assert persisted.abstention_code == "method_contract_failed"
+    assert persisted.answer_contract is not None
+    assert persisted.answer_contract.required_method_id == "ml_baseline"
+
+
+def test_prediction_agent_requires_and_accepts_model_card() -> None:
+    candidate = _candidate().model_copy(update={"analysis_mode": "prediction"})
+    model_payload = {
+        "dataset_id": "orders",
+        "task_type": "classification",
+        "target_column": "late",
+        "feature_columns": ["amount"],
+        "split_strategy": "random_stratified",
+        "train_rows": 80,
+        "test_rows": 20,
+        "model_type": "dummy",
+        "metrics": {"accuracy": 0.7},
+    }
+    model_artifact = Artifact(
+        id=make_artifact_id("model", model_payload),
+        type=ArtifactType.MODEL_CARD,
+        project_id="project_demo",
+        session_id="question_run",
+        payload=model_payload,
+    )
+    artifact = _agent_qexec_artifact(
+        candidate,
+        agent_result=AgentRunResult(
+            status="completed",
+            answer="The held-out accuracy was 0.7.",
+            artifacts=[model_artifact],
+            tool_calls=1,
+            tool_names=["run_baseline_model"],
+        ),
+        project_id="project_demo",
+        session_id="question_run",
+        parent_ids=[],
+    )
+
+    persisted = QuestionExecutionResult.model_validate(artifact.payload)
+    assert persisted.outcome == "answered"
+    assert persisted.contract_status == "passed"
+    assert persisted.answer_contract is not None
+    assert persisted.answer_contract.required_artifact_types == [ArtifactType.MODEL_CARD]
+
+
+def test_prediction_agent_rejects_spoofed_model_card_type() -> None:
+    candidate = _candidate().model_copy(update={"analysis_mode": "prediction"})
+    spoofed = Artifact(
+        id=make_artifact_id("model", {"status": "looks-good"}),
+        type=ArtifactType.MODEL_CARD,
+        project_id="project_demo",
+        session_id="question_run",
+        payload={"status": "looks-good"},
+    )
+    artifact = _agent_qexec_artifact(
+        candidate,
+        agent_result=AgentRunResult(
+            status="completed",
+            answer="Accuracy is 99%.",
+            artifacts=[spoofed],
+            tool_calls=1,
+            tool_names=["run_baseline_model"],
+        ),
+        project_id="project_demo",
+        session_id="question_run",
+        parent_ids=[],
+    )
+
+    persisted = QuestionExecutionResult.model_validate(artifact.payload)
+    assert persisted.outcome == "abstained"
+    assert persisted.abstention_code == "method_contract_failed"
 
 
 def _candidate() -> QuestionCandidate:

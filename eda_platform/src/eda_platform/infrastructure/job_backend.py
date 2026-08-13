@@ -29,6 +29,63 @@ from eda_platform.infrastructure.launch_gate import (
 CANCEL_GRACE_SECONDS = 2.0
 CANCEL_SHIELD_POLL_SECONDS = 0.05
 
+# A worker needs process/runtime plumbing, not every credential and desktop
+# integration token held by the API process.  Per-run LLM settings are supplied
+# separately through JobCommand.env and are constrained below.
+_WORKER_INHERITED_ENV = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "PYTHONPATH",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "EDA_LLM_ENDPOINT_ALLOWLIST",
+        # Sandbox policy and Docker CLI plumbing are read INSIDE the worker
+        # (core/sandbox_broker.py, core/sandbox_docker.py). Stripping them
+        # silently downgraded EDA_SANDBOX_REQUIRED=1 back to "auto". They stay
+        # operator-owned: the per-job overlay below cannot set them.
+        "EDA_SANDBOX_REQUIRED",
+        "EDA_SANDBOX_BACKEND",
+        "EDA_SANDBOX_DOCKER_IMAGE",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CONFIG",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+        # Explicit operator opt-in read at call time in the worker (dev_log).
+        "EDA_LLM_DEBUG_FULL",
+        # Worker-side trace persistence reads these directly; stripping them
+        # silently disabled span export and debug.jsonl for every worker.
+        "EDA_OBSERVABILITY",
+        "PHOENIX_COLLECTOR_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "EDA_DEBUG_LOG",
+    }
+)
+_WORKER_COMMAND_ENV = frozenset(
+    {
+        "EDA_LLM_PROVIDER",
+        "EDA_LLM_MODEL",
+        "EDA_LLM_BASE_URL",
+        "EDA_LLM_TEMPERATURE",
+        "EDA_LLM_MAX_TOKENS",
+        "EDA_LLM_TIMEOUT_SECONDS",
+        "EDA_LLM_STRUCTURED_OUTPUT_MODE",
+        "EDA_LLM_USD_PER_1K_PROMPT",
+        "EDA_LLM_USD_PER_1K_COMPLETION",
+        "EDA_LLM_API_KEY",
+        "EDA_LLM_ORGANIZATION",
+        "EDA_REPORT_LLM_MODEL",
+    }
+)
+
 # Detach the worker from the parent's job control so a terminal signal aimed at
 # the API does not also reach a running job.
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -59,6 +116,21 @@ def _detached_spawn_options(inheritable: tuple[int, ...]) -> _SpawnOptions:
     return _SpawnOptions(
         start_new_session=True, pass_fds=inheritable, creationflags=0
     )
+
+
+def _worker_environment(overlay: dict[str, str] | None) -> dict[str, str]:
+    """Build a minimal, deterministic subprocess environment."""
+    supplied = overlay or {}
+    unknown = sorted(set(supplied) - _WORKER_COMMAND_ENV)
+    if unknown:
+        raise ValueError(f"Unsupported worker environment keys: {', '.join(unknown)}")
+    inherited = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _WORKER_INHERITED_ENV or key.startswith("LC_")
+    }
+    inherited.update(supplied)
+    return inherited
 
 
 class LocalProcessJobBackend:
@@ -92,7 +164,7 @@ class LocalProcessJobBackend:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    env={**os.environ, **command.env} if command.env else None,
+                    env=_worker_environment(command.env),
                     start_new_session=options.start_new_session,
                     pass_fds=options.pass_fds,
                     creationflags=options.creationflags,
@@ -119,7 +191,6 @@ class LocalProcessJobBackend:
                     clear_idempotency=True,
                 )
                 raise
-
     def cancel(self, job_id: str) -> None:
         job = self._lifecycle.request_cancel(job_id)
         if str(job["status"]) != "cancelling":

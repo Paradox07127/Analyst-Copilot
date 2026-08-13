@@ -210,3 +210,23 @@ def test_tool_calling_flag_actually_withdraws_a_model() -> None:
     with patch.dict(AGENT_MODEL_REGISTRY, patched, clear=True):
         assert not is_verified_agent_model(provider, withdrawn.model_id)
         assert withdrawn.model_id not in agent_model_ids(provider)
+
+
+def test_an_endpoint_policy_failure_also_falls_back_to_the_snapshot(tmp_path: Path) -> None:
+    """Codex pre-commit review (2026-08-13): validate_llm_base_url raises
+    EndpointPolicyError (a ValueError), which escaped the ModelCatalogError
+    handler and turned GET /settings/models into a 500."""
+    service = SettingsService(
+        workspace=tmp_path.resolve(),
+        defaults=LLMSettings(
+            provider=LLMProvider.OPENAI_COMPATIBLE,
+            model="m",
+            api_key="k",
+            base_url="https://remote.example/v1",
+        ),
+    )
+
+    catalog = service.list_models()
+
+    assert catalog.source == "snapshot"
+    assert catalog.warning

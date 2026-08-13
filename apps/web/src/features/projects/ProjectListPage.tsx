@@ -39,6 +39,7 @@ function statusTone(status: string): Tone {
   const s = status.toLowerCase();
   if (["complete", "completed", "succeeded", "success", "ready"].includes(s))
     return "ok";
+  if (s === "limited") return "warn";
   if (["running", "in_progress", "active", "pending", "queued", "connecting"].includes(s)) return "warn";
   if (["failed", "error", "cancelled"].includes(s)) return "critical";
   return "neutral";
@@ -51,6 +52,7 @@ function statusLabel(status: string): string {
   }
   if (["running", "in_progress", "active"].includes(normalized)) return "Running";
   if (["pending", "queued", "connecting"].includes(normalized)) return "Queued";
+  if (normalized === "limited") return "Resource limited";
   if (["failed", "error"].includes(normalized)) return "Failed";
   if (normalized === "cancelled") return "Cancelled";
   return status || "Unknown";

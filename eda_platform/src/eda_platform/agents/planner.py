@@ -4,7 +4,11 @@ from collections.abc import Callable
 from typing import Any
 
 from eda_platform.core.llm import StructuredLLM
-from eda_platform.core.query import DuckDBQueryEngine, validate_select_statement
+from eda_platform.core.query import (
+    DuckDBQueryEngine,
+    sql_code_tokens,
+    validate_select_statement,
+)
 from eda_platform.core.tool_guard import (
     GuardViolation,
     JoinScope,
@@ -194,6 +198,33 @@ def guard_plan_references(plan: AnalysisPlan, catalog_columns: dict[str, set[str
         for column in plan.columns
         if not _column_is_known(column, available_columns, datasets, catalog_columns)
     ]
+    # Provider near-miss seen repeatedly in the live suite: `columns` lists
+    # SELECT output aliases even though the executable SQL correctly reads
+    # catalog columns. Repair only when every unknown declaration is an
+    # explicit `AS alias`; arbitrary unknown names still fail closed and the
+    # engine dry-run remains the authority over actual SQL references.
+    tokens = sql_code_tokens(plan.sql)
+    aliases = _projected_aliases(tokens)
+    if unknown_columns and all(column.casefold() in aliases for column in unknown_columns):
+        inferred = sorted(
+            column
+            for column in available_columns
+            if _sql_mentions_identifier(tokens, column)
+        )
+        if inferred:
+            plan.columns = sorted(
+                {
+                    *(
+                        column
+                        for column in plan.columns
+                        if _column_is_known(
+                            column, available_columns, datasets, catalog_columns
+                        )
+                    ),
+                    *inferred,
+                }
+            )
+            unknown_columns = []
     if unknown_columns:
         violations.append(
             GuardViolation(
@@ -205,3 +236,23 @@ def guard_plan_references(plan: AnalysisPlan, catalog_columns: dict[str, set[str
             )
         )
     raise_for_violations("m3_build_plan", violations)
+
+
+def _projected_aliases(tokens: tuple[tuple[str, str], ...]) -> set[str]:
+    return {
+        tokens[index + 1][1].casefold()
+        for index, (kind, value) in enumerate(tokens[:-1])
+        if kind == "word"
+        and value.casefold() == "as"
+        and tokens[index + 1][0] in {"word", "quoted_identifier"}
+    }
+
+
+def _sql_mentions_identifier(
+    tokens: tuple[tuple[str, str], ...], identifier: str
+) -> bool:
+    expected = identifier.casefold()
+    return any(
+        kind in {"word", "quoted_identifier"} and value.casefold() == expected
+        for kind, value in tokens
+    )

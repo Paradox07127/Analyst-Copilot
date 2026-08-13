@@ -11,7 +11,7 @@ from pydantic import (
     model_validator,
 )
 
-from eda_platform.schemas.artifacts import EvidenceRef
+from eda_platform.schemas.artifacts import ArtifactType, EvidenceRef
 
 QuestionOrigin = Literal["template", "llm"]
 QuestionStatus = Literal[
@@ -82,9 +82,14 @@ class QuestionScore(BaseModel):
 class QuestionAnswerContract(BaseModel):
     """Typed minimum output shape required to call a question answered."""
 
-    kind: Literal["metric", "threshold"]
+    schema_version: int = Field(default=2, ge=1)
+    kind: Literal["metric", "threshold", "method"]
     metric_id: str | None = None
     required_column_tokens: list[str] = Field(default_factory=list)
+    required_method_id: str | None = None
+    required_artifact_types: list[ArtifactType] = Field(default_factory=list)
+    required_tool_names: list[str] = Field(default_factory=list)
+    requires_complete_result: bool = False
     expected_units: dict[str, str] = Field(
         default_factory=dict,
         description="Case-sensitive output units required before metric publication",
@@ -97,7 +102,62 @@ class QuestionAnswerContract(BaseModel):
             raise ValueError("metric answer contracts require metric_id")
         if self.kind == "threshold" and not self.required_column_tokens:
             raise ValueError("threshold answer contracts require column tokens")
+        if self.kind == "method":
+            if not self.required_method_id:
+                raise ValueError("method answer contracts require required_method_id")
+            if not self.required_artifact_types or not self.required_tool_names:
+                raise ValueError(
+                    "method answer contracts require artifact types and tool names"
+                )
         return self
+
+
+_METHOD_ANSWER_REQUIREMENTS: dict[
+    AnalysisMode, tuple[str, ArtifactType, str]
+] = {
+    # Diagnostics establish trend/stationarity but do not produce a forecast.
+    # These stay closed until dedicated typed adapters are registered.
+    "forecast": ("forecast_model", ArtifactType.TABLE, "run_forecast"),
+    "prediction": ("ml_baseline", ArtifactType.MODEL_CARD, "run_baseline_model"),
+    "segmentation": (
+        "segmentation_model",
+        ArtifactType.CODE_EXECUTION_RESULT,
+        "run_segmentation",
+    ),
+    "anomaly": (
+        "anomaly_detection",
+        ArtifactType.ANOMALY_SCREEN_RESULT,
+        "screen_anomalies",
+    ),
+    # There is intentionally no generic SQL substitute for an experiment.
+    # Until a causal tool emits a typed result, this impossible requirement
+    # keeps an observational proxy from being published as a causal answer.
+    "causal_experiment": (
+        "causal_experiment",
+        ArtifactType.STAT_TEST_RESULT,
+        "run_causal_experiment",
+    ),
+}
+
+
+def method_answer_contract(
+    analysis_mode: AnalysisMode | None,
+) -> QuestionAnswerContract | None:
+    """Return the minimum durable method evidence for non-SQL analyses."""
+    if analysis_mode is None:
+        return None
+    requirement = _METHOD_ANSWER_REQUIREMENTS.get(analysis_mode)
+    if requirement is None:
+        return None
+    method_id, artifact_type, tool_name = requirement
+    return QuestionAnswerContract(
+        kind="method",
+        required_method_id=method_id,
+        required_artifact_types=[artifact_type],
+        required_tool_names=[tool_name],
+        requires_complete_result=True,
+        abstention_code="method_contract_failed",
+    )
 
 
 class QuestionCandidate(BaseModel):
@@ -245,6 +305,11 @@ class QuestionCandidateSet(BaseModel):
     # Meter template questions injected as a coverage backstop.
     template_backstop_used: int = 0
     template_backstop_categories: list[str] = Field(default_factory=list)
+    # A skipped LLM discovery route narrows the whole run to template
+    # questions; the report must disclose that, so the set carries it
+    # (2026-08-12: a halved run shipped as "validated" with no mention).
+    llm_route_skipped: bool = False
+    llm_route_error: str | None = None
 
 
 class FindingScore(BaseModel):
@@ -310,6 +375,10 @@ _ABSTENTION_REASONS: dict[str, str] = {
     "answer_schema_mismatch": (
         "The answer did not have the shape this question requires, so it could "
         "not be read as a result."
+    ),
+    "method_contract_failed": (
+        "The run did not produce the method-specific evidence this question "
+        "requires, so a proxy result was not published as an answer."
     ),
     "metric_contract_failed": (
         "The computed metric failed its sanity check, for example a share "
@@ -390,6 +459,8 @@ class QuestionExecutionResult(BaseModel):
     tool_names: list[str] = Field(default_factory=list)
     evidence_artifact_ids: list[str] = Field(default_factory=list)
     plan_summary: str = ""
+    answer_contract: QuestionAnswerContract | None = None
+    contract_status: Literal["passed", "failed", "not_required"] = "not_required"
     sql: str | None = None
     sql_result_artifact_id: str | None = None
     chart_artifact_id: str | None = None

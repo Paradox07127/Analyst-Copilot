@@ -12,7 +12,6 @@ from pydantic import BaseModel
 
 from eda_platform.core.dev_log import (
     LLM_DEBUG_FILENAME,
-    PREVIEW_CHARS,
     DevLogBuffer,
     InstrumentedLLMClient,
     format_event_line,
@@ -148,8 +147,9 @@ def test_instrumented_client_records_structured_call(tmp_path: Path) -> None:
     assert record["cached_tokens"] == 30
     assert record["cache_hit_rate"] == 0.3
     assert record["model"] == "deepseek-v4-flash"
-    assert "question" in record["payload_preview"]
-    assert "ok" in record["response_preview"]
+    assert '"question"' in record["payload_preview"]
+    assert '"redacted": true' in record["response_preview"]
+    assert "ok" not in record["response_preview"]
     # Persisted to llm_debug.jsonl (dir auto-created).
     on_disk = read_llm_debug(session_dir)
     assert len(on_disk) == 1
@@ -158,11 +158,12 @@ def test_instrumented_client_records_structured_call(tmp_path: Path) -> None:
 
 def test_instrumented_client_truncates_large_payload_previews(tmp_path: Path) -> None:
     client = InstrumentedLLMClient(_FakeLLM(), session_dir=None)
-    client.text(task="t", payload={"blob": "x" * (PREVIEW_CHARS * 2)})
+    client.text(task="t", payload={"blob": "x" * 4_000})
 
     preview = client.records[0]["payload_preview"]
-    assert len(preview) < PREVIEW_CHARS * 2
-    assert "truncated" in preview
+    assert len(preview) < 500
+    assert '"chars": 4012' in preview
+    assert "xxxx" not in preview
 
 
 def test_instrumented_client_records_errors_and_reraises() -> None:

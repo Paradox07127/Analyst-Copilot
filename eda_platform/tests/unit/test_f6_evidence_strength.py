@@ -370,6 +370,132 @@ def test_gate_denominator_excludes_legacy_qfocus_claims() -> None:
     assert claims[2].confidence_label == "exploratory"
 
 
+def test_gate_denominator_excludes_injected_profile_claims() -> None:
+    # 2026-08-12 deepseek run: 9 injected "table has N rows" claims (always
+    # strong) pushed a 5-question run to 'pass' while the business analysis
+    # got thinner. Structural injections are labeled but not scored.
+    claims = [
+        *[_claim(f"dataset_overview_ds_{i}", [_PROFILE_REF]) for i in range(9)],
+        _claim("qfind_q_1_0", [_PROFILE_REF]),
+        *[_claim(f"weak_{i}", [_GHOST_REF]) for i in range(4)],
+    ]
+    bundle, audit = _bundle_with_claims(claims)
+
+    outcome = apply_semantic_gate(
+        bundle, audit, evidence_pack=_pack(), sql_results=_sql_results()
+    )
+
+    # 1/5 strong among scored business claims -> degraded (was 10/14 'pass').
+    assert outcome.verdict == "degraded"
+    assert (
+        outcome.strong_claims,
+        outcome.indicative_claims,
+        outcome.exploratory_claims,
+    ) == (1, 0, 4)
+    # Injected claims keep their display label.
+    assert claims[0].confidence_label == "strong"
+
+
+def test_gate_denominator_excludes_fallback_inventory_claims() -> None:
+    # 2026-08-12 23:46 deepseek fallback run: the deterministic fallback emits
+    # its own structural id family (dataset_row_count*, dataset_column_count*,
+    # quality_issue_count*, analysis_table_available) that still voted after
+    # the dataset_overview_/exec_summary_ fix — same inflation, new ids.
+    claims = [
+        _claim("dataset_row_count", [_PROFILE_REF], text="sales.csv has 1470 rows."),
+        _claim("dataset_column_count_ds_2", [_PROFILE_REF]),
+        _claim(
+            "quality_issue_count",
+            [EvidenceRef(kind="artifact", artifact_id="quality_1", locator="")],
+        ),
+        _claim(
+            "analysis_table_available",
+            [EvidenceRef(kind="artifact", artifact_id="table_1", locator="")],
+        ),
+        _claim("qfind_q_1_0", [_PROFILE_REF]),
+        *[_claim(f"weak_{i}", [_GHOST_REF]) for i in range(3)],
+    ]
+    bundle, audit = _bundle_with_claims(claims)
+
+    outcome = apply_semantic_gate(
+        bundle, audit, evidence_pack=_pack(), sql_results=_sql_results()
+    )
+
+    # 1/4 strong among scored business claims -> degraded (was 5/8 'pass').
+    assert outcome.verdict == "degraded"
+    assert (
+        outcome.strong_claims,
+        outcome.indicative_claims,
+        outcome.exploratory_claims,
+    ) == (1, 0, 3)
+    # Fallback inventory claims keep their display labels.
+    assert claims[0].confidence_label == "strong"
+    assert claims[3].confidence_label == "strong"
+
+
+def test_pure_fallback_report_scores_zero_claims_and_stays_degraded() -> None:
+    # An all-fallback report excludes every claim from the vote; the
+    # empty-denominator rule must keep the verdict 'degraded', not let the
+    # report vacuously pass with nothing scored.
+    claims = [
+        _claim("dataset_row_count", [_PROFILE_REF], text="sales.csv has 1470 rows."),
+        _claim("dataset_column_count", [_PROFILE_REF]),
+        _claim(
+            "quality_issue_count",
+            [EvidenceRef(kind="artifact", artifact_id="quality_1", locator="")],
+        ),
+        _claim(
+            "analysis_table_available",
+            [EvidenceRef(kind="artifact", artifact_id="table_1", locator="")],
+        ),
+        _claim(
+            "stat_test_available",
+            [EvidenceRef(kind="stat", artifact_id="stat_1", locator="p_value")],
+        ),
+        _claim(
+            "model_card_available",
+            [EvidenceRef(kind="stat", artifact_id="model_1", locator="metrics.auc")],
+        ),
+        _claim(
+            "chart_available",
+            [EvidenceRef(kind="chart", artifact_id="chart_1", locator="chart")],
+        ),
+    ]
+    bundle, audit = _bundle_with_claims(claims)
+
+    outcome = apply_semantic_gate(
+        bundle, audit, evidence_pack=_pack(), sql_results=_sql_results()
+    )
+
+    assert outcome.verdict == "degraded"
+    assert audit.gate_verdict == "degraded"
+    assert (
+        outcome.strong_claims,
+        outcome.indicative_claims,
+        outcome.exploratory_claims,
+    ) == (0, 0, 0)
+
+
+def test_exec_summary_copies_of_a_claim_count_once() -> None:
+    # exec_summary_<id> is a mechanical copy of claim <id>; counting both let
+    # one finding vote twice for the ratio.
+    claims = [
+        _claim("exec_summary_qfind_q_1_0", [_PROFILE_REF]),
+        _claim("qfind_q_1_0", [_PROFILE_REF]),
+        _claim("weak_0", [_GHOST_REF]),
+    ]
+    bundle, audit = _bundle_with_claims(claims)
+
+    outcome = apply_semantic_gate(
+        bundle, audit, evidence_pack=_pack(), sql_results=_sql_results()
+    )
+
+    # 1/2, not 2/3: the copy is labeled but not double-counted.
+    assert (outcome.strong_claims, outcome.exploratory_claims) == (1, 1)
+    assert outcome.verdict == "degraded"
+    assert claims[0].confidence_label == "strong"
+
+
 def test_semantic_gate_replay_is_idempotent_and_clears_stale_state() -> None:
     # Cross-review fix 3: re-gating an already-gated bundle must reset the
     # gate's own claim state and audit products instead of contradicting or

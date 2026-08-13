@@ -1220,6 +1220,23 @@ _SEMANTIC_GATE_NOTE_PREFIXES = (
 # Legacy pre-F4 catalog claims (their synthetic evidence chain was deleted);
 # excluded from the strong-ratio denominator to match the scoreboard.
 _LEGACY_QFOCUS_PREFIX = "qfocus_"
+# Structural claim families the ratio must not score (reporting.py injects
+# them with these id prefixes).
+_INJECTED_OVERVIEW_PREFIX = "dataset_overview_"
+_EXEC_SUMMARY_COPY_PREFIX = "exec_summary_"
+# Deterministic fallback inventory (_deterministic_report_bundle in
+# reporting.py): platform restatements of what artifacts exist, so an
+# all-fallback report inflated the ratio the same way injected claims did
+# (2026-08-12 deepseek fallback run).
+_FALLBACK_INVENTORY_PREFIXES = (
+    "dataset_row_count",
+    "dataset_column_count",
+    "quality_issue_count",
+    "analysis_table_available",
+    "stat_test_available",
+    "model_card_available",
+    "chart_available",
+)
 
 # F6 evidence-strength tiers (claim-level confidence_label; the numeric
 # verification axis above is separate and keeps its own vocabulary).
@@ -1431,6 +1448,8 @@ def apply_semantic_gate(
 
     outcome = SemanticGateOutcome(verdict="pass")
     total_claims = 0
+    excluded_claims = 0
+    counted_ids: set[str] = set()
     for section in bundle.sections:
         for claim in section.claims:
             strength = evidence_strength_label(
@@ -1440,7 +1459,26 @@ def apply_semantic_gate(
                 platform_sql_ids=platform_sql_ids,
             )
             claim.confidence_label = strength
-            if not (claim.id or "").startswith(_LEGACY_QFOCUS_PREFIX):
+            claim_id = claim.id or ""
+            # Structural injections (always-strong row counts) and mechanical
+            # exec-summary copies are labeled for display but do not vote:
+            # counting them let a 5-question run outscore a 10-question one
+            # (2026-08-12 review).
+            canonical_id = claim_id.removeprefix(_EXEC_SUMMARY_COPY_PREFIX)
+            structural = canonical_id.startswith(
+                (
+                    _LEGACY_QFOCUS_PREFIX,
+                    _INJECTED_OVERVIEW_PREFIX,
+                    *_FALLBACK_INVENTORY_PREFIXES,
+                )
+            )
+            duplicate = bool(canonical_id) and canonical_id in counted_ids
+            if structural or duplicate:
+                if not claim_id.startswith(_LEGACY_QFOCUS_PREFIX):
+                    excluded_claims += 1
+            else:
+                if canonical_id:
+                    counted_ids.add(canonical_id)
                 total_claims += 1
                 if strength == "strong":
                     outcome.strong_claims += 1
@@ -1485,11 +1523,17 @@ def apply_semantic_gate(
     audit.time_boundary_truncations = outcome.time_boundary_truncations
     audit.findings.extend(outcome.findings)
     if total_claims:
+        excluded_note = (
+            f" {excluded_claims} injected/duplicate claim(s) labeled but not scored."
+            if excluded_claims
+            else ""
+        )
         audit.semantic_notes.append(
             f"Evidence strength: {outcome.strong_claims} strong / "
             f"{outcome.indicative_claims} indicative / "
             f"{outcome.exploratory_claims} exploratory claim(s); verdict "
             f"'{outcome.verdict}' at strong-ratio cut {strong_ratio_cut:.0%}."
+            + excluded_note
         )
     if outcome.degraded_claim_count:
         audit.semantic_notes.append(

@@ -33,6 +33,7 @@ from eda_platform.core.cancellation import (
 from eda_platform.core.config import require_absolute_workspace
 from eda_platform.core.env import (
     API_KEY_ENV_VARS,
+    llm_provider_explicitly_configured,
     load_llm_settings_from_env_file,
     load_report_llm_settings_from_env_file,
 )
@@ -40,6 +41,7 @@ from eda_platform.core.kernel import SessionCancelled
 from eda_platform.core.llm import (
     CancellableLLMClient,
     LLMClient,
+    LLMProvider,
     OfflineLLMClient,
     create_llm_client,
 )
@@ -1543,7 +1545,16 @@ def _build_llm(
     if params.get("llm") == "offline":
         client = OfflineLLMClient()
     else:
-        client = create_llm_client(load_llm_settings_from_env_file())
+        settings = load_llm_settings_from_env_file()
+        if settings.provider is LLMProvider.OFFLINE and not llm_provider_explicitly_configured():
+            # Recovered jobs lose their per-job env overlay; without this guard
+            # they would silently complete offline while looking successful.
+            raise RuntimeError(
+                "This job was queued for a live LLM but no provider configuration "
+                "reached the worker; refusing to run silently offline. Set "
+                "EDA_LLM_PROVIDER (or .env) or queue the job with llm='offline'."
+            )
+        client = create_llm_client(settings)
     return _with_cancellation(client, cancellation)
 
 

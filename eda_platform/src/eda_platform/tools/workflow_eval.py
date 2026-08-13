@@ -6,36 +6,46 @@ import math
 import re
 from collections import Counter
 from collections.abc import Iterable
+from copy import deepcopy
 from statistics import mean
 
 from eda_platform.core.ids import stable_hash
-from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile
+from eda_platform.core.llm_ledger import BUDGET_SETTLED_EVENT
+from eda_platform.core.session_metrics import spend_events
+from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile, EvidenceRef
 from eda_platform.schemas.questions import QuestionExecutionResult
-from eda_platform.schemas.reports import ReportBundle
+from eda_platform.schemas.reports import ReportAudit, ReportBundle, ReportStatus
 from eda_platform.schemas.session_metrics import SessionMetrics
+from eda_platform.schemas.sessions import TraceEvent
 from eda_platform.schemas.workflow_eval import (
+    CompiledWorkflowEvalCase,
+    EvalActionSpan,
+    EvalMilestone,
+    EvalMinefield,
     ExpectedAbstention,
     ExpectedAnswer,
     SemanticEscape,
     WorkflowEvalCase,
     WorkflowEvalComparison,
-    WorkflowEvalConversion,
     WorkflowEvalEnvironment,
     WorkflowEvalFailureNode,
+    WorkflowEvalGraderCertificate,
     WorkflowEvalHardGateResult,
-    WorkflowEvalResult,
+    WorkflowEvalMutationResult,
     WorkflowEvalScore,
     WorkflowEvalSpec,
     WorkflowEvalStep,
     WorkflowEvalStepDAG,
     WorkflowEvalSuiteResult,
+    WorkflowEvalTrial,
     WorkflowEvalTrialManifest,
     WorkflowEvalUsage,
     WorkflowEvalUsageTotals,
+    WorkflowQualityResult,
 )
 
 
-def convert_workflow_eval_spec(
+def compile_workflow_eval_case(
     spec: WorkflowEvalSpec,
     *,
     environment: WorkflowEvalEnvironment | None = None,
@@ -43,8 +53,8 @@ def convert_workflow_eval_spec(
     trial_id: str | None = None,
     repetition: int = 1,
     dataset_fingerprints: dict[str, str] | None = None,
-) -> WorkflowEvalConversion:
-    """Losslessly split a legacy spec into case, environment, and trial identity."""
+) -> CompiledWorkflowEvalCase:
+    """Compile a case, environment, dataset identity, and repetition."""
     resolved_case_id = case_id or stable_hash(
         {"name": spec.name, "case_version": spec.case_version}, length=24
     )
@@ -74,15 +84,18 @@ def convert_workflow_eval_spec(
         max_failures=spec.max_failures,
         max_tokens=spec.max_tokens,
         max_duration_seconds=spec.max_duration_seconds,
-        source_spec_schema_version=spec.schema_version,
+        required_milestones=spec.required_milestones,
+        minefields=spec.minefields,
     )
     resolved_environment = environment or WorkflowEvalEnvironment()
     case_fingerprint = stable_hash(case.model_dump(mode="json"), length=32)
     environment_fingerprint = stable_hash(resolved_environment.model_dump(mode="json"), length=32)
+    resolved_dataset_fingerprints = dataset_fingerprints or {}
     resolved_trial_id = trial_id or stable_hash(
         {
             "case_fingerprint": case_fingerprint,
             "environment_fingerprint": environment_fingerprint,
+            "dataset_fingerprints": resolved_dataset_fingerprints,
             "repetition": repetition,
         },
         length=32,
@@ -94,43 +107,785 @@ def convert_workflow_eval_spec(
         case_fingerprint=case_fingerprint,
         environment_fingerprint=environment_fingerprint,
         repetition=repetition,
-        dataset_fingerprints=dataset_fingerprints or {},
+        dataset_fingerprints=resolved_dataset_fingerprints,
     )
-    return WorkflowEvalConversion(
+    return CompiledWorkflowEvalCase(
         case=case,
         environment=resolved_environment,
         manifest=manifest,
     )
 
 
-def restore_workflow_eval_spec(case: WorkflowEvalCase) -> WorkflowEvalSpec:
-    """Restore the exact legacy spec represented by a converted case."""
-    return WorkflowEvalSpec(
-        schema_version=case.source_spec_schema_version,
-        case_version=case.case_version,
-        name=case.name,
-        description=case.description,
-        input_files=case.dataset_refs,
-        business_context=case.business_context,
-        probe_questions=case.probe_questions,
-        baseline_policy=case.baseline_policy,
-        expected_dataset_count=case.expected_dataset_count,
-        expected_answers=case.expected_answers,
-        expected_abstentions=case.expected_abstentions,
-        required_executive_summary_patterns=case.required_executive_summary_patterns,
-        forbidden_output_patterns=case.forbidden_output_patterns,
-        min_answer_precision=case.min_answer_precision,
-        min_answer_recall=case.min_answer_recall,
-        min_abstention_precision=case.min_abstention_precision,
-        min_abstention_recall=case.min_abstention_recall,
-        min_report_dataset_coverage=case.min_report_dataset_coverage,
-        min_quality_dataset_coverage=case.min_quality_dataset_coverage,
-        min_executive_summary_recall=case.min_executive_summary_recall,
-        min_stability_rate=case.min_stability_rate,
-        max_semantic_escape_rate=case.max_semantic_escape_rate,
-        max_failures=case.max_failures,
-        max_tokens=case.max_tokens,
-        max_duration_seconds=case.max_duration_seconds,
+def build_workflow_eval_trial(
+    spec: WorkflowEvalSpec,
+    artifacts: list[Artifact],
+    *,
+    events: Iterable[TraceEvent] = (),
+    environment: WorkflowEvalEnvironment | None = None,
+    repetition: int = 1,
+    trace_ref: str | None = None,
+) -> WorkflowEvalTrial:
+    """Project one real run into a reproducible, trajectory-graded eval trial."""
+    event_list = list(events)
+    metrics_artifact = _latest_artifact(artifacts, ArtifactType.SESSION_METRICS)
+    metrics = (
+        SessionMetrics.model_validate(metrics_artifact.payload)
+        if metrics_artifact is not None
+        else None
+    )
+    session_id = (
+        metrics.session_id
+        if metrics is not None
+        else artifacts[0].session_id
+        if artifacts
+        else "missing"
+    )
+    dataset_fingerprints = {
+        str(artifact.payload.get("name") or artifact.id): str(
+            artifact.payload.get("content_hash") or stable_hash(artifact.payload, length=32)
+        )
+        for artifact in artifacts
+        if artifact.type is ArtifactType.DATASET_PROFILE
+    }
+    compiled_case = compile_workflow_eval_case(
+        spec,
+        environment=environment,
+        repetition=repetition,
+        dataset_fingerprints=dataset_fingerprints,
+    )
+    dag, evidence_refs = _workflow_step_dag(artifacts)
+    action_spans = _action_spans(event_list)
+    usage = _workflow_usage(metrics, event_list)
+    hard_gates = grade_workflow_hard_gates(
+        step_dag=dag,
+        usage=usage,
+        available_artifact_refs={artifact.id for artifact in artifacts},
+        available_evidence_refs=evidence_refs,
+    )
+    quality = grade_workflow_quality(artifacts, spec)
+    quality_score = WorkflowEvalScore(
+        name="workflow_quality",
+        value=1.0 if quality.passed else 0.0,
+        passed=quality.passed,
+        failure_codes=list(quality.gate_failures),
+        details={
+            "answer_precision": quality.answer_precision,
+            "answer_recall": quality.answer_recall,
+            "abstention_precision": quality.abstention_precision,
+            "abstention_recall": quality.abstention_recall,
+            "semantic_escape_rate": quality.semantic_escape_rate,
+        },
+    )
+    quality_failures = [_eval_failure("__quality__", code, code) for code in quality.gate_failures]
+    release_score, release_failures = _grade_release_readiness(artifacts, metrics=metrics)
+    trajectory_score, trajectory_failures = _grade_action_trajectory(
+        action_spans,
+        milestones=spec.required_milestones,
+        minefields=spec.minefields,
+    )
+    failures = [
+        *hard_gates.failure_nodes,
+        *quality_failures,
+        *release_failures,
+        *trajectory_failures,
+    ]
+    scores = [*hard_gates.scores, quality_score, release_score, trajectory_score]
+    passed = not failures and all(score.passed for score in scores)
+    status = (
+        "passed"
+        if passed and not (metrics and metrics.degraded)
+        else "degraded"
+        if passed
+        else "failed"
+    )
+    return WorkflowEvalTrial(
+        manifest=compiled_case.manifest,
+        session_id=session_id,
+        status=status,
+        trace_ref=trace_ref,
+        artifact_refs=sorted(artifact.id for artifact in artifacts),
+        evidence_refs=sorted(evidence_refs),
+        artifact_digests={
+            artifact.id: _artifact_eval_digest(artifact)
+            for artifact in artifacts
+            if artifact.type is not ArtifactType.WORKFLOW_EVAL_TRIAL
+        },
+        action_spans=action_spans,
+        usage=usage,
+        scores=scores,
+        failure_nodes=failures,
+    )
+
+
+def verify_workflow_eval_trial_sources(
+    trial: WorkflowEvalTrial, artifacts: Iterable[Artifact]
+) -> list[WorkflowEvalFailureNode]:
+    """Detect source deletion or same-ID payload replacement after grading."""
+    current = {
+        artifact.id: _artifact_eval_digest(artifact)
+        for artifact in artifacts
+        if artifact.type is not ArtifactType.WORKFLOW_EVAL_TRIAL
+    }
+    failures: list[WorkflowEvalFailureNode] = []
+    for artifact_id, expected in trial.artifact_digests.items():
+        if artifact_id not in current:
+            failures.append(
+                _eval_failure(artifact_id, "trial_source_missing", "A graded source is missing.")
+            )
+        elif current[artifact_id] != expected:
+            failures.append(
+                _eval_failure(
+                    artifact_id,
+                    "trial_source_digest_mismatch",
+                    "A graded source changed while retaining its artifact ID.",
+                )
+            )
+    for artifact_id in sorted(set(current) - set(trial.artifact_digests)):
+        failures.append(
+            _eval_failure(
+                artifact_id,
+                "trial_source_ungraded",
+                "A source artifact was added after the trial was graded.",
+            )
+        )
+    return failures
+
+
+def certify_workflow_eval_grader(
+    spec: WorkflowEvalSpec,
+    clean_artifacts: list[Artifact],
+    *,
+    events: Iterable[TraceEvent] = (),
+) -> WorkflowEvalGraderCertificate:
+    """Run the grader against a clean oracle and fixed adversarial mutations."""
+    event_list = list(events)
+    clean_trial = build_workflow_eval_trial(spec, clean_artifacts, events=event_list)
+    results: list[WorkflowEvalMutationResult] = []
+
+    def record(mutation_id: str, trial: WorkflowEvalTrial) -> None:
+        codes = sorted({failure.code for failure in trial.failure_nodes})
+        results.append(
+            WorkflowEvalMutationResult(
+                mutation_id=mutation_id,
+                detected=trial.status != "passed" and bool(codes),
+                failure_codes=codes,
+            )
+        )
+
+    evidence_mutant = deepcopy(clean_artifacts)
+    for artifact in evidence_mutant:
+        if artifact.type is not ArtifactType.QUESTION_EXECUTION_RESULT:
+            continue
+        result = QuestionExecutionResult.model_validate(artifact.payload)
+        if result.findings and result.findings[0].evidence:
+            result.findings[0].evidence[0].locator = "meta_eval.missing_locator"
+            artifact.payload = result.model_dump(mode="json")
+            break
+    record(
+        "broken_evidence_locator",
+        build_workflow_eval_trial(spec, evidence_mutant, events=event_list),
+    )
+
+    approval_mutant = deepcopy(clean_artifacts)
+    for artifact in approval_mutant:
+        if artifact.type is ArtifactType.QUESTION_EXECUTION_RESULT:
+            result = QuestionExecutionResult.model_validate(artifact.payload)
+            result.outcome = "awaiting_approval"
+            result.status = "failed"
+            result.findings = []
+            artifact.payload = result.model_dump(mode="json")
+            break
+    record(
+        "unresolved_approval",
+        build_workflow_eval_trial(spec, approval_mutant, events=event_list),
+    )
+
+    usage_mutant = deepcopy(clean_artifacts)
+    for artifact in usage_mutant:
+        if artifact.type is ArtifactType.SESSION_METRICS:
+            artifact.payload["total_tokens"] = int(artifact.payload.get("total_tokens") or 0) + 1
+            break
+    record(
+        "usage_mismatch",
+        build_workflow_eval_trial(spec, usage_mutant, events=event_list),
+    )
+
+    replacement_mutant = deepcopy(clean_artifacts)
+    if replacement_mutant:
+        replacement_mutant[0].payload["__meta_eval_tamper__"] = True
+    replacement_failures = verify_workflow_eval_trial_sources(clean_trial, replacement_mutant)
+    results.append(
+        WorkflowEvalMutationResult(
+            mutation_id="same_id_payload_replacement",
+            detected=bool(replacement_failures),
+            failure_codes=sorted({failure.code for failure in replacement_failures}),
+        )
+    )
+
+    detected = sum(result.detected for result in results)
+    recall = detected / len(results) if results else 0.0
+    clean_passed = clean_trial.status == "passed"
+    return WorkflowEvalGraderCertificate(
+        protocol_digest=stable_hash(
+            {
+                "grader": "workflow-eval-hard-gates",
+                "mutations": [result.mutation_id for result in results],
+                "spec": clean_trial.manifest.case_fingerprint,
+            },
+            length=32,
+        ),
+        clean_oracle_passed=clean_passed,
+        mutation_recall=round(recall, 6),
+        release_eligible=clean_passed and recall == 1.0,
+        mutations=results,
+    )
+
+
+def _artifact_eval_digest(artifact: Artifact) -> str:
+    return stable_hash(
+        {
+            "type": artifact.type.value,
+            "session_id": artifact.session_id,
+            "parents": artifact.parents,
+            "evidence": [item.model_dump(mode="json") for item in artifact.evidence],
+            "payload": artifact.payload,
+        },
+        length=64,
+    )
+
+
+def _action_spans(events: list[TraceEvent]) -> list[EvalActionSpan]:
+    spans: list[EvalActionSpan] = []
+    for index, event in enumerate(events):
+        summary = event.summary
+        error_type = str(summary.get("error_type") or summary.get("error") or "") or None
+        raw_status = str(summary.get("status") or "").lower()
+        status = (
+            "failed"
+            if error_type or raw_status in {"failed", "error", "blocked", "rejected"}
+            else "succeeded"
+            if event.finished_at is not None or raw_status in {"success", "succeeded", "passed"}
+            else "pending"
+        )
+        arguments = summary.get("canonical_arguments", summary.get("arguments"))
+        result = summary.get("result", summary.get("output"))
+        artifact_refs_raw = summary.get("artifact_refs", summary.get("artifact_ids", []))
+        artifact_refs = (
+            [str(item) for item in artifact_refs_raw]
+            if isinstance(artifact_refs_raw, list | tuple)
+            else [str(artifact_refs_raw)]
+            if artifact_refs_raw
+            else []
+        )
+        spans.append(
+            EvalActionSpan(
+                span_id=event.span_id
+                or stable_hash(
+                    {
+                        "event_type": event.event_type,
+                        "name": event.name,
+                        "started_at": event.started_at.isoformat(),
+                        "index": index,
+                    },
+                    length=24,
+                ),
+                parent_span_id=event.parent_span_id,
+                operation=event.name,
+                event_type=event.event_type,
+                status=status,
+                tool_name=(str(summary.get("tool_name")) if summary.get("tool_name") else None),
+                canonical_arguments_digest=(
+                    stable_hash(arguments, length=32) if arguments is not None else None
+                ),
+                result_digest=stable_hash(result, length=32) if result is not None else None,
+                error_type=error_type,
+                approval_decision=(
+                    str(summary.get("approval_decision"))
+                    if summary.get("approval_decision") is not None
+                    else None
+                ),
+                retry_attempt=event.attempt_id,
+                handoff_target=(
+                    str(summary.get("handoff_target")) if summary.get("handoff_target") else None
+                ),
+                state_before_digest=(
+                    str(summary.get("state_before_digest"))
+                    if summary.get("state_before_digest")
+                    else None
+                ),
+                state_after_digest=(
+                    str(summary.get("state_after_digest"))
+                    if summary.get("state_after_digest")
+                    else None
+                ),
+                artifact_refs=artifact_refs,
+            )
+        )
+    return spans
+
+
+def _grade_action_trajectory(
+    spans: list[EvalActionSpan],
+    *,
+    milestones: list[EvalMilestone],
+    minefields: list[EvalMinefield],
+) -> tuple[WorkflowEvalScore, list[WorkflowEvalFailureNode]]:
+    failures: list[WorkflowEvalFailureNode] = []
+    for milestone in milestones:
+        if not any(_span_matches(span, milestone) for span in spans):
+            failures.append(
+                _eval_failure(
+                    milestone.milestone_id,
+                    "milestone_missing",
+                    "Required action milestone was not observed in the durable trace.",
+                )
+            )
+    for minefield in minefields:
+        if any(_span_matches(span, minefield) for span in spans):
+            failures.append(
+                _eval_failure(
+                    minefield.minefield_id,
+                    "minefield_triggered",
+                    "A forbidden action was observed in the durable trace.",
+                )
+            )
+    return (
+        WorkflowEvalScore(
+            name="action_trajectory",
+            value=0.0 if failures else 1.0,
+            passed=not failures,
+            failure_codes=sorted({failure.code for failure in failures}),
+            details={
+                "spans": len(spans),
+                "milestones": len(milestones),
+                "minefields": len(minefields),
+            },
+        ),
+        failures,
+    )
+
+
+def _span_matches(span: EvalActionSpan, rule: EvalMilestone | EvalMinefield) -> bool:
+    if rule.event_type is not None and span.event_type != rule.event_type:
+        return False
+    if rule.operation_pattern is not None:
+        try:
+            if re.search(rule.operation_pattern, span.operation, flags=re.IGNORECASE) is None:
+                return False
+        except re.error:
+            return False
+    return rule.event_type is not None or rule.operation_pattern is not None
+
+
+def _grade_release_readiness(
+    artifacts: list[Artifact], *, metrics: SessionMetrics | None
+) -> tuple[WorkflowEvalScore, list[WorkflowEvalFailureNode]]:
+    failures: list[WorkflowEvalFailureNode] = []
+    questions = [
+        QuestionExecutionResult.model_validate(artifact.payload)
+        for artifact in artifacts
+        if artifact.type is ArtifactType.QUESTION_EXECUTION_RESULT
+    ]
+    if any(question.outcome == "awaiting_approval" for question in questions):
+        failures.append(
+            _eval_failure(
+                "__release__",
+                "approval_unresolved",
+                "A release trial cannot contain unresolved approvals.",
+            )
+        )
+    if metrics is not None:
+        if metrics.degraded:
+            failures.append(
+                _eval_failure("__release__", "run_degraded", "The run is marked degraded.")
+            )
+        if metrics.trace_status != "verified":
+            failures.append(
+                _eval_failure(
+                    "__release__", "trace_unverified", "Trace accounting is unverifiable."
+                )
+            )
+        if metrics.publication_blocked:
+            failures.append(
+                _eval_failure("__release__", "publication_blocked", "Publication is blocked.")
+            )
+
+    report_artifact = _latest_artifact(artifacts, ArtifactType.REPORT_BUNDLE)
+    if report_artifact is not None:
+        report = ReportBundle.model_validate(report_artifact.payload)
+        if report.status is not ReportStatus.VALIDATED:
+            failures.append(
+                _eval_failure(
+                    report_artifact.id,
+                    "report_not_validated",
+                    f"Report status is {report.status.value}, not validated.",
+                )
+            )
+        audit = report.audit
+        audit_artifact = _latest_artifact(artifacts, ArtifactType.REPORT_AUDIT)
+        if audit_artifact is not None:
+            audit = ReportAudit.model_validate(audit_artifact.payload)
+            if report_artifact.id not in audit_artifact.parents:
+                # Recency pairing is not a binding: a stale passing audit must
+                # not clear a rewritten, never-audited report (H3).
+                failures.append(
+                    _eval_failure(
+                        audit_artifact.id,
+                        "report_audit_stale",
+                        "The latest report audit does not audit the latest "
+                        "report bundle.",
+                    )
+                )
+        if audit is None:
+            failures.append(
+                _eval_failure(
+                    report_artifact.id,
+                    "report_audit_missing",
+                    "A published report requires a typed audit.",
+                )
+            )
+        elif (
+            audit.status is not ReportStatus.VALIDATED
+            or audit.gate_verdict != "pass"
+            or audit.has_critical_findings
+        ):
+            failures.append(
+                _eval_failure(
+                    report_artifact.id,
+                    "report_audit_failed",
+                    "The latest report audit is not release-eligible.",
+                )
+            )
+    return (
+        WorkflowEvalScore(
+            name="release_readiness",
+            value=0.0 if failures else 1.0,
+            passed=not failures,
+            failure_codes=sorted({failure.code for failure in failures}),
+        ),
+        failures,
+    )
+
+
+def _latest_artifact(artifacts: list[Artifact], artifact_type: ArtifactType) -> Artifact | None:
+    candidates = [artifact for artifact in artifacts if artifact.type is artifact_type]
+    return max(candidates, key=lambda artifact: artifact.created_at) if candidates else None
+
+
+def _workflow_step_dag(
+    artifacts: list[Artifact],
+) -> tuple[WorkflowEvalStepDAG, set[str]]:
+    steps: list[WorkflowEvalStep] = []
+    evidence_refs: set[str] = set()
+    artifacts_by_id = {artifact.id: artifact for artifact in artifacts}
+    ancestor_ids = {
+        artifact.id: _artifact_ancestor_ids(artifact.id, artifacts_by_id) for artifact in artifacts
+    }
+    dataset_nodes: list[str] = []
+    dataset_node_by_artifact: dict[str, str] = {}
+    finding_nodes: list[str] = []
+    question_nodes: list[str] = []
+    question_node_by_artifact: dict[str, str] = {}
+    finding_nodes_by_question: dict[str, list[str]] = {}
+
+    for artifact in artifacts:
+        if artifact.type is not ArtifactType.DATASET_PROFILE:
+            continue
+        node_id = f"dataset:{artifact.id}"
+        dataset_nodes.append(node_id)
+        dataset_node_by_artifact[artifact.id] = node_id
+        steps.append(
+            WorkflowEvalStep(
+                node_id=node_id,
+                kind="dataset",
+                status="succeeded",
+                artifact_refs=[artifact.id],
+            )
+        )
+
+    for artifact in artifacts:
+        if artifact.type is not ArtifactType.QUESTION_EXECUTION_RESULT:
+            continue
+        result = QuestionExecutionResult.model_validate(artifact.payload)
+        question_node = f"question:{artifact.id}"
+        question_nodes.append(question_node)
+        question_node_by_artifact[artifact.id] = question_node
+        question_dataset_dependencies = sorted(
+            dataset_node_by_artifact[ancestor]
+            for ancestor in ancestor_ids[artifact.id]
+            if ancestor in dataset_node_by_artifact
+        )
+        question_status = (
+            "succeeded"
+            if result.outcome == "answered"
+            else "abstained"
+            if result.outcome == "abstained"
+            else "awaiting_approval"
+            if result.outcome == "awaiting_approval"
+            else "failed"
+        )
+        steps.append(
+            WorkflowEvalStep(
+                node_id=question_node,
+                kind="question",
+                status=question_status,
+                depends_on=question_dataset_dependencies,
+                artifact_refs=[artifact.id],
+                failure_reason=result.failure_reason or result.error,
+            )
+        )
+        for index, finding in enumerate(result.findings):
+            refs = _evidence_keys(finding.evidence)
+            evidence_refs.update(_resolvable_evidence_keys(finding.evidence, artifacts_by_id))
+            node_id = f"finding:{artifact.id}:{index}"
+            finding_nodes.append(node_id)
+            finding_nodes_by_question.setdefault(artifact.id, []).append(node_id)
+            steps.append(
+                WorkflowEvalStep(
+                    node_id=node_id,
+                    kind="finding",
+                    status="succeeded",
+                    depends_on=[question_node],
+                    artifact_refs=[artifact.id],
+                    evidence_refs=refs,
+                )
+            )
+
+    report_nodes: list[str] = []
+    report_nodes_by_artifact: dict[str, list[str]] = {}
+    for artifact in artifacts:
+        if artifact.type is not ArtifactType.REPORT_BUNDLE:
+            continue
+        bundle = ReportBundle.model_validate(artifact.payload)
+        report_question_ids = sorted(
+            ancestor
+            for ancestor in ancestor_ids[artifact.id]
+            if ancestor in question_node_by_artifact
+        )
+        report_dependencies = [
+            node
+            for question_id in report_question_ids
+            for node in (
+                finding_nodes_by_question.get(question_id)
+                or [question_node_by_artifact[question_id]]
+            )
+        ]
+        if not report_dependencies:
+            report_dependencies = sorted(
+                dataset_node_by_artifact[ancestor]
+                for ancestor in ancestor_ids[artifact.id]
+                if ancestor in dataset_node_by_artifact
+            )
+        for section_index, section in enumerate(bundle.sections):
+            for claim_index, claim in enumerate(section.claims):
+                refs = _evidence_keys(claim.evidence)
+                evidence_refs.update(_resolvable_evidence_keys(claim.evidence, artifacts_by_id))
+                node_id = f"report:{artifact.id}:{section_index}:{claim_index}"
+                report_nodes.append(node_id)
+                report_nodes_by_artifact.setdefault(artifact.id, []).append(node_id)
+                steps.append(
+                    WorkflowEvalStep(
+                        node_id=node_id,
+                        kind="report_claim",
+                        status="succeeded",
+                        depends_on=list(report_dependencies),
+                        artifact_refs=[artifact.id],
+                        evidence_refs=refs,
+                    )
+                )
+
+    for artifact in artifacts:
+        if artifact.type is ArtifactType.REPORT_AUDIT:
+            validation_dependencies = [
+                node
+                for ancestor in ancestor_ids[artifact.id]
+                for node in report_nodes_by_artifact.get(ancestor, [])
+            ]
+            steps.append(
+                WorkflowEvalStep(
+                    node_id=f"validation:{artifact.id}",
+                    kind="validation",
+                    status="succeeded",
+                    depends_on=validation_dependencies,
+                    artifact_refs=[artifact.id],
+                )
+            )
+    for artifact in artifacts:
+        evidence_refs.update(_resolvable_evidence_keys(artifact.evidence, artifacts_by_id))
+    return WorkflowEvalStepDAG(steps=steps), evidence_refs
+
+
+def _artifact_ancestor_ids(artifact_id: str, artifacts_by_id: dict[str, Artifact]) -> set[str]:
+    """Return only ancestors proven through persisted ``parents`` edges."""
+    ancestors: set[str] = set()
+    pending = list(artifacts_by_id[artifact_id].parents) if artifact_id in artifacts_by_id else []
+    while pending:
+        parent_id = pending.pop()
+        if parent_id in ancestors:
+            continue
+        ancestors.add(parent_id)
+        parent = artifacts_by_id.get(parent_id)
+        if parent is not None:
+            pending.extend(parent.parents)
+    return ancestors
+
+
+def _evidence_keys(values: Iterable[object]) -> list[str]:
+    keys: list[str] = []
+    for value in values:
+        artifact_id = getattr(value, "artifact_id", None)
+        locator = getattr(value, "locator", "")
+        if artifact_id:
+            keys.append(f"{artifact_id}:{locator}")
+    return keys
+
+
+def _resolvable_evidence_keys(
+    values: Iterable[EvidenceRef], artifacts_by_id: dict[str, Artifact]
+) -> list[str]:
+    """Admit only refs whose artifact and locator resolve to persisted content."""
+    keys: list[str] = []
+    for value in values:
+        if value.artifact_id is None:
+            continue
+        artifact = artifacts_by_id.get(value.artifact_id)
+        if artifact is not None and _evidence_ref_resolves(artifact, value):
+            keys.append(f"{value.artifact_id}:{value.locator}")
+    return keys
+
+
+def _evidence_ref_resolves(artifact: Artifact, evidence: EvidenceRef) -> bool:
+    locator = evidence.locator.strip()
+    if not locator:
+        return bool(artifact.payload)
+
+    payload: object = artifact.payload
+    # Report evidence uses ``rows`` as the stable public locator for SQL while
+    # SqlResult persists the bounded materialization under ``rows_preview``.
+    if artifact.type is ArtifactType.SQL_RESULT:
+        rows = artifact.payload.get("rows_preview")
+        if locator == "rows":
+            return isinstance(rows, list) and bool(rows)
+        if isinstance(rows, list) and locator in artifact.payload.get("columns", []):
+            return any(isinstance(row, dict) and locator in row for row in rows)
+        if locator.startswith("rows["):
+            payload = {"rows": rows}
+        if locator in {"derived: row_count", "derived: len(rows_preview)"}:
+            expected = (
+                artifact.payload.get("row_count")
+                if locator == "derived: row_count"
+                else len(rows)
+                if isinstance(rows, list)
+                else None
+            )
+            return expected is not None and evidence.value == expected
+    # ``summary`` is a documented aggregate locator synthesized from the
+    # typed DatasetProfile rather than a literal payload field.
+    if artifact.type is ArtifactType.DATASET_PROFILE:
+        if locator == "summary":
+            return all(key in artifact.payload for key in ("rows", "columns"))
+        if locator == "dataset.row_count":
+            return evidence.value == artifact.payload.get("rows")
+    if artifact.type is ArtifactType.CHART_SPEC and locator == "chart":
+        return "title" in artifact.payload and "encoding" in artifact.payload
+    if artifact.type is ArtifactType.TABLE and locator in {"table", "rows"}:
+        return isinstance(artifact.payload.get("rows"), list)
+    if artifact.type is ArtifactType.QUALITY_ISSUE_SET:
+        issues = artifact.payload.get("issues")
+        if locator == "issues":
+            return isinstance(issues, list)
+        if locator.startswith("quality_issue:") and isinstance(issues, list):
+            code, separator, column = locator.removeprefix("quality_issue:").partition(":")
+            return bool(separator) and any(
+                isinstance(issue, dict)
+                and issue.get("code") == code
+                and (issue.get("column") or "") == column
+                for issue in issues
+            )
+
+    parts = _locator_parts(locator)
+    if not parts:
+        return False
+    return _locator_value_resolves(payload, parts)
+
+
+_LOCATOR_PART = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+|\*)\])?$")
+
+
+def _locator_parts(locator: str) -> list[tuple[str, int | None, bool]]:
+    parts: list[tuple[str, int | None, bool]] = []
+    for raw in locator.split("."):
+        match = _LOCATOR_PART.fullmatch(raw)
+        if match is None:
+            return []
+        token = match.group(2)
+        parts.append(
+            (
+                match.group(1),
+                int(token) if token is not None and token != "*" else None,
+                token == "*",
+            )
+        )
+    return parts
+
+
+def _locator_value_resolves(current: object, parts: list[tuple[str, int | None, bool]]) -> bool:
+    if not parts:
+        return current is not None and current not in ("", [], {})
+    name, index, wildcard = parts[0]
+    if not isinstance(current, dict) or name not in current:
+        return False
+    selected = current[name]
+    if wildcard:
+        values = (
+            list(selected.values())
+            if isinstance(selected, dict)
+            else selected
+            if isinstance(selected, list)
+            else []
+        )
+        return any(_locator_value_resolves(value, parts[1:]) for value in values)
+    if index is not None:
+        if not isinstance(selected, list) or not 0 <= index < len(selected):
+            return False
+        selected = selected[index]
+    return _locator_value_resolves(selected, parts[1:])
+
+
+def _workflow_usage(metrics: SessionMetrics | None, events: list[TraceEvent]) -> WorkflowEvalUsage:
+    billed = spend_events(events)
+    settled = [event for event in events if event.event_type == BUDGET_SETTLED_EVENT]
+
+    def totals(source: list[TraceEvent]) -> WorkflowEvalUsageTotals:
+        costs = [
+            float(event.summary["estimated_cost_usd"])
+            for event in source
+            if event.summary.get("estimated_cost_usd") is not None
+        ]
+        return WorkflowEvalUsageTotals(
+            llm_calls=len(source),
+            total_tokens=sum(int(event.summary.get("total_tokens") or 0) for event in source),
+            estimated_cost_usd=round(sum(costs), 9) if costs else None,
+        )
+
+    metrics_totals = (
+        WorkflowEvalUsageTotals(
+            llm_calls=metrics.llm_calls,
+            total_tokens=metrics.total_tokens,
+            estimated_cost_usd=metrics.est_cost_usd,
+        )
+        if metrics is not None
+        else None
+    )
+    return WorkflowEvalUsage(
+        ledger=totals(billed),
+        budget=totals(settled),
+        metrics=metrics_totals,
+        budget_reserved_calls=metrics.budget_reserved_calls if metrics else None,
+        budget_settled_calls=metrics.budget_settled_calls if metrics else None,
+        budget_rejected_calls=metrics.budget_rejected_calls if metrics else None,
+        budget_uncertain_calls=metrics.budget_uncertain_calls if metrics else None,
+        budget_reconciliation=metrics.budget_reconciliation if metrics else None,
     )
 
 
@@ -167,6 +922,7 @@ def grade_workflow_step_dag(
     evidence_refs = set(available_evidence_refs)
     nodes_by_id = {step.node_id: step for step in step_dag.steps}
     failures: list[WorkflowEvalFailureNode] = []
+    has_dataset_root = any(step.kind == "dataset" for step in step_dag.steps)
 
     if not step_dag.steps:
         failures.append(
@@ -196,6 +952,19 @@ def grade_workflow_step_dag(
                     "missing_step_artifact",
                     "A succeeded workflow step must reference its output artifact.",
                     depends_on=step.depends_on,
+                )
+            )
+        if (
+            has_dataset_root
+            and step.kind in {"question", "report_claim", "validation"}
+            and step.status in {"succeeded", "abstained"}
+            and not step.depends_on
+        ):
+            failures.append(
+                _eval_failure(
+                    step.node_id,
+                    "missing_lineage_dependency",
+                    "Observed output has no persisted lineage path to its upstream step.",
                 )
             )
         if (
@@ -249,6 +1018,15 @@ def grade_workflow_step_dag(
                     step.node_id,
                     "step_failed",
                     step.failure_reason or "Step failed without a typed reason.",
+                    depends_on=step.depends_on,
+                )
+            )
+        if step.status == "awaiting_approval":
+            failures.append(
+                _eval_failure(
+                    step.node_id,
+                    "approval_unresolved",
+                    "A release trial cannot finish with unresolved approval.",
                     depends_on=step.depends_on,
                 )
             )
@@ -440,11 +1218,11 @@ def reconcile_workflow_usage(
     return score, failures
 
 
-def evaluate_workflow_run(
+def grade_workflow_quality(
     artifacts: Iterable[Artifact],
     spec: WorkflowEvalSpec,
-) -> WorkflowEvalResult:
-    """Evaluate one persisted run against a deterministic case specification."""
+) -> WorkflowQualityResult:
+    """Grade final-output quality as one component of a canonical trial."""
     artifact_list = list(artifacts)
     profiles = [
         DatasetProfile.model_validate(artifact.payload)
@@ -623,7 +1401,7 @@ def evaluate_workflow_run(
             f"duration_seconds={metrics.duration_seconds:.4f} max={spec.max_duration_seconds:.4f}"
         )
 
-    return WorkflowEvalResult(
+    return WorkflowQualityResult(
         case_name=spec.name,
         spec_digest=stable_hash(spec.model_dump(mode="json"), length=32),
         session_id=metrics.session_id or session_id,
@@ -653,11 +1431,11 @@ def evaluate_workflow_run(
     )
 
 
-def aggregate_workflow_evaluations(
+def _aggregate_quality_results(
     spec: WorkflowEvalSpec,
-    results: Iterable[WorkflowEvalResult],
+    results: Iterable[WorkflowQualityResult],
 ) -> WorkflowEvalSuiteResult:
-    """Aggregate repeated runs and enforce deterministic stability."""
+    """Aggregate component scores; caller must still apply canonical trial gates."""
     runs = list(results)
     if not runs:
         raise ValueError("At least one workflow evaluation result is required.")
@@ -693,12 +1471,70 @@ def aggregate_workflow_evaluations(
         spec_digest=expected_digest,
         passed=not gate_failures,
         gate_failures=gate_failures,
-        runs=runs,
+        quality_results=runs,
         stability_rate=round(stability_rate, 6),
         duration_mean_seconds=round(mean(durations), 6),
         duration_p95_seconds=round(durations[p95_index], 6),
         tokens_mean=round(mean(tokens), 6),
         tokens_max=max(tokens),
+    )
+
+
+def aggregate_workflow_eval_trials(
+    spec: WorkflowEvalSpec,
+    *,
+    results: Iterable[WorkflowQualityResult],
+    trials: Iterable[WorkflowEvalTrial],
+) -> WorkflowEvalSuiteResult:
+    """Canonical suite rollup: component quality may not override hard gates."""
+    result_list = list(results)
+    trial_list = list(trials)
+    suite = _aggregate_quality_results(spec, result_list)
+    failures = list(suite.gate_failures)
+    if len(trial_list) != len(result_list):
+        failures.append(f"trial_count={len(trial_list)} expected={len(result_list)}")
+    seen_trials: set[str] = set()
+    environment_fingerprints: set[str] = set()
+    dataset_identities: set[str] = set()
+    # Trials must belong to THIS case: without the fingerprint check, passing
+    # trials from a simpler case could carry the target case's quality results
+    # through the hard gates (H2, 2026-08-12 review).
+    expected_case_fingerprint = compile_workflow_eval_case(spec).manifest.case_fingerprint
+    for index, trial in enumerate(trial_list, start=1):
+        if trial.status != "passed":
+            failures.append(f"trial[{index}] status={trial.status}")
+        if trial.failure_nodes or any(not score.passed for score in trial.scores):
+            failures.append(f"trial[{index}] hard_gate_failed")
+        if trial.manifest.trial_id in seen_trials:
+            failures.append(f"trial[{index}] duplicate_trial_id")
+        if trial.manifest.case_fingerprint != expected_case_fingerprint:
+            failures.append(f"trial[{index}] case_fingerprint_mismatch")
+        seen_trials.add(trial.manifest.trial_id)
+        environment_fingerprints.add(trial.manifest.environment_fingerprint)
+        dataset_identities.add(
+            stable_hash(trial.manifest.dataset_fingerprints, length=32)
+        )
+    if len(environment_fingerprints) > 1:
+        failures.append("trial_environment_mismatch")
+    if len(dataset_identities) > 1:
+        # Dataset fingerprints were previously identity bookkeeping only (H1).
+        failures.append("trial_dataset_mismatch")
+    protocol_digest = stable_hash(
+        {
+            "schema": 3,
+            "case": suite.spec_digest,
+            "environment": sorted(environment_fingerprints),
+            "datasets": sorted(dataset_identities),
+        },
+        length=32,
+    )
+    return suite.model_copy(
+        update={
+            "passed": not failures,
+            "gate_failures": failures,
+            "trials": trial_list,
+            "protocol_digest": protocol_digest,
+        }
     )
 
 
@@ -717,6 +1553,13 @@ def compare_workflow_evaluations(
         failures.append("current spec_digest does not match the current case spec")
     if baseline.case_name != spec.name or current.case_name != spec.name:
         failures.append("case_name mismatch between spec, baseline, and current suite")
+    if baseline.protocol_digest != current.protocol_digest:
+        # Covers dataset identity: a baseline produced on one dataset (or with
+        # no recorded dataset identity at all) cannot certify another (H1).
+        failures.append(
+            "protocol_digest mismatch: baseline and current differ in "
+            "case/environment/dataset identity; regenerate the baseline"
+        )
     if not current.passed:
         failures.append("current suite does not pass its absolute gates")
 
@@ -978,15 +1821,21 @@ def _append_floor_failure(failures: list[str], name: str, actual: float, minimum
 
 def _suite_quality_metrics(suite: WorkflowEvalSuiteResult) -> dict[str, float]:
     return {
-        "answer_precision": min(run.answer_precision for run in suite.runs),
-        "answer_recall": min(run.answer_recall for run in suite.runs),
-        "abstention_precision": min(run.abstention_precision for run in suite.runs),
-        "abstention_recall": min(run.abstention_recall for run in suite.runs),
-        "report_dataset_coverage": min(run.report_dataset_coverage for run in suite.runs),
-        "quality_dataset_coverage": min(run.quality_dataset_coverage for run in suite.runs),
-        "executive_summary_recall": min(run.executive_summary_recall for run in suite.runs),
-        "semantic_escape_rate": max(run.semantic_escape_rate for run in suite.runs),
-        "failures_count": float(max(run.failures_count for run in suite.runs)),
+        "answer_precision": min(run.answer_precision for run in suite.quality_results),
+        "answer_recall": min(run.answer_recall for run in suite.quality_results),
+        "abstention_precision": min(run.abstention_precision for run in suite.quality_results),
+        "abstention_recall": min(run.abstention_recall for run in suite.quality_results),
+        "report_dataset_coverage": min(
+            run.report_dataset_coverage for run in suite.quality_results
+        ),
+        "quality_dataset_coverage": min(
+            run.quality_dataset_coverage for run in suite.quality_results
+        ),
+        "executive_summary_recall": min(
+            run.executive_summary_recall for run in suite.quality_results
+        ),
+        "semantic_escape_rate": max(run.semantic_escape_rate for run in suite.quality_results),
+        "failures_count": float(max(run.failures_count for run in suite.quality_results)),
     }
 
 

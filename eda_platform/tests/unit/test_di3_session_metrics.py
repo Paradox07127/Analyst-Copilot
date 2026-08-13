@@ -87,7 +87,7 @@ def test_summarize_run_aggregates_llm_tool_tokens_and_steps(tmp_path: Path) -> N
 
     metrics = summarize_session(store, _PROJECT, _RUN)
 
-    assert metrics.schema_version == 6
+    assert metrics.schema_version == 7
     assert metrics.session_id == _RUN
     assert metrics.cost_estimate_status in {
         "complete_estimate",
@@ -279,6 +279,66 @@ def test_summarize_run_rolls_up_question_outcomes_and_contract_codes(
     assert metrics.coverage_limited is True
 
 
+def test_question_artifacts_reconcile_failures_and_untraced_sql_calls(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.save_artifact(
+        _artifact(
+            "qexec_sql",
+            ArtifactType.QUESTION_EXECUTION_RESULT,
+            {
+                "status": "succeeded",
+                "outcome": "answered",
+                "execution_mode": "pipeline",
+                "sql_result_artifact_id": "sql_1",
+                "findings": [{"text": "answer"}],
+            },
+        )
+    )
+    store.save_artifact(
+        _artifact(
+            "qexec_failed",
+            ArtifactType.QUESTION_EXECUTION_RESULT,
+            {"status": "failed", "outcome": "failed", "findings": []},
+        )
+    )
+
+    metrics = summarize_session(store, _PROJECT, _RUN)
+
+    assert metrics.trace_tool_calls == 0
+    assert metrics.artifact_tool_calls == 1
+    assert metrics.tool_calls == 1
+    assert metrics.trace_failures_count == 0
+    assert metrics.question_failures_count == 1
+    assert metrics.failures_count == 1
+
+
+def test_untraced_pipeline_sql_is_added_to_other_trace_tool_calls(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.append_trace(_PROJECT, _event("tool_completed", "screen_anomalies"))
+    store.append_trace(_PROJECT, _event("code_agent_attempt", "custom_analysis"))
+    store.save_artifact(
+        _artifact(
+            "qexec_sql",
+            ArtifactType.QUESTION_EXECUTION_RESULT,
+            {
+                "status": "succeeded",
+                "outcome": "answered",
+                "execution_mode": "pipeline",
+                "sql_result_artifact_id": "sql_1",
+                "findings": [{"text": "answer"}],
+            },
+        )
+    )
+
+    metrics = summarize_session(store, _PROJECT, _RUN)
+
+    assert metrics.trace_tool_calls == 2
+    assert metrics.artifact_tool_calls == 1
+    assert metrics.tool_calls == 3
+
+
 def test_safe_abstention_limits_coverage_without_marking_execution_degraded(
     tmp_path: Path,
 ) -> None:
@@ -424,7 +484,7 @@ def test_persist_run_metrics_saves_run_metrics_artifact(tmp_path: Path) -> None:
     artifact = store.get_artifact(artifact_id)
     assert artifact.type is ArtifactType.SESSION_METRICS
     payload = SessionMetrics.model_validate(artifact.payload)
-    assert payload.schema_version == 6
+    assert payload.schema_version == 7
     assert payload.session_id == _RUN
     assert payload.llm_calls == 1
     assert payload.total_tokens == 7

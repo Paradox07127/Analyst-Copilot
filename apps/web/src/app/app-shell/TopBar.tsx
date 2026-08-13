@@ -77,6 +77,7 @@ function jobPhaseLabel(
 ): string {
   const name = jobKindLabel(kind);
   if (degraded) return `${name} · degraded`;
+  if (phase === "limited") return `${name} · resource limited`;
   if (phase === "completed") return `${name} · complete`;
   if (phase === "failed" || phase === "cancelled") return `${name} · stopped`;
   if (phase === "queued" || phase === "connecting") return `${name} · queued`;
@@ -85,6 +86,7 @@ function jobPhaseLabel(
 
 function jobStatusLabel(phase: JobPhase, degraded: boolean): string {
   if (degraded) return "Degraded";
+  if (phase === "limited") return "Resource limited";
   if (phase === "completed") return "Completed";
   if (phase === "failed") return "Failed";
   if (phase === "cancelled") return "Stopped";
@@ -101,10 +103,14 @@ function readableEvent(type: string | undefined): string {
 function detailFromSummary(snapshot: JobActivitySnapshot | undefined): string | null {
   const event = [...(snapshot?.state.events ?? [])]
     .reverse()
-    .find((candidate) => candidate.type === "budget_degraded") ??
-    snapshot?.state.events.at(-1);
+    .find((candidate) =>
+      candidate.type === "budget_degraded" ||
+      ["message", "reason", "detail", "error", "error_message"].some(
+        (key) => typeof candidate.summary[key] === "string",
+      ),
+    );
   if (!event) return null;
-  for (const key of ["message", "reason", "detail", "error"]) {
+  for (const key of ["message", "reason", "detail", "error", "error_message"]) {
     const value = event.summary[key];
     if (typeof value === "string" && value.trim()) return value;
   }
@@ -194,7 +200,7 @@ function TopBarJobProgress({
   const states: PhaseState[] =
     kind === "auto_eda"
       ? phases.map((phase) => phase.state)
-      : phase === "completed" || phase === "failed" || phase === "cancelled"
+      : phase === "completed" || phase === "limited" || phase === "failed" || phase === "cancelled"
         ? Array.from({ length: 3 }, () =>
             phase === "completed" ? "done" : "failed",
           )
@@ -214,7 +220,9 @@ function TopBarJobProgress({
     ? "bg-status-warn"
     : phase === "completed"
       ? "bg-status-ok"
-      : phase === "failed" || phase === "cancelled"
+      : phase === "limited"
+        ? "bg-status-warn"
+        : phase === "failed" || phase === "cancelled"
         ? "bg-status-critical"
         : phase === "running"
           ? "animate-breathe bg-status-warn"
@@ -254,7 +262,9 @@ function TopBarJobProgress({
               ? "bg-status-warn/15 text-status-warn"
               : phase === "completed"
                 ? "bg-status-ok/15 text-status-ok"
-                : phase === "failed" || phase === "cancelled"
+                : phase === "limited"
+                  ? "bg-status-warn/15 text-status-warn"
+                  : phase === "failed" || phase === "cancelled"
                   ? "bg-status-critical/15 text-status-critical"
                   : "bg-surface text-status-neutral"
           }`}>

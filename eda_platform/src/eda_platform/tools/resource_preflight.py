@@ -145,10 +145,16 @@ def estimate_working_set_bytes(
     policy: EdaResourcePolicy,
     precleaning_enabled: bool = False,
 ) -> int:
-    """Conservative retained-frame plus concurrent-temporary working-set estimate."""
+    """Estimate the peak of the sequential per-table lifecycle.
+
+    Auto-EDA retains artifacts and lightweight source handles, not every parsed
+    frame.  The retained term is therefore the largest table active in a
+    lifecycle slot, while the active multiplier covers that table's profiling,
+    charting and statistical temporaries.
+    """
     frames = [item.best_frame_deep_bytes for item in estimates]
     retained_multiplier = 2 if precleaning_enabled else 1
-    retained = sum(frames) * retained_multiplier
+    retained = max(frames, default=0) * retained_multiplier
     active = sum(sorted(frames, reverse=True)[: max(0, active_workers)])
     return ceil(
         max(0, baseline_peak_rss_bytes)
@@ -171,14 +177,11 @@ def decide_resource_preflight(
     effective_policy = policy or EdaResourcePolicy()
     datasets = list(estimates)
     dataset_count = len(datasets)
-    candidate_workers = min(
-        requested_dataset_workers,
-        effective_policy.max_dataset_workers,
-        dataset_count,
-    )
+    # The memory-optimized driver intentionally owns one full table at a time.
+    candidate_workers = min(1, requested_dataset_workers, dataset_count)
     worker_reason: str | None = None
     if candidate_workers < requested_dataset_workers and dataset_count > 0:
-        worker_reason = "dataset_or_policy_worker_cap"
+        worker_reason = "streaming_dataset_lifecycle"
 
     estimated_working_set = estimate_working_set_bytes(
         datasets,
@@ -228,7 +231,7 @@ def decide_resource_preflight(
         reasons.append(worker_reason)
     return EdaResourcePreflight(
         status=status,
-        compute_mode="exact_in_memory" if status == "accepted" else "metadata_only",
+        compute_mode="streaming_exact" if status == "accepted" else "metadata_only",
         reason_codes=reasons,
         requested_dataset_workers=requested_dataset_workers,
         effective_dataset_workers=candidate_workers,

@@ -26,6 +26,7 @@ from eda_platform.schemas.questions import (
     QuestionCandidate,
     QuestionCandidateSet,
     QuestionScore,
+    method_answer_contract,
 )
 from eda_platform.schemas.relations import (
     RelationshipCandidate,
@@ -330,6 +331,14 @@ def rank_and_deduplicate_questions(
 
 
 def _ensure_answer_contract(candidate: QuestionCandidate) -> QuestionCandidate:
+    # Method capability is a system-owned publication policy.  A persisted or
+    # model-supplied metric/shape contract must never weaken it for prediction,
+    # anomaly, forecast, segmentation, or causal questions.
+    method_contract = method_answer_contract(candidate.analysis_mode)
+    if method_contract is not None:
+        if candidate.answer_contract == method_contract:
+            return candidate
+        return candidate.model_copy(update={"answer_contract": method_contract})
     if candidate.answer_contract is not None:
         return candidate
     if candidate.metric_id:
@@ -492,6 +501,22 @@ def select_auto_execution_set(
             continue
         take(candidate)
         exploratory_taken += 1
+    # A skipped LLM route leaves the exploratory pool empty; the leftover
+    # budget then goes to resolved deterministic candidates instead of idling
+    # (2026-08-12 deepseek run executed 5 of 10 slots while GMV/AOV templates
+    # sat unselected). Family dedup still holds for the template leftovers.
+    for candidate in domain_metrics:
+        if analysis_count() >= max_total:
+            break
+        take(candidate)
+    for candidate in template_pool:
+        if analysis_count() >= max_total:
+            break
+        family = candidate.template_id or candidate.origin
+        if family in used_templates or candidate.question_id in selected_ids:
+            continue
+        take(candidate)
+        used_templates.add(family)
     analysis = [c for c in selected if c.question_id not in background_ids][:max_total]
     kept = {c.question_id for c in analysis} | background_ids
     return [c for c in selected if c.question_id in kept]
@@ -537,10 +562,7 @@ def _exploratory_rank_key(candidate: QuestionCandidate) -> tuple[float, str]:
 
 
 def _feasibility_allows_execution(candidate: QuestionCandidate) -> bool:
-    return candidate.feasibility is None or candidate.feasibility.status not in {
-        "needs_data",
-        "unsuitable",
-    }
+    return candidate.feasibility is None or candidate.feasibility.status == "ready"
 
 
 def _template_eligible_for_auto_execution(candidate: QuestionCandidate) -> bool:

@@ -85,24 +85,24 @@ def test_report_cache_key_binds_full_effective_llm_configuration(
     ctx = SessionContext(project_id="demo", session_id="run", store=store)
     first = OpenAICompatibleLLMClient(
         LLMSettings(
-            provider=LLMProvider.OPENAI,
+            provider=LLMProvider.OPENAI_COMPATIBLE,
             api_key="test-key",
             model="same-model",
             temperature=0.1,
             max_tokens=1000,
-            base_url="https://first.invalid/v1",
+            base_url="http://127.0.0.1:18082/v1",
             headers={"X-Route": "first"},
             structured_output_mode="json_schema",
         )
     )
     second = OpenAICompatibleLLMClient(
         LLMSettings(
-            provider=LLMProvider.OPENAI,
+            provider=LLMProvider.OPENAI_COMPATIBLE,
             api_key="test-key",
             model="same-model",
             temperature=0.9,
             max_tokens=9000,
-            base_url="https://second.invalid/v1",
+            base_url="http://127.0.0.1:18083/v1",
             headers={"X-Route": "second"},
             structured_output_mode="json_object",
         )

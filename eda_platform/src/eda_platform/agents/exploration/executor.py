@@ -374,6 +374,7 @@ class ProbeJournalHooks(Protocol):
         logical_step_id: str,
         input_fingerprint: str,
         tool_kind: str,
+        tool_name: str,
         projected_rows_scanned: int,
         projected_result_cells: int,
     ) -> None: ...
@@ -417,6 +418,7 @@ class NullProbeJournalHooks:
         logical_step_id: str,
         input_fingerprint: str,
         tool_kind: str,
+        tool_name: str,
         projected_rows_scanned: int,
         projected_result_cells: int,
     ) -> None:
@@ -424,6 +426,7 @@ class NullProbeJournalHooks:
             logical_step_id,
             input_fingerprint,
             tool_kind,
+            tool_name,
             projected_rows_scanned,
             projected_result_cells,
         )
@@ -518,6 +521,7 @@ class JsonlProbeJournalHooks:
         logical_step_id: str,
         input_fingerprint: str,
         tool_kind: str,
+        tool_name: str,
         projected_rows_scanned: int,
         projected_result_cells: int,
     ) -> None:
@@ -545,6 +549,7 @@ class JsonlProbeJournalHooks:
                 logical_step_id=logical_step_id,
                 input_fingerprint=input_fingerprint,
                 tool_kind=tool_kind,
+                tool_name=tool_name,
                 projected_rows_scanned=projected_rows_scanned,
                 projected_result_cells=projected_result_cells,
             )
@@ -1089,6 +1094,7 @@ class ProbeExecutor:
                     logical_step_id=logical_step_id,
                     input_fingerprint=item.fingerprint,
                     tool_kind=item.projection.kind,
+                    tool_name=item.call.name,
                     projected_rows_scanned=item.projection.rows_scanned,
                     projected_result_cells=item.projection.result_cells,
                 )

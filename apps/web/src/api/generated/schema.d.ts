@@ -2378,7 +2378,7 @@ export interface components {
          * ArtifactType
          * @enum {string}
          */
-        ArtifactType: "DatasetProfile" | "RawDatasetProfile" | "QualityIssueSet" | "QualityContextSet" | "ChartSpec" | "RawChartSpec" | "RawDataPreview" | "MarkdownReport" | "ReportBundle" | "ReportAudit" | "HtmlReport" | "SqlResult" | "CodeExecutionResult" | "PiiReport" | "ChatTurnPlan" | "Table" | "SessionSummary" | "RelationshipCandidateSet" | "RelationshipValidationSet" | "ErDiagram" | "ValueMap" | "QuestionCandidateSet" | "InvestigationPlan" | "InvestigationApproval" | "ValidatedFinding" | "InvestigationRecord" | "SynthesisBrief" | "DecisionReport" | "DeepInvestigationResult" | "DecisionCoverage" | "QuestionExecutionResult" | "CleaningRecipe" | "CleaningPreview" | "StatTestResult" | "ModelCard" | "AnomalyScreenResult" | "SessionMetrics" | "ResourcePreflight" | "ColumnRoleSet" | "EvidenceInterleaveTranscript" | "FollowUpProposalSet" | "LoopLedger" | "EdaHandoff" | "AgentHandoff" | "EvidenceReceipt";
+        ArtifactType: "DatasetProfile" | "RawDatasetProfile" | "QualityIssueSet" | "QualityContextSet" | "ChartSpec" | "RawChartSpec" | "RawDataPreview" | "MarkdownReport" | "ReportBundle" | "ReportAudit" | "HtmlReport" | "SqlResult" | "CodeExecutionResult" | "PiiReport" | "ChatTurnPlan" | "Table" | "SessionSummary" | "RelationshipCandidateSet" | "RelationshipValidationSet" | "ErDiagram" | "ValueMap" | "QuestionCandidateSet" | "InvestigationPlan" | "InvestigationApproval" | "ValidatedFinding" | "InvestigationRecord" | "SynthesisBrief" | "DecisionReport" | "DeepInvestigationResult" | "DecisionCoverage" | "QuestionExecutionResult" | "CleaningRecipe" | "CleaningPreview" | "StatTestResult" | "ModelCard" | "AnomalyScreenResult" | "SessionMetrics" | "ResourcePreflight" | "ColumnRoleSet" | "EvidenceInterleaveTranscript" | "FollowUpProposalSet" | "LoopLedger" | "EdaHandoff" | "AgentHandoff" | "EvidenceReceipt" | "WorkflowEvalTrial";
         /**
          * AutoEdaResourceUsage
          * @description Nested SessionMetrics v6 payload; defaults keep legacy runs readable.
@@ -2410,7 +2410,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            processing_mode: "exact_in_memory" | "metadata_only" | "unknown";
+            processing_mode: "exact_in_memory" | "streaming_exact" | "metadata_only" | "unknown";
             /**
              * Preflight Status
              * @default unavailable
@@ -7298,7 +7298,7 @@ export interface components {
         SessionMetricsView: {
             /**
              * Schema Version
-             * @default 6
+             * @default 7
              */
             schema_version: number;
             /** Session Id */
@@ -7315,6 +7315,16 @@ export interface components {
              * @default 0
              */
             tool_calls: number;
+            /**
+             * Trace Tool Calls
+             * @default 0
+             */
+            trace_tool_calls: number;
+            /**
+             * Artifact Tool Calls
+             * @default 0
+             */
+            artifact_tool_calls: number;
             /**
              * Total Tokens
              * @default 0
@@ -7449,6 +7459,16 @@ export interface components {
              * @default 0
              */
             failures_count: number;
+            /**
+             * Trace Failures Count
+             * @default 0
+             */
+            trace_failures_count: number;
+            /**
+             * Question Failures Count
+             * @default 0
+             */
+            question_failures_count: number;
             /**
              * Findings Count
              * @default 0

@@ -488,6 +488,31 @@ def test_threshold_question_without_threshold_answer_fails_closed() -> None:
     assert "no result column matching its answer contract" in qexec.payload["error"]
 
 
+def test_prediction_question_cannot_publish_a_sql_proxy_as_answer() -> None:
+    candidate = _candidate(
+        "Can we predict which transactions will be fraudulent?",
+        template_id=None,
+    ).model_copy(update={"analysis_mode": "prediction"})
+    sql_artifact = _sql_artifact(
+        [{"row_count": 284807, "fraud_rate_percent": 0.17}]
+    )
+
+    qexec = _successful_qexec_artifact(
+        candidate,
+        sql_artifact=sql_artifact,
+        project_id="project_demo",
+        session_id="run_demo",
+        parent_ids=[sql_artifact.id],
+        plan_summary="SQL rate proxy",
+    )
+
+    assert qexec.payload["outcome"] == "abstained"
+    assert qexec.payload["abstention_code"] == "method_contract_failed"
+    assert qexec.payload["answer_contract"]["required_method_id"] == "ml_baseline"
+    assert qexec.payload["contract_status"] == "failed"
+    assert "missing artifact types ModelCard" in qexec.payload["error"]
+
+
 def test_domain_metric_template_prefers_most_specific_match() -> None:
     # An AOV result also fully fills the GMV template (column subset); the
     # more specific AOV template must win.

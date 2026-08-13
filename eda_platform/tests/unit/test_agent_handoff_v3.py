@@ -211,10 +211,10 @@ def test_auto_eda_returns_exact_final_store_snapshot(tmp_path: Path) -> None:
     assert sum(metrics.artifact_counts.values()) == len(stored)
     assert metrics.artifact_counts["AgentHandoff"] == 1
     usage = metrics.resource_usage
-    assert metrics.schema_version == 6
+    assert metrics.schema_version == 7
     assert usage.measurement_status == "verified"
     assert usage.preflight_status == "accepted"
-    assert usage.processing_mode == "exact_in_memory"
+    assert usage.processing_mode == "streaming_exact"
     assert usage.inputs.analysis.dataset_count == 1
     assert usage.inputs.analysis.file_bytes == source.stat().st_size
     assert usage.inputs.analysis.rows == 3

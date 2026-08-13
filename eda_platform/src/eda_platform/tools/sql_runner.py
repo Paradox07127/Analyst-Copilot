@@ -5,7 +5,9 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -13,32 +15,74 @@ import pandas as pd
 from eda_platform.core.ids import make_artifact_id
 from eda_platform.core.query import DuckDBQueryEngine, QueryTimeout, validate_select_statement
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, SqlResult
-from eda_platform.tools.loader import LoadedDataset
+from eda_platform.tools.loader import (
+    DatasetSource,
+    LoadedDataset,
+    duckdb_identifier_dtypes,
+)
 
 # A run of word characters, i.e. exactly what ``\bname\b`` would match.
 _WORD_RUN = re.compile(r"[A-Za-z0-9_]+")
+
+# DuckDB reads other encodings only through the network-installed `encodings`
+# extension; anything else must materialize through the pandas loader instead.
+_DUCKDB_NATIVE_ENCODINGS = {"utf-8", "utf-8-sig", "ascii"}
+
+
+def _duckdb_can_read(encoding: str | None) -> bool:
+    return (encoding or "utf-8").lower() in _DUCKDB_NATIVE_ENCODINGS
 
 
 @dataclass(frozen=True)
 class SqlCatalog:
     engine: DuckDBQueryEngine
     relations: dict[str, str]
+    columns: dict[str, set[str]] | None = None
+    storage: TemporaryDirectory[str] | None = None
 
 
 def build_catalog(
     datasets: Sequence[LoadedDataset],
     *,
     max_rows: int = 10_000,
+    relation_key: Literal["filename", "dataset_id"] = "filename",
 ) -> SqlCatalog:
-    engine = DuckDBQueryEngine(max_rows=max_rows)
+    file_backed = any(isinstance(dataset, DatasetSource) for dataset in datasets)
+    storage = TemporaryDirectory(prefix="eda-query-") if file_backed else None
+    engine = DuckDBQueryEngine(
+        max_rows=max_rows,
+        database=(Path(storage.name) / "catalog.duckdb" if storage is not None else None),
+        trusted_csv_ingest=file_backed,
+    )
     relations: dict[str, str] = {}
+    columns: dict[str, set[str]] = {}
     used_relation_names: set[str] = set()
     for dataset in datasets:
-        relation_name = _unique_relation_name(dataset.record.name, used_relation_names)
-        engine.register_frame(relation_name, dataset.frame)
+        source_name = (
+            dataset.record.dataset_id
+            if relation_key == "dataset_id"
+            else dataset.record.name
+        )
+        relation_name = _unique_relation_name(source_name, used_relation_names)
+        if isinstance(dataset, DatasetSource) and _duckdb_can_read(dataset.record.encoding):
+            relation_columns = engine.register_trusted_csv(
+                relation_name,
+                dataset.record.path,
+                dtype=duckdb_identifier_dtypes(dataset.record.path),
+            )
+        else:
+            engine.register_frame(relation_name, dataset.frame)
+            relation_columns = [str(column) for column in dataset.frame.columns]
+        columns[relation_name] = set(relation_columns)
         relations.setdefault(dataset.record.name, relation_name)
         relations[dataset.record.dataset_id] = relation_name
-    return SqlCatalog(engine=engine, relations=relations)
+    engine.seal()
+    return SqlCatalog(
+        engine=engine,
+        relations=relations,
+        columns=columns,
+        storage=storage,
+    )
 
 
 def relation_names_for(dataset_names: Sequence[str]) -> list[str]:

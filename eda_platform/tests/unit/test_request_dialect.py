@@ -101,7 +101,7 @@ class _Endpoint:
 def _settings(**overrides: object) -> LLMSettings:
     base = {
         "provider": LLMProvider.OPENAI_COMPATIBLE,
-        "base_url": "https://api.openai.com/v1",
+        "base_url": "http://127.0.0.1:18081/v1",
         "api_key": "sk-test",
         "model": "gpt-5.6-terra",
         "temperature": 0.2,
@@ -118,7 +118,7 @@ class _EndpointLike(Protocol):
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, endpoint: _EndpointLike) -> None:
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", endpoint)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", endpoint)
 
 
 # --- plan_repair: pure reading of a rejection ---------------------------------

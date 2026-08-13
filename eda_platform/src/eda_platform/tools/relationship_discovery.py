@@ -90,7 +90,11 @@ def discover_relationship_candidates(
 ) -> RelationshipCandidateSet:
     query_engine = engine or DuckDBQueryEngine()
     for dataset in datasets:
-        query_engine.register_frame(_relation_name(dataset.record.dataset_id), dataset.frame)
+        relation_name = _relation_name(dataset.record.dataset_id)
+        # A catalog-backed engine already holds this table; registering the
+        # pandas frame on top would pin every frame in memory at once (F2).
+        if not query_engine.has_relation(relation_name):
+            query_engine.register_frame(relation_name, dataset.frame)
 
     stats_by_dataset = {
         dataset.record.dataset_id: _eligible_columns(

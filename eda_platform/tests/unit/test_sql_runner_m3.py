@@ -7,7 +7,7 @@ import pytest
 
 from eda_platform.core.query import QueryTimeout, UnsafeQueryError
 from eda_platform.schemas.artifacts import ArtifactType, SqlResult
-from eda_platform.tools.loader import load_csv
+from eda_platform.tools.loader import DatasetFramePool, defer_csv, load_csv
 from eda_platform.tools.sql_runner import build_catalog, rewrite_relation_names, run_sql
 
 
@@ -54,6 +54,72 @@ def test_build_catalog_registers_loaded_datasets_and_runs_join(tmp_path: Path) -
         {"region": "East", "total_amount": 10.0},
         {"region": "West", "total_amount": 20.0},
     ]
+
+
+def test_lazy_catalog_materializes_full_csvs_to_private_duckdb(
+    tmp_path: Path,
+) -> None:
+    orders = tmp_path / "orders.csv"
+    customers = tmp_path / "customers.csv"
+    orders.write_text(
+        "order_id,customer_id,amount\n1,C1,10\n2,C2,20\n3,C1,30\n",
+        encoding="utf-8",
+    )
+    customers.write_text(
+        "customer_id,region\nC1,East\nC2,West\n",
+        encoding="utf-8",
+    )
+    pool = DatasetFramePool()
+    sources = [
+        defer_csv(orders, dataset_id="ds_orders", frame_pool=pool),
+        defer_csv(customers, dataset_id="ds_customers", frame_pool=pool),
+    ]
+
+    catalog = build_catalog(sources)
+    result = SqlResult.model_validate(
+        run_sql(
+            catalog,
+            "select c.region, sum(o.amount) total "
+            "from orders o join customers c using (customer_id) "
+            "group by 1 order by 1",
+            project_id="p",
+            session_id="s",
+        ).payload
+    )
+
+    assert result.rows_preview == [
+        {"region": "East", "total": 40.0},
+        {"region": "West", "total": 20.0},
+    ]
+    assert catalog.storage is not None
+    assert (Path(catalog.storage.name) / "catalog.duckdb").is_file()
+    with pytest.raises(RuntimeError, match="not available"):
+        catalog.engine.register_trusted_csv("late", orders)
+
+
+def test_lazy_catalog_preserves_identifier_strings_like_the_loader(tmp_path: Path) -> None:
+    """F3 (2026-08-12 review): the pandas loader forces identifier-named
+    columns to string; the DuckDB trusted-CSV path must apply the same rule or
+    SQL answers and profiles silently disagree about the same column."""
+    stores = tmp_path / "stores.csv"
+    stores.write_text("store_code,amount\n12,10\n34,20\n", encoding="utf-8")
+
+    # Contract precondition: the pandas path keeps store_code textual.
+    pandas_values = list(load_csv(stores, dataset_id="ds_pd").frame["store_code"])
+    assert pandas_values == ["12", "34"]
+
+    pool = DatasetFramePool()
+    catalog = build_catalog([defer_csv(stores, dataset_id="ds_stores", frame_pool=pool)])
+    result = SqlResult.model_validate(
+        run_sql(
+            catalog,
+            "select store_code from stores order by store_code",
+            project_id="p",
+            session_id="s",
+        ).payload
+    )
+
+    assert [row["store_code"] for row in result.rows_preview] == ["12", "34"]
 
 
 def test_run_sql_marks_truncated_when_preview_is_smaller_than_result(tmp_path: Path) -> None:
@@ -182,3 +248,25 @@ def test_rewrite_relation_names_is_identity_when_names_already_match() -> None:
     sql = "SELECT * FROM sales WHERE label = 'orders'"
     assert rewrite_relation_names(sql, {"sales": "sales"}) == sql
     assert rewrite_relation_names(sql, {}) == sql
+
+
+def test_lazy_catalog_survives_non_utf8_source_files(tmp_path: Path) -> None:
+    """Codex pre-commit review (2026-08-13): DuckDB's from_csv_auto only reads
+    UTF-8 without the network-installed encodings extension, but the loader
+    accepts gb18030/utf-16/latin-1. Non-UTF-8 sources must fall back to the
+    pandas frame instead of failing catalog construction."""
+    sales = tmp_path / "sales_gbk.csv"
+    sales.write_bytes("地区,销售额\n华东,120000\n华北,58000\n".encode("gb18030"))
+
+    pool = DatasetFramePool()
+    catalog = build_catalog([defer_csv(sales, dataset_id="ds_gbk", frame_pool=pool)])
+    result = SqlResult.model_validate(
+        run_sql(
+            catalog,
+            'select "地区" from sales_gbk order by "销售额" desc',
+            project_id="p",
+            session_id="s",
+        ).payload
+    )
+
+    assert [row["地区"] for row in result.rows_preview] == ["华东", "华北"]

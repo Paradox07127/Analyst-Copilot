@@ -97,13 +97,20 @@ def test_load_run_reuses_manifest_content_hashes(tmp_path: Path, monkeypatch) ->
     assert manifest is not None
 
     seen_hashes: dict[str, str | None] = {}
-    real_load_csv = session_loader_module.load_csv
+    real_defer_csv = session_loader_module.defer_csv
 
-    def recording_load_csv(path, *, dataset_id=None, content_hash=None):
+    def recording_defer_csv(
+        path, *, dataset_id=None, content_hash=None, frame_pool=None
+    ):
         seen_hashes[Path(path).name] = content_hash
-        return real_load_csv(path, dataset_id=dataset_id, content_hash=content_hash)
+        return real_defer_csv(
+            path,
+            dataset_id=dataset_id,
+            content_hash=content_hash,
+            frame_pool=frame_pool,
+        )
 
-    monkeypatch.setattr(session_loader_module, "load_csv", recording_load_csv)
+    monkeypatch.setattr(session_loader_module, "defer_csv", recording_defer_csv)
 
     loaded = load_run("proj_load", result.session_id, workspace=workspace)
 

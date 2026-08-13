@@ -261,6 +261,32 @@ describe("Activity center with job SSE", () => {
     expect(source.readyState).toBe(FakeEventSource.CLOSED);
   });
 
+  it("shows a resource-limited session as stopped before ingestion", async () => {
+    const { source } = await launchTrackedJob();
+    const drawer = screen.getByRole("dialog", { name: "Activity" });
+
+    act(() => source.emit("job.started", frame("job.started", "job_1")));
+    act(() =>
+      source.emit("job.completed", {
+        ...frame("job.completed", "job_1"),
+        summary: {
+          status: "completed",
+          session_status: "limited",
+          detail: "Resource preflight stopped this run before data ingestion.",
+        },
+      }),
+    );
+
+    expect(within(drawer).getByText("Resource limited")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(
+        /EDA · resource limited\. Resource limited\. Focus for job details\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+    expect(source.readyState).toBe(FakeEventSource.CLOSED);
+  });
+
   it("keeps the focused job's step and degraded outcome in the top bar", async () => {
     const { source, user } = await launchTrackedJob();
     const progress = screen.getByLabelText("Current session job progress");

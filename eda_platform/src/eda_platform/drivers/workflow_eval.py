@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from eda_platform.core.config import require_absolute_workspace
+from eda_platform.core.ids import make_artifact_id
 from eda_platform.core.llm import OfflineLLMClient
 from eda_platform.core.session_metrics import persist_run_metrics
 from eda_platform.core.store import ArtifactStore
@@ -20,12 +21,27 @@ from eda_platform.schemas.questions import (
 from eda_platform.schemas.workflow_eval import WorkflowEvalProbe, WorkflowEvalSpec
 from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.relationship_discovery import _quote_identifier, _relation_name
+from eda_platform.tools.workflow_eval import build_workflow_eval_trial
 
 _SOURCE_SUPPORT_TYPES = {
     ArtifactType.DATASET_PROFILE,
     ArtifactType.QUALITY_ISSUE_SET,
     ArtifactType.QUALITY_CONTEXT_SET,
     ArtifactType.COLUMN_ROLE_SET,
+    # Probe qexec artifacts point back through this source-session artifact;
+    # retain it so trajectory evaluation can prove transitive dataset lineage.
+    ArtifactType.QUESTION_CANDIDATE_SET,
+    # The regenerated batch report can cite deterministic evidence produced by
+    # its source run. Preserve those objects without importing source terminal
+    # qexec/report/metrics artifacts into the case quality population.
+    ArtifactType.CHART_SPEC,
+    ArtifactType.TABLE,
+    ArtifactType.SQL_RESULT,
+    ArtifactType.CODE_EXECUTION_RESULT,
+    ArtifactType.STAT_TEST_RESULT,
+    ArtifactType.MODEL_CARD,
+    ArtifactType.ANOMALY_SCREEN_RESULT,
+    ArtifactType.VALIDATED_FINDING,
 }
 
 
@@ -54,10 +70,18 @@ def run_fresh_workflow_eval_case(
         )
         store = ArtifactStore(run_workspace)
         if not spec.probe_questions:
+            artifacts = store.list_artifacts(
+                project_id=result.project_id,
+                session_id=result.session_id,
+            )
             runs.append(
-                store.list_artifacts(
+                _persist_eval_trial(
+                    store,
                     project_id=result.project_id,
                     session_id=result.session_id,
+                    spec=spec,
+                    artifacts=artifacts,
+                    repetition=index,
                 )
             )
             continue
@@ -95,8 +119,46 @@ def run_fresh_workflow_eval_case(
         support_artifacts = [
             artifact for artifact in source_artifacts if artifact.type in _SOURCE_SUPPORT_TYPES
         ]
-        runs.append([*support_artifacts, *batch_artifacts])
+        eval_artifacts = [*support_artifacts, *batch_artifacts]
+        runs.append(
+            _persist_eval_trial(
+                store,
+                project_id=result.project_id,
+                session_id=batch.session_id,
+                spec=spec,
+                artifacts=eval_artifacts,
+                repetition=index,
+            )
+        )
     return runs
+
+
+def _persist_eval_trial(
+    store: ArtifactStore,
+    *,
+    project_id: str,
+    session_id: str,
+    spec: WorkflowEvalSpec,
+    artifacts: list[Artifact],
+    repetition: int,
+) -> list[Artifact]:
+    trial = build_workflow_eval_trial(
+        spec,
+        artifacts,
+        events=store.list_trace_events(project_id=project_id, session_id=session_id),
+        repetition=repetition,
+    )
+    payload = trial.model_dump(mode="json")
+    artifact = Artifact(
+        id=make_artifact_id("workflow_eval_trial", payload),
+        type=ArtifactType.WORKFLOW_EVAL_TRIAL,
+        project_id=project_id,
+        session_id=session_id,
+        parents=[item.id for item in artifacts],
+        payload=payload,
+    )
+    store.save_artifact(artifact)
+    return [*artifacts, artifact]
 
 
 def _probe_candidate(

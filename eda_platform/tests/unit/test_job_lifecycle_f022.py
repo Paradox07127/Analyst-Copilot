@@ -249,6 +249,37 @@ def test_terminal_trace_fault_rolls_back_job_and_run(
     assert _event_types(store, str(job["job_id"])) == ["job.queued", "job.started"]
 
 
+def test_completed_worker_preserves_resource_limited_session_outcome(
+    lifecycle: tuple[ArtifactStore, JobLifecycleRepository],
+) -> None:
+    store, repository = lifecycle
+    job = _queue(repository)
+    claim = repository.claim_launch(str(job["job_id"]), owner="test")
+    repository.acknowledge_spawn(claim, pid=os.getpid(), birth_identity="test")
+    assert repository.child_start(claim) is not None
+
+    # Resource preflight is a successful worker exit but not a completed EDA
+    # session.  The driver records this outcome before returning to the worker.
+    store.mark_session_status("demo", str(job["session_id"]), "limited")
+    assert repository.finish(claim, "completed") is True
+
+    current = store.get_job(str(job["job_id"]))
+    run = store.get_session_index_row(str(job["session_id"]))
+    assert current is not None and current["status"] == "completed"
+    assert run is not None and run["status"] == "limited"
+    with sqlite3.connect(store.db_path) as conn:
+        payload_json = conn.execute(
+            """
+            select payload from trace_events
+            where job_id = ? and event_type = 'job.completed'
+            """,
+            (str(job["job_id"]),),
+        ).fetchone()[0]
+    payload = json.loads(str(payload_json))
+    assert payload["summary"]["session_status"] == "limited"
+    assert "before data ingestion" in payload["summary"]["detail"]
+
+
 def test_terminal_row_cannot_be_revived_by_stale_runner(
     lifecycle: tuple[ArtifactStore, JobLifecycleRepository],
 ) -> None:

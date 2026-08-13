@@ -350,9 +350,8 @@ def test_draft_approval_rejects_changed_disclosure_settings(
         "/api/v1/settings",
         json={
             "payload_policy": "schema+aggregates+sample",
-                "provider": "openai",
-                "model": "gpt-4.1",
-            "base_url": "https://provider.invalid/v1",
+            "provider": "openai",
+            "model": "gpt-4.1",
             "api_key": "sk-validation-only",
         },
         headers=headers,

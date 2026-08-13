@@ -83,7 +83,7 @@ class _Response:
 
 def test_a_busy_provider_is_retried_and_then_succeeds(monkeypatch: Any) -> None:
     http = _Http([503, 429])
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", http)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", http)
     monkeypatch.setattr("eda_platform.core.llm.time.sleep", lambda _s: None)
     client = OpenAICompatibleLLMClient(_settings())
 
@@ -95,7 +95,7 @@ def test_a_persistently_busy_provider_raises_a_typed_unavailable_error(
     monkeypatch: Any,
 ) -> None:
     http = _Http([503] * 10)
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", http)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", http)
     monkeypatch.setattr("eda_platform.core.llm.time.sleep", lambda _s: None)
     client = OpenAICompatibleLLMClient(_settings())
 
@@ -107,7 +107,7 @@ def test_a_persistently_busy_provider_raises_a_typed_unavailable_error(
 def test_a_served_client_error_is_not_retried(monkeypatch: Any) -> None:
     """Control: a 400 is a served answer about the request itself."""
     http = _Http([400])
-    monkeypatch.setattr("eda_platform.core.llm.request.urlopen", http)
+    monkeypatch.setattr("eda_platform.core.llm.credential_safe_urlopen", http)
     monkeypatch.setattr("eda_platform.core.llm.time.sleep", lambda _s: None)
     client = OpenAICompatibleLLMClient(_settings())
 

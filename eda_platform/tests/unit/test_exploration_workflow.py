@@ -1631,6 +1631,8 @@ def test_trial_plan_rejects_unpinned_manifest_digest(tmp_path: Path) -> None:
     pinned = E4aPlannedTrial(
         role="baseline",
         trial_id=trial.trial_id,
+        item_id=trial.item_id,
+        bucket="planted",
         tier="quick",
         seed=trial.seed,
         manifest_digest=manifest.root_digest,
@@ -1922,6 +1924,8 @@ def test_release_issuer_rejects_unpinned_baseline_and_tier_seed_relabel(
                 E4aPlannedTrial(
                     role="baseline",
                     trial_id="xpl-evidence-root",
+                    item_id=bindings.fixture.item_id,
+                    bucket="planted",
                     tier="quick",
                     seed=7,
                     manifest_digest="f" * 64,
@@ -1929,6 +1933,8 @@ def test_release_issuer_rejects_unpinned_baseline_and_tier_seed_relabel(
                 E4aPlannedTrial(
                     role="treatment",
                     trial_id="xpl-evidence-root",
+                    item_id=bindings.fixture.item_id,
+                    bucket="planted",
                     tier="quick",
                     seed=7,
                     manifest_digest=manifest.root_digest,

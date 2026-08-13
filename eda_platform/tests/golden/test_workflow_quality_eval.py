@@ -9,7 +9,7 @@ from eda_platform.drivers.workflow_eval import run_fresh_workflow_eval_case
 from eda_platform.schemas.artifacts import ArtifactType
 from eda_platform.schemas.questions import QuestionExecutionResult
 from eda_platform.schemas.workflow_eval import WorkflowEvalSpec
-from eda_platform.tools.workflow_eval import evaluate_workflow_run
+from eda_platform.tools.workflow_eval import grade_workflow_quality
 
 _EVAL_DIR = Path(__file__).parents[1] / "evals" / "workflow_quality"
 
@@ -31,7 +31,7 @@ def test_numeric_postal_code_guardrail_passes_whole_workflow_eval(tmp_path: Path
         session_id=result.session_id,
     )
 
-    evaluation = evaluate_workflow_run(artifacts, spec)
+    evaluation = grade_workflow_quality(artifacts, spec)
 
     assert evaluation.passed, evaluation.gate_failures
     assert evaluation.answered_count == 0
@@ -51,11 +51,11 @@ def test_contract_matrix_abstains_through_real_batch_path(tmp_path: Path) -> Non
         repeat=1,
     )
 
-    evaluation = evaluate_workflow_run(artifact_runs[0], spec)
+    evaluation = grade_workflow_quality(artifact_runs[0], spec)
 
     assert evaluation.passed, evaluation.gate_failures
     assert evaluation.answered_count == 1
-    assert evaluation.abstained_count == 7
+    assert evaluation.abstained_count == 8
     assert evaluation.abstention_precision == 1.0
     assert evaluation.abstention_recall == 1.0
     assert evaluation.duration_seconds > 0
@@ -66,20 +66,17 @@ def test_contract_matrix_abstains_through_real_batch_path(tmp_path: Path) -> Non
         for artifact in artifact_runs[0]
         if artifact.type is ArtifactType.QUESTION_EXECUTION_RESULT
     ]
-    assert {
-        result.abstention_code for result in results if result.outcome == "abstained"
-    } == {
+    assert {result.abstention_code for result in results if result.outcome == "abstained"} == {
         "answer_schema_mismatch",
         "duration_out_of_range",
         "empty_query_result",
         "hhi_out_of_range",
         "missing_metric_output",
         "metric_unit_mismatch",
+        "method_contract_failed",
         "non_finite_metric_output",
     }
-    seeded_currency = next(
-        result for result in results if "seeded-currency GMV" in result.question
-    )
+    seeded_currency = next(result for result in results if "seeded-currency GMV" in result.question)
     assert seeded_currency.outcome == "answered"
     assert any("100 BRL" in finding.text for finding in seeded_currency.findings)
     assert any(
@@ -90,3 +87,9 @@ def test_contract_matrix_abstains_through_real_batch_path(tmp_path: Path) -> Non
         for evidence in finding.evidence
         if evidence.locator.endswith(".gmv_total")
     )
+    trial = next(
+        artifact
+        for artifact in artifact_runs[0]
+        if artifact.type is ArtifactType.WORKFLOW_EVAL_TRIAL
+    )
+    assert trial.payload["status"] == "passed", trial.payload["failure_nodes"]

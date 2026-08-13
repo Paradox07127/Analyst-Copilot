@@ -851,10 +851,21 @@ def _claim_evidence_ids(claim: ReportClaim) -> list[str]:
     return ordered
 
 
+_ROUTE_SKIP_DISCLOSURE = (
+    "- Automated question discovery could not use the language model in this "
+    "run, so every analysis question came from built-in templates; coverage "
+    "is narrower than a fully healthy run."
+)
+
+
 def _execution_disclosures(artifacts: list[Artifact]) -> list[str]:
     """Collect report disclosures from question execution results."""
     disclosures: set[str] = set()
+    route_skipped = False
     for artifact in artifacts:
+        if artifact.type is ArtifactType.QUESTION_CANDIDATE_SET:
+            route_skipped = route_skipped or bool(artifact.payload.get("llm_route_skipped"))
+            continue
         if artifact.type is not ArtifactType.QUESTION_EXECUTION_RESULT:
             continue
         limitations = artifact.payload.get("limitations")
@@ -862,7 +873,11 @@ def _execution_disclosures(artifacts: list[Artifact]) -> list[str]:
             disclosures.update(
                 line for line in limitations if isinstance(line, str) and line.strip()
             )
-    return sorted(disclosures)
+    ordered = sorted(disclosures)
+    if route_skipped:
+        # Run-level degradation leads the list: it scopes every other line.
+        ordered.insert(0, _ROUTE_SKIP_DISCLOSURE)
+    return ordered
 
 
 class SectionRenderContext(NamedTuple):

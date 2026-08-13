@@ -53,6 +53,11 @@ _MAX_ATTEMPTS = 3
 # calls with missing usage count as 0 without disarming the breaker.
 _REPAIR_TOKEN_BUDGET_RATIO = 1.5
 _MAX_LLM_CLAIMS = 16
+# Beyond this many executed questions the claim budget shrinks and the
+# completion budget starts at its ceiling: an 11-question run truncated all
+# three plan attempts at max_claims=12 (2026-08-12 deepseek run).
+_WIDE_RUN_QUESTIONS = 6
+_COMPLETION_BUDGET_CEILING = 12_000
 _REPORT_PLAN_TASK = "m2_report_claim_plan"
 _BODY_NUMBER_PATTERN = re.compile(r"(?<![\w.-])-?\d+(?:\.\d+)?%?")
 _REPAIRABLE_QUALITY_CODES = {"high_missing", "mixed_type_string", "outlier_detected"}
@@ -180,20 +185,31 @@ def generate_agentic_report(
             total_limit=_FORCED_INTERLEAVE_LIMIT,
         )
 
-    bundle, audit, used_fallback = _generate_with_repair(
-        evidence_pack,
-        project_id=project_id,
-        session_id=session_id,
-        business_context=business_context,
-        llm=llm,
-        question_results=question_results,
-        sql_results=sql_results,
-        llm_calls=llm_calls,
-        llm_events=llm_events,
-        validation_events=validation_events,
-        interleave=interleave_session,
-        forced_interleave=forced_session,
-    )
+    # Plan generation may raise the completion cap (wide-run pre-raise or the
+    # truncation retry); the narration and session-title calls on this same
+    # client must not inherit the inflated worst-case reservation.
+    initial_completion_cap = _completion_cap(llm)
+    try:
+        bundle, audit, used_fallback = _generate_with_repair(
+            evidence_pack,
+            project_id=project_id,
+            session_id=session_id,
+            business_context=business_context,
+            llm=llm,
+            question_results=question_results,
+            sql_results=sql_results,
+            llm_calls=llm_calls,
+            llm_events=llm_events,
+            validation_events=validation_events,
+            interleave=interleave_session,
+            forced_interleave=forced_session,
+        )
+    finally:
+        if (
+            initial_completion_cap is not None
+            and _completion_cap(llm) != initial_completion_cap
+        ):
+            _set_completion_budget(llm, initial_completion_cap)
 
     business_injected = _apply_business_findings_fallback(bundle, question_results)
     dataset_injected = _apply_dataset_overview_fallback(bundle, evidence_pack)
@@ -357,6 +373,12 @@ def _generate_with_repair(
     previous_repair_signature: tuple[dict[str, Any], tuple[dict[str, Any], ...]] | None = None
     truncation_retry = False
     raised_completion_budget = False
+    if len(question_results) > _WIDE_RUN_QUESTIONS:
+        # Wide runs truncate under the default cap; start at the ceiling
+        # instead of burning an attempt to climb there.
+        initial_cap = _completion_cap(llm)
+        if initial_cap is not None and initial_cap < _COMPLETION_BUDGET_CEILING:
+            _set_completion_budget(llm, _COMPLETION_BUDGET_CEILING)
     draft_total_tokens: int | None = None
     repair_spent_tokens = 0
     for attempt in range(_MAX_ATTEMPTS):
@@ -652,7 +674,9 @@ def _request_plan(
     forced_evidence: list[dict[str, Any]] | None = None,
     usages: list[LLMResultMetadata] | None = None,
 ) -> ReportPlanDraft:
-    max_claims = 8 if truncation_retry else 12
+    max_claims = _plan_claim_budget(
+        len(question_results), truncation_retry=truncation_retry
+    )
     instructions = (
         "Produce a compact evidence-grounded EDA claim plan, not a full report. "
         "Return only English claims. Do not write section bodies. The app will "
@@ -770,6 +794,13 @@ def _attempt_spend(usages: list[LLMResultMetadata]) -> int:
     )
 
 
+def _plan_claim_budget(question_count: int, *, truncation_retry: bool) -> int:
+    """Shrink the claim budget one per question past _WIDE_RUN_QUESTIONS so a
+    wide run's plan still fits under the completion cap."""
+    first = max(6, 12 - max(0, question_count - _WIDE_RUN_QUESTIONS))
+    return max(4, first - 4) if truncation_retry else first
+
+
 def _completion_cap(llm: LLMClient) -> int | None:
     settings = getattr(llm, "settings", None)
     value = getattr(settings, "max_tokens", None)
@@ -787,18 +818,24 @@ def _completion_was_capped(
     return usage.usage.completion_tokens >= completion_cap
 
 
-def _raise_completion_budget(llm: LLMClient, current_cap: int) -> bool:
+def _set_completion_budget(llm: LLMClient, new_cap: int) -> bool:
     settings = getattr(llm, "settings", None)
     if settings is None:
-        return False
-    new_cap = min(12_000, max(current_cap + 1, int(current_cap * 1.5)))
-    if new_cap <= current_cap:
         return False
     try:
         settings.max_tokens = new_cap
     except (AttributeError, TypeError, ValueError):
         return False
     return True
+
+
+def _raise_completion_budget(llm: LLMClient, current_cap: int) -> bool:
+    new_cap = min(
+        _COMPLETION_BUDGET_CEILING, max(current_cap + 1, int(current_cap * 1.5))
+    )
+    if new_cap <= current_cap:
+        return False
+    return _set_completion_budget(llm, new_cap)
 
 
 def _retry_error_message(

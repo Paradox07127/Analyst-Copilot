@@ -27,16 +27,21 @@ from eda_platform.core.config import (  # noqa: E402
     require_absolute_workspace,
 )
 from eda_platform.drivers.workflow_eval import run_fresh_workflow_eval_case  # noqa: E402
-from eda_platform.schemas.artifacts import Artifact  # noqa: E402
+from eda_platform.schemas.artifacts import Artifact, ArtifactType  # noqa: E402
+from eda_platform.schemas.sessions import TraceEvent  # noqa: E402
 from eda_platform.schemas.workflow_eval import (  # noqa: E402
     WorkflowEvalComparison,
+    WorkflowEvalFailureNode,
     WorkflowEvalSpec,
     WorkflowEvalSuiteResult,
+    WorkflowEvalTrial,
 )
 from eda_platform.tools.workflow_eval import (  # noqa: E402
-    aggregate_workflow_evaluations,
+    aggregate_workflow_eval_trials,
+    build_workflow_eval_trial,
     compare_workflow_evaluations,
-    evaluate_workflow_run,
+    grade_workflow_quality,
+    verify_workflow_eval_trial_sources,
 )
 
 
@@ -54,16 +59,46 @@ def _load_run_artifacts(session_dir: Path) -> list[Artifact]:
     ]
 
 
+def _load_trace_events(session_dir: Path) -> list[TraceEvent]:
+    trace_path = session_dir / "trace.jsonl"
+    if not trace_path.is_file():
+        return []
+    events: list[TraceEvent] = []
+    for line in trace_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            events.append(TraceEvent.model_validate_json(line))
+    return events
+
+
+def _persisted_trial(artifacts: list[Artifact]) -> WorkflowEvalTrial:
+    candidates = [
+        artifact for artifact in artifacts if artifact.type is ArtifactType.WORKFLOW_EVAL_TRIAL
+    ]
+    if not candidates:
+        raise ValueError("Fresh workflow eval did not persist its canonical trial.")
+    artifact = max(candidates, key=lambda item: item.created_at)
+    trial = WorkflowEvalTrial.model_validate(artifact.payload)
+    failures = verify_workflow_eval_trial_sources(trial, artifacts)
+    if failures:
+        return trial.model_copy(
+            update={
+                "status": "failed",
+                "failure_nodes": [*trial.failure_nodes, *failures],
+            }
+        )
+    return trial
+
+
 def _print_summary(result: WorkflowEvalSuiteResult) -> None:
     status = "PASS" if result.passed else "FAIL"
     print(f"{status} workflow eval: {result.case_name}")
     print(
-        f"runs={len(result.runs)} stability={result.stability_rate:.3f} "
+        f"runs={len(result.quality_results)} stability={result.stability_rate:.3f} "
         f"duration_mean={result.duration_mean_seconds:.3f}s "
         f"duration_p95={result.duration_p95_seconds:.3f}s "
         f"tokens_mean={result.tokens_mean:.1f}"
     )
-    for index, run in enumerate(result.runs, start=1):
+    for index, run in enumerate(result.quality_results, start=1):
         answer_metrics = (
             f"{run.answer_precision:.3f}/{run.answer_recall:.3f}"
             if run.expected_answer_count or run.answered_count
@@ -124,6 +159,33 @@ def main() -> int:
     spec = _load_spec(args.case)
     if args.session_dir:
         artifact_runs = [_load_run_artifacts(path) for path in args.session_dir]
+        trials: list[WorkflowEvalTrial] = []
+        for repetition, (path, artifacts) in enumerate(
+            zip(args.session_dir, artifact_runs, strict=True), start=1
+        ):
+            events = _load_trace_events(path)
+            trial = build_workflow_eval_trial(
+                spec,
+                artifacts,
+                events=events,
+                repetition=repetition,
+                trace_ref=str((path / "trace.jsonl").resolve()) if events else None,
+            )
+            if not events:
+                trial = trial.model_copy(
+                    update={
+                        "status": "inconclusive",
+                        "failure_nodes": [
+                            *trial.failure_nodes,
+                            WorkflowEvalFailureNode(
+                                node_id="__trace__",
+                                code="trace_unavailable",
+                                message="Replay cannot be release-eligible without durable trace.",
+                            ),
+                        ],
+                    }
+                )
+            trials.append(trial)
     else:
         try:
             workspace = (
@@ -140,18 +202,17 @@ def main() -> int:
             workspace=workspace,
             repeat=args.repeat,
         )
+        trials = [_persisted_trial(artifacts) for artifacts in artifact_runs]
         print(f"workspace={workspace}")
-    results = [evaluate_workflow_run(artifacts, spec) for artifacts in artifact_runs]
-    suite = aggregate_workflow_evaluations(spec, results)
+    results = [grade_workflow_quality(artifacts, spec) for artifacts in artifact_runs]
+    suite = aggregate_workflow_eval_trials(spec, results=results, trials=trials)
     _print_summary(suite)
     comparison: WorkflowEvalComparison | None = None
     if args.baseline is not None:
         baseline = WorkflowEvalSuiteResult.model_validate_json(
             args.baseline.read_text(encoding="utf-8")
         )
-        comparison = compare_workflow_evaluations(
-            spec, baseline=baseline, current=suite
-        )
+        comparison = compare_workflow_evaluations(spec, baseline=baseline, current=suite)
         _print_comparison(comparison)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -165,10 +226,7 @@ def main() -> int:
             parser.error("--comparison-output requires --baseline")
         args.comparison_output.parent.mkdir(parents=True, exist_ok=True)
         args.comparison_output.write_text(
-            json.dumps(
-                comparison.model_dump(mode="json"), indent=2, ensure_ascii=False
-            )
-            + "\n",
+            json.dumps(comparison.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         print(f"comparison_output={args.comparison_output}")

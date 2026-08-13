@@ -164,6 +164,7 @@ class ToolCallStartedEvent(ExplorationEventBase):
     logical_step_id: str = Field(min_length=1)
     input_fingerprint: str = Field(min_length=1)
     tool_kind: str = Field(default="legacy_unknown", min_length=1)
+    tool_name: str | None = Field(default=None, min_length=1)
     projected_rows_scanned: int = Field(default=0, ge=0)
     projected_result_cells: int = Field(default=0, ge=0)
 

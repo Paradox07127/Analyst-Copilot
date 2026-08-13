@@ -19,7 +19,11 @@ from pydantic import (
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.column_roles import ColumnRoleSet
 from eda_platform.core.kernel import SessionCancelled
-from eda_platform.core.llm import LLMClient, is_offline_client
+from eda_platform.core.llm import (
+    LLMClient,
+    MalformedProviderResponseError,
+    is_offline_client,
+)
 from eda_platform.core.methods import MethodGateContext, evaluate_feasibility
 from eda_platform.core.semantic import SemanticSeeds, pinned_context_block
 from eda_platform.core.tool_guard import (
@@ -615,7 +619,10 @@ def propose_llm_question_candidates(
             raise_if_cancelled(cancel_check, operation="question drafting")
         except (BudgetExceeded, SessionCancelled):
             raise
-        except ValidationError as exc:
+        except (MalformedProviderResponseError, ValidationError) as exc:
+            # MalformedProviderResponseError is the schema-breach wrapper from
+            # core/llm.py; it must land here (repair + retry), not in the
+            # generic RuntimeError give-up branch below.
             previous_error = f"{type(exc).__name__}: {str(exc)[:500]}"
             outcome = None
             if attempt < _MAX_REPAIR_RETRIES:

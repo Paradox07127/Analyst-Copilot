@@ -217,11 +217,12 @@ def test_template_candidates_receive_conservative_registry_defaults(tmp_path: Pa
             assert candidate.candidate_methods == ["descriptive_sql"]
 
 
-def test_auto_selection_excludes_failed_feasibility_but_keeps_legacy_candidates() -> None:
+def test_auto_selection_only_keeps_ready_and_legacy_candidates() -> None:
     candidate_set = QuestionCandidateSet(
         candidates=[
             _question("needs_data", 0.99, status="needs_data"),
             _question("unsuitable", 0.98, status="unsuitable"),
+            _question("constrained", 0.97, status="constrained"),
             _question("legacy", 0.90),
             _question("ready", 0.80, status="ready"),
         ]

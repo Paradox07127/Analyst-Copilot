@@ -53,6 +53,7 @@ def build_agentic_report_artifacts(
     ]
     usage_payload = {
         "session_id": session_id,
+        "usage_scope": "report_generation",
         "report_status": report.bundle.status.value,
         "used_fallback": report.used_fallback,
         "llm_call_count": len(report.llm_calls),
@@ -63,6 +64,7 @@ def build_agentic_report_artifacts(
         "estimated_cost_usd": round(sum(costs), 6) if costs else None,
         "model": report.llm_calls[-1].model if report.llm_calls else "offline",
     }
+    bundle_artifact_id = make_artifact_id("bundle", bundle_payload)
     result: list[Artifact] = [
         Artifact(
             id=make_artifact_id("runsummary", usage_payload),
@@ -73,7 +75,7 @@ def build_agentic_report_artifacts(
             payload=usage_payload,
         ),
         Artifact(
-            id=make_artifact_id("bundle", bundle_payload),
+            id=bundle_artifact_id,
             type=ArtifactType.REPORT_BUNDLE,
             project_id=project_id,
             session_id=session_id,
@@ -85,7 +87,10 @@ def build_agentic_report_artifacts(
             type=ArtifactType.REPORT_AUDIT,
             project_id=project_id,
             session_id=session_id,
-            parents=parent_ids,
+            # The audit validates this exact bundle. Keeping the bundle as the
+            # direct parent makes that relationship provable in trajectory
+            # evaluation; the bundle already carries the upstream parents.
+            parents=[bundle_artifact_id],
             payload=audit_payload,
         ),
         Artifact(

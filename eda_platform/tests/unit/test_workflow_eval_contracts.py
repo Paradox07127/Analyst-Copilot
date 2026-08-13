@@ -16,11 +16,10 @@ from eda_platform.schemas.workflow_eval import (
     WorkflowEvalUsageTotals,
 )
 from eda_platform.tools.workflow_eval import (
-    convert_workflow_eval_spec,
+    compile_workflow_eval_case,
     grade_workflow_hard_gates,
     grade_workflow_step_dag,
     reconcile_workflow_usage,
-    restore_workflow_eval_spec,
 )
 
 
@@ -71,7 +70,7 @@ def _valid_step_dag() -> WorkflowEvalStepDAG:
     )
 
 
-def test_legacy_spec_conversion_is_lossless_and_environment_is_separate() -> None:
+def test_case_compilation_separates_environment_and_trial_identity() -> None:
     spec = WorkflowEvalSpec(
         schema_version=1,
         case_version="7",
@@ -105,35 +104,41 @@ def test_legacy_spec_conversion_is_lossless_and_environment_is_separate() -> Non
         code_revision="abc123",
     )
 
-    conversion = convert_workflow_eval_spec(
+    compiled_case = compile_workflow_eval_case(
         spec,
         environment=environment,
         repetition=2,
         dataset_fingerprints={"sales.csv": "sha256:dataset"},
     )
 
-    assert restore_workflow_eval_spec(conversion.case) == spec
-    assert conversion.case.dataset_refs == ["sales.csv"]
-    assert conversion.environment == environment
-    assert conversion.manifest.repetition == 2
-    assert conversion.manifest.dataset_fingerprints == {
-        "sales.csv": "sha256:dataset"
-    }
-    assert conversion.manifest.case_fingerprint
-    assert conversion.manifest.environment_fingerprint
-    assert conversion.model_validate_json(conversion.model_dump_json()) == conversion
+    assert compiled_case.case.dataset_refs == ["sales.csv"]
+    assert compiled_case.environment == environment
+    assert compiled_case.manifest.repetition == 2
+    assert compiled_case.manifest.dataset_fingerprints == {"sales.csv": "sha256:dataset"}
+    assert compiled_case.manifest.case_fingerprint
+    assert compiled_case.manifest.environment_fingerprint
+    assert compiled_case.model_validate_json(compiled_case.model_dump_json()) == compiled_case
 
 
-def test_conversion_identity_is_stable_and_repetition_specific() -> None:
+def test_compiled_case_identity_is_stable_and_repetition_specific() -> None:
     spec = WorkflowEvalSpec(name="stable")
 
-    first = convert_workflow_eval_spec(spec, repetition=1)
-    repeated = convert_workflow_eval_spec(spec, repetition=1)
-    second_trial = convert_workflow_eval_spec(spec, repetition=2)
+    first = compile_workflow_eval_case(spec, repetition=1)
+    repeated = compile_workflow_eval_case(spec, repetition=1)
+    second_trial = compile_workflow_eval_case(spec, repetition=2)
 
     assert first.manifest == repeated.manifest
     assert first.manifest.trial_id != second_trial.manifest.trial_id
     assert first.manifest.case_fingerprint == second_trial.manifest.case_fingerprint
+
+
+def test_compiled_case_identity_changes_with_dataset_content() -> None:
+    spec = WorkflowEvalSpec(name="dataset-bound")
+
+    first = compile_workflow_eval_case(spec, dataset_fingerprints={"sales.csv": "sha256:first"})
+    changed = compile_workflow_eval_case(spec, dataset_fingerprints={"sales.csv": "sha256:changed"})
+
+    assert first.manifest.trial_id != changed.manifest.trial_id
 
 
 def test_step_dag_grader_accepts_complete_question_finding_report_chain() -> None:
@@ -189,9 +194,7 @@ def test_empty_step_dag_fails_closed() -> None:
     )
 
     assert not result.passed
-    assert {failure.code for failure in result.failure_nodes} == {
-        "missing_step_dag"
-    }
+    assert {failure.code for failure in result.failure_nodes} == {"missing_step_dag"}
 
 
 def test_step_dag_rejects_pipeline_without_terminal_outcome() -> None:
@@ -211,9 +214,7 @@ def test_step_dag_rejects_pipeline_without_terminal_outcome() -> None:
     )
 
     assert not result.passed
-    assert "missing_terminal_outcome" in {
-        failure.code for failure in result.failure_nodes
-    }
+    assert "missing_terminal_outcome" in {failure.code for failure in result.failure_nodes}
 
 
 def test_step_dag_grader_reports_cycles_and_failed_dependency_propagation() -> None:
@@ -284,9 +285,7 @@ def test_usage_reconciliation_fails_closed_for_missing_and_mismatched_sources() 
     )
 
     assert not missing_score.passed
-    assert {failure.code for failure in missing_failures} == {
-        "missing_budget_usage"
-    }
+    assert {failure.code for failure in missing_failures} == {"missing_budget_usage"}
     assert not mismatch_score.passed
     assert {failure.code for failure in mismatch_failures} == {
         "total_tokens_mismatch",
@@ -338,11 +337,11 @@ def test_zero_call_usage_still_requires_clean_budget_lifecycle() -> None:
 
 
 def test_passed_trial_cannot_contain_failed_scores() -> None:
-    conversion = convert_workflow_eval_spec(WorkflowEvalSpec(name="trial"))
+    compiled_case = compile_workflow_eval_case(WorkflowEvalSpec(name="trial"))
 
     with pytest.raises(ValidationError, match="cannot contain failures"):
         WorkflowEvalTrial(
-            manifest=conversion.manifest,
+            manifest=compiled_case.manifest,
             session_id="run-1",
             status="passed",
             scores=[WorkflowEvalScore(name="contract", value=0.0, passed=False)],
@@ -360,9 +359,9 @@ def test_hard_gate_combines_dag_and_usage_without_an_llm_grader() -> None:
         },
         available_evidence_refs={"evidence:1"},
     )
-    conversion = convert_workflow_eval_spec(WorkflowEvalSpec(name="trial"))
+    compiled_case = compile_workflow_eval_case(WorkflowEvalSpec(name="trial"))
     trial = WorkflowEvalTrial(
-        manifest=conversion.manifest,
+        manifest=compiled_case.manifest,
         session_id="run-1",
         status="passed" if result.passed else "failed",
         usage=_matching_usage(),

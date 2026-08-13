@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import closing
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -79,23 +79,85 @@ class QueryTimeout(TimeoutError):
 
 
 class DuckDBQueryEngine:
-    def __init__(self, *, max_rows: int = 10_000) -> None:
+    def __init__(
+        self,
+        *,
+        max_rows: int = 10_000,
+        database: Path | str | None = None,
+        trusted_csv_ingest: bool = False,
+    ) -> None:
         self.max_rows = max_rows
         self._connection = duckdb.connect(
+            str(database) if database is not None else ":memory:",
             config={
-                "enable_external_access": False,
+                # File access exists only during a trusted construction phase.
+                # ``execute_select`` refuses to run until ``seal`` closes it.
+                "enable_external_access": trusted_csv_ingest,
                 "allow_unsigned_extensions": False,
+                # DuckDB may spill trusted ingestion/aggregations to its private
+                # database directory instead of competing with pandas for the
+                # process-wide 2 GiB Auto-EDA budget.
+                "memory_limit": "512MB",
+                "threads": 2,
             }
         )
+        self._trusted_csv_ingest = trusted_csv_ingest
+        self._sealed = not trusted_csv_ingest
 
     def register_frame(self, name: str, frame: pd.DataFrame) -> None:
         """Register an in-memory frame as a queryable view (no filesystem access)."""
         self._connection.register(_safe_relation_name(name), frame)
 
+    def has_relation(self, name: str) -> bool:
+        """True when a table or registered view answers to this relation name.
+
+        Lets catalog-backed callers skip re-registering pandas frames: DuckDB
+        pins every registered frame until the connection dies, which defeats
+        the one-table frame pool (2026-08-12 review, F2).
+        """
+        row = self._connection.execute(
+            "select count(*) from information_schema.tables where table_name = ?",
+            [_safe_relation_name(name)],
+        ).fetchone()
+        return bool(row and row[0])
+
     def register_csv(self, name: str, path: Path | str, frame: pd.DataFrame | None = None) -> None:
         """Register a dataset."""
         loaded = frame if frame is not None else pd.read_csv(Path(path))
         self.register_frame(name, loaded)
+
+    def register_trusted_csv(
+        self,
+        name: str,
+        path: Path | str,
+        *,
+        dtype: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        """Materialize one trusted CSV into the engine's private database.
+
+        This is intentionally distinct from user SQL.  The engine cannot
+        execute any SELECT while the construction capability is open, and the
+        resulting table remains queryable after filesystem access is disabled.
+        ``dtype`` carries the loader's identifier string-forcing so SQL and
+        pandas agree on what kind of value a column holds.
+        """
+        if not self._trusted_csv_ingest or self._sealed:
+            raise RuntimeError("Trusted CSV ingest is not available on this engine.")
+        source = str(Path(path).resolve())
+        relation = (
+            self._connection.from_csv_auto(source, dtype=dict(dtype))
+            if dtype
+            else self._connection.from_csv_auto(source)
+        )
+        columns = [str(column) for column in relation.columns]
+        relation.create(_safe_relation_name(name))
+        return columns
+
+    def seal(self) -> None:
+        if self._sealed:
+            return
+        self._connection.execute("set enable_external_access=false")
+        self._sealed = True
 
     def execute_select(
         self,
@@ -103,6 +165,8 @@ class DuckDBQueryEngine:
         *,
         cancellation: CancellationToken | None = None,
     ) -> pd.DataFrame:
+        if not self._sealed:
+            raise RuntimeError("Query engine must be sealed before executing SQL.")
         cancellation = cancellation or current_cancellation_token()
         self._validate(sql)
         if cancellation is not None:
@@ -122,6 +186,8 @@ class DuckDBQueryEngine:
         return result
 
     def dry_run(self, sql: str) -> None:
+        if not self._sealed:
+            raise RuntimeError("Query engine must be sealed before executing SQL.")
         statement = validate_select_statement(sql)
         try:
             self._connection.execute(f"EXPLAIN {statement}").fetchall()
@@ -230,6 +296,15 @@ def _sql_code_tokens(statement: str) -> list[tuple[str, str]]:
             tokens.append(("punctuation", char))
         index += 1
     return tokens
+
+
+def sql_code_tokens(statement: str) -> tuple[tuple[str, str], ...]:
+    """Expose the validated scanner's code-only token stream to SQL guards.
+
+    Literal and comment contents are deliberately absent, so consumers cannot
+    accidentally treat prompt text embedded in SQL data as executable lineage.
+    """
+    return tuple(_sql_code_tokens(statement))
 
 
 def _end_of_sql_quote(

@@ -139,6 +139,9 @@ def test_runner_build_llm_wraps_offline_and_live_clients_from_scope(
 ) -> None:
     provider = OfflineLLMClient()
     monkeypatch.setattr(runner, "create_llm_client", lambda _settings: provider)
+    # The env path fails closed without explicit provider config; this test
+    # is about cancellation wrapping, so configure one hermetically.
+    monkeypatch.setenv("EDA_LLM_PROVIDER", "deepseek")
     cancellation = CancellationContext()
 
     with cancellation_scope(cancellation):

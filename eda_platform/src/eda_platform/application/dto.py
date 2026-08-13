@@ -1271,11 +1271,13 @@ class SessionMetricsView(BaseModel):
     """Trace & cost rollup. `source` is "artifact" when the run persisted a
     SessionMetrics artifact, "aggregated" when it was recomputed from trace events."""
 
-    schema_version: int = 6
+    schema_version: int = 7
     session_id: str
     source: str
     llm_calls: int = 0
     tool_calls: int = 0
+    trace_tool_calls: int = 0
+    artifact_tool_calls: int = 0
     total_tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -1309,6 +1311,8 @@ class SessionMetricsView(BaseModel):
     event_count: int = 0
     trace_status: Literal["verified", "unverifiable"] = "verified"
     failures_count: int = 0
+    trace_failures_count: int = 0
+    question_failures_count: int = 0
     findings_count: int = 0
     report_gate_verdict: str | None = None
     publication_readiness: PublicationReadiness = "draft"

@@ -52,6 +52,65 @@ class LoadedDataset:
     frame: pd.DataFrame
 
 
+class DatasetFramePool:
+    """A one-table LRU used by lazy multi-stage consumers."""
+
+    def __init__(self) -> None:
+        self._dataset_id: str | None = None
+        self._loaded: LoadedDataset | None = None
+
+    def get(self, source: DatasetSource) -> LoadedDataset:
+        if self._dataset_id != source.record.dataset_id or self._loaded is None:
+            self._loaded = source.materialize()
+            self._dataset_id = source.record.dataset_id
+        return self._loaded
+
+    def clear(self) -> None:
+        self._loaded = None
+        self._dataset_id = None
+
+
+class DatasetSource(LoadedDataset):
+    """A lightweight, reloadable dataset reference.
+
+    It deliberately subclasses ``LoadedDataset`` so existing analysis seams can
+    accept it, while its ``frame`` property never retains a DataFrame.  Callers
+    that need more than one access should use :meth:`materialize` once and drop
+    that value at the end of the table's lifecycle.
+    """
+
+    _frame_pool: DatasetFramePool | None
+
+    def __init__(
+        self,
+        record: DatasetRecord,
+        *,
+        frame_pool: DatasetFramePool | None = None,
+    ) -> None:
+        object.__setattr__(self, "record", record)
+        object.__setattr__(self, "_frame_pool", frame_pool)
+
+    @property
+    def frame(self) -> pd.DataFrame:  # type: ignore[override]
+        pool = self._frame_pool
+        return (pool.get(self) if pool is not None else self.materialize()).frame
+
+    def materialize(
+        self,
+        *,
+        cancel_check: Callable[[], object] | None = None,
+    ) -> LoadedDataset:
+        return load_csv(
+            self.record.path,
+            dataset_id=self.record.dataset_id,
+            content_hash=self.record.content_hash,
+            cancel_check=cancel_check,
+        )
+
+    def __repr__(self) -> str:
+        return f"DatasetSource(record={self.record!r})"
+
+
 def sniff_encoding(sample: bytes) -> str:
     for encoding in _ENCODING_CANDIDATES:
         try:
@@ -109,6 +168,49 @@ def load_csv(
         delimiter=delimiter,
     )
     return LoadedDataset(record=record, frame=frame)
+
+
+def defer_csv(
+    path: Path | str,
+    *,
+    dataset_id: str | None = None,
+    content_hash: str | None = None,
+    cancel_check: Callable[[], object] | None = None,
+    frame_pool: DatasetFramePool | None = None,
+) -> DatasetSource:
+    """Describe a CSV without constructing its full in-memory DataFrame."""
+    source = Path(path)
+    encoding, delimiter = _sniff(source)
+    actual_content_hash = content_hash or hash_file(
+        source,
+        cancel_check=cancel_check,
+    )
+    return DatasetSource(
+        DatasetRecord(
+            dataset_id=dataset_id or f"ds_{actual_content_hash}",
+            name=source.name,
+            path=source,
+            content_hash=actual_content_hash,
+            encoding=encoding,
+            delimiter=delimiter,
+        ),
+        frame_pool=frame_pool,
+    )
+
+
+def duckdb_identifier_dtypes(path: Path | str) -> dict[str, str]:
+    """DuckDB dtype overrides matching the pandas loader's string forcing.
+
+    Without this, `store_code` is a string in every profile and an integer in
+    every SQL answer over the same file (F3, 2026-08-12 review).
+    """
+    source = Path(path)
+    try:
+        encoding, delimiter = _sniff(source)
+    except (OSError, UnicodeDecodeError):
+        return {}
+    forced = _lexical_string_dtypes(source, encoding=encoding, delimiter=delimiter)
+    return dict.fromkeys(forced, "VARCHAR") if forced else {}
 
 
 def read_csv_columns(path: Path | str) -> list[str]:

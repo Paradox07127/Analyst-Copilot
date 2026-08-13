@@ -104,6 +104,20 @@
         "expected_units": {"row_count": "count", "gmv_total": "currency"}
       },
       "produced_units": {"row_count": "count", "gmv_total": "BRL"}
+    },
+    {
+      "question_id": "q_eval_prediction_proxy",
+      "question": "Can this SQL rate proxy answer the prediction question?",
+      "dataset_file": "contract_abstention.csv",
+      "sql_template": "SELECT COUNT(*) AS row_count, 1.0 AS observed_rate FROM {{relation}}",
+      "answer_contract": {
+        "kind": "method",
+        "required_method_id": "ml_baseline",
+        "required_artifact_types": ["ModelCard"],
+        "required_tool_names": ["run_baseline_model"],
+        "requires_complete_result": true,
+        "abstention_code": "method_contract_failed"
+      }
     }
   ],
   "expected_dataset_count": 1,
@@ -141,6 +155,10 @@
     {
       "question_pattern": "unit-verified concentration fraction",
       "allowed_codes": ["metric_unit_mismatch"]
+    },
+    {
+      "question_pattern": "SQL rate proxy answer the prediction",
+      "allowed_codes": ["method_contract_failed"]
     }
   ],
   "required_executive_summary_patterns": [],

@@ -34,6 +34,7 @@ from eda_platform.application.dto import (
     SettingsView,
 )
 from eda_platform.core.config import default_workspace, require_absolute_workspace
+from eda_platform.core.endpoint_security import EndpointPolicyError, validate_llm_base_url
 from eda_platform.core.env import (
     load_llm_settings_from_env_file,
     load_provider_api_keys_from_env_file,
@@ -537,6 +538,11 @@ def _apply_patch(
         # supplies a replacement.
         if patch.api_key is None:
             api_key = ""
+    # Endpoint identity is part of the credential scope even when the provider
+    # enum stays the same. Repointing must require the caller to supply the key
+    # again; otherwise a saved bearer token can silently cross origins.
+    if base_url.rstrip("/") != current.base_url.rstrip("/") and patch.api_key is None:
+        api_key = ""
 
     temperature = _bounded_float(
         "temperature", current.temperature, patch.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE
@@ -573,8 +579,10 @@ def _apply_patch(
     # before its model and base URL are known. `_status` reports the gap as
     # "incomplete" and `create_llm_client` refuses at use time. A malformed
     # value, unlike a missing one, is still rejected here.
-    if base_url and not base_url.startswith(("http://", "https://")):
-        raise SettingsValidationError("base_url must start with http:// or https://.")
+    try:
+        validate_llm_base_url(provider, base_url)
+    except EndpointPolicyError as exc:
+        raise SettingsValidationError(str(exc)) from exc
     # An unverified model is deliberately NOT rejected here. It cannot be: a
     # self-hosted model's id is whatever the operator named it, so no catalog
     # can enumerate the legal values. `_status` reports it as unverified and
@@ -769,6 +777,8 @@ def _env_overlay(settings: LLMSettings, report_model: str = "") -> dict[str, str
     }
     if settings.api_key:
         overlay["EDA_LLM_API_KEY"] = settings.api_key
+    if settings.organization:
+        overlay["EDA_LLM_ORGANIZATION"] = settings.organization
     # Absent, not empty: an empty model id would be sent to the endpoint.
     if report_model:
         overlay["EDA_REPORT_LLM_MODEL"] = report_model

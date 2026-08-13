@@ -38,7 +38,6 @@ from eda_platform.core.meaning_proposals import MeaningProposal
 from eda_platform.core.methods import MethodGateContext, evaluate_feasibility
 from eda_platform.core.process_metrics import PeakRssMeasurement, process_peak_rss
 from eda_platform.core.provenance import env_digest
-from eda_platform.core.query import DuckDBQueryEngine
 from eda_platform.core.semantic import (
     JoinWhitelist,
     join_whitelist_path,
@@ -94,7 +93,12 @@ from eda_platform.tools.domain_metrics import applicable_metrics
 from eda_platform.tools.er_diagram import build_er_diagram
 from eda_platform.tools.evidence import PayloadPolicy
 from eda_platform.tools.handoff import create_eda_handoff_artifact
-from eda_platform.tools.loader import LoadedDataset, load_csv
+from eda_platform.tools.loader import (
+    DatasetFramePool,
+    DatasetSource,
+    LoadedDataset,
+    defer_csv,
+)
 from eda_platform.tools.ml_baseline import create_model_card_artifact, run_baseline_model
 from eda_platform.tools.pii import mask_profile_artifact, pii_labels, tag_pii_columns
 from eda_platform.tools.profiler import profile_dataset
@@ -115,6 +119,7 @@ from eda_platform.tools.resource_preflight import (
     EdaResourceLimitError,
     preflight_csv_resources,
 )
+from eda_platform.tools.sql_runner import build_catalog
 from eda_platform.tools.stat_tests import (
     create_anova_boxplot_artifact,
     create_stat_test_artifact,
@@ -168,12 +173,9 @@ def validate_relationship_candidate_on_demand(
             f"missing dataset id(s): {', '.join(missing_ids)}"
         )
 
-    engine = DuckDBQueryEngine()
-    for loaded in result.loaded_datasets:
-        raise_if_cancelled(cancel_check, operation="relationship validation")
-        engine.register_frame(loaded.record.dataset_id, loaded.frame)
+    catalog = build_catalog(result.loaded_datasets, relation_key="dataset_id")
     raise_if_cancelled(cancel_check, operation="relationship validation")
-    validated = validate_relationships([candidate], engine)
+    validated = validate_relationships([candidate], catalog.engine)
     raise_if_cancelled(cancel_check, operation="relationship validation")
     if not validated.validations:
         raise ValueError(f"Relationship is not eligible for validation: {label}")
@@ -369,6 +371,16 @@ class ProfileDatasetStep:
         self.loaded = loaded
         self.parent_ids = parent_ids or []
 
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return stable_hash(
+            {
+                "dataset_id": self.loaded.record.dataset_id,
+                "content_hash": self.loaded.record.content_hash,
+                "parents": self.parent_ids,
+            }
+        )
+
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile = profile_dataset(
             self.loaded,
@@ -394,6 +406,10 @@ class ScanQualityStep:
 
     def __init__(self, profile_artifact_id: str) -> None:
         self.profile_artifact_id = profile_artifact_id
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return self.profile_artifact_id
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile_artifact = ctx.store.get_artifact(
@@ -430,6 +446,16 @@ class BuildQualityContextStep:
         self.loaded = loaded
         self.profile_artifact_id = profile_artifact_id
         self.quality_artifact_id = quality_artifact_id
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return stable_hash(
+            {
+                "dataset_id": self.loaded.record.dataset_id,
+                "profile": self.profile_artifact_id,
+                "quality": self.quality_artifact_id,
+            }
+        )
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile_artifact = ctx.store.get_artifact(
@@ -512,6 +538,15 @@ class CreateChartSpecsStep:
         self.loaded = loaded
         self.profile_artifact_id = profile_artifact_id
 
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return stable_hash(
+            {
+                "dataset_id": self.loaded.record.dataset_id,
+                "profile": self.profile_artifact_id,
+            }
+        )
+
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile_artifact = ctx.store.get_artifact(
             self.profile_artifact_id,
@@ -540,6 +575,15 @@ class RecordRawDatasetStep:
 
     def __init__(self, loaded: LoadedDataset) -> None:
         self.loaded = loaded
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return stable_hash(
+            {
+                "dataset_id": self.loaded.record.dataset_id,
+                "content_hash": self.loaded.record.content_hash,
+            }
+        )
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile = profile_dataset(
@@ -595,6 +639,15 @@ class CreateAnalysisTablesStep:
     def __init__(self, loaded: LoadedDataset, profile_artifact_id: str) -> None:
         self.loaded = loaded
         self.profile_artifact_id = profile_artifact_id
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return stable_hash(
+            {
+                "dataset_id": self.loaded.record.dataset_id,
+                "profile": self.profile_artifact_id,
+            }
+        )
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile_artifact = ctx.store.get_artifact(
@@ -657,6 +710,17 @@ class SessionStatTestsStep:
         self.profile_artifact_id = profile_artifact_id
         self.spec = spec
         self.comparison_count = comparison_count
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return stable_hash(
+            {
+                "dataset_id": self.loaded.record.dataset_id,
+                "profile": self.profile_artifact_id,
+                "spec": self.spec,
+                "comparison_count": self.comparison_count,
+            }
+        )
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile_artifact = ctx.store.get_artifact(
@@ -744,6 +808,17 @@ class SessionBaselineModelStep:
         self.profile_artifact_id = profile_artifact_id
         self.target_column = target_column
         self.time_column = time_column
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        del ctx
+        return stable_hash(
+            {
+                "dataset_id": self.loaded.record.dataset_id,
+                "profile": self.profile_artifact_id,
+                "target": self.target_column,
+                "time": self.time_column,
+            }
+        )
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile_artifact = ctx.store.get_artifact(
@@ -837,11 +912,11 @@ def _build_relationship_artifacts(
     project_id: str,
     session_id: str,
 ) -> tuple[list[Artifact], RelationshipCandidateSet, RelationshipValidationSet]:
-    engine = DuckDBQueryEngine()
-    for loaded in loaded_datasets:
-        engine.register_frame(loaded.record.dataset_id, loaded.frame)
-    candidates = discover_relationship_candidates(loaded_datasets, engine)
-    validations = validate_relationships(eager_validation_candidates(candidates), engine)
+    catalog = build_catalog(loaded_datasets, relation_key="dataset_id")
+    candidates = discover_relationship_candidates(loaded_datasets, catalog.engine)
+    validations = validate_relationships(
+        eager_validation_candidates(candidates), catalog.engine
+    )
     diagram = build_er_diagram(candidates, validations)
     candidate_payload = candidates.model_dump(mode="json")
     validation_payload = validations.model_dump(mode="json")
@@ -1181,6 +1256,15 @@ class DiscoverQuestionsStep:
             join_whitelist=whitelist,
             semantic_seeds=seeds,
         )
+        if llm_result.error is not None:
+            # Carried on the artifact so the report can disclose the narrowed
+            # coverage; the trace event above is invisible to report readers.
+            candidates = candidates.model_copy(
+                update={
+                    "llm_route_skipped": True,
+                    "llm_route_error": llm_result.error,
+                }
+            )
         if candidates.template_backstop_used:
             ctx.emit_trace(
                 TraceEvent(
@@ -1390,6 +1474,18 @@ class ExecuteTopQuestionsStep:
         confirmed_joins = exec_whitelist.confirmed_labels(current_dataset_ids)
         artifacts: list[Artifact] = []
         parent_ids = [self.question_candidate_artifact_id, *self.relationship_artifact_ids]
+        template_catalog = (
+            build_catalog(self.loaded_datasets, relation_key="dataset_id")
+            if any(candidate.origin != "llm" for candidate in selected)
+            else None
+        )
+        llm_catalog = (
+            build_catalog(self.loaded_datasets)
+            if self.llm is not None
+            and not is_offline_client(self.llm)
+            and any(candidate.origin == "llm" for candidate in selected)
+            else None
+        )
         for candidate in selected:
             # Disclose machine-confirmed joins in result risks.
             if candidate.required_relations:
@@ -1404,6 +1500,9 @@ class ExecuteTopQuestionsStep:
                 parent_ids=parent_ids,
                 llm=self.llm,
                 confirmed_joins=confirmed_joins,
+                catalog=(
+                    llm_catalog if candidate.origin == "llm" else template_catalog
+                ),
             )
             artifacts.extend(produced)
             qexec = next(
@@ -1799,47 +1898,38 @@ def run_auto_eda(
         )
 
     ingest_started = perf_counter()
-    loaded_datasets = [
-        _copy_and_load_upload(
-            Path(file_path), workspace_path, project_id, cancel_check=cancel_check
+    dataset_frame_pool = DatasetFramePool()
+    dataset_sources = [
+        _copy_upload_source(
+            Path(file_path),
+            workspace_path,
+            project_id,
+            cancel_check=cancel_check,
+            frame_pool=dataset_frame_pool,
         )
         for file_path in file_paths
     ]
-    raw_loaded_datasets: list[LoadedDataset] = []
+    raw_dataset_sources: list[DatasetSource] = []
     if raw_file_paths is not None:
         raw_paths = list(raw_file_paths)
-        if len(raw_paths) != len(loaded_datasets):
+        if len(raw_paths) != len(dataset_sources):
             raise ValueError(
                 "raw_file_paths must align with file_paths: "
-                f"got {len(raw_paths)} raw path(s) for {len(loaded_datasets)} dataset(s)."
+                f"got {len(raw_paths)} raw path(s) for {len(dataset_sources)} dataset(s)."
             )
-        raw_loaded_datasets = [
-            _copy_and_load_upload(
+        raw_dataset_sources = [
+            _copy_upload_source(
                 Path(file_path), workspace_path, project_id, cancel_check=cancel_check
             )
             for file_path in raw_paths
         ]
-    analysis_frame_bytes = [
-        int(loaded.frame.memory_usage(index=True, deep=True).sum()) for loaded in loaded_datasets
-    ]
-    raw_frame_bytes = [
-        int(loaded.frame.memory_usage(index=True, deep=True).sum())
-        for loaded in raw_loaded_datasets
-    ]
-    preflight = _verify_resource_preflight(
-        preflight,
-        loaded_datasets,
-        raw_loaded_datasets,
-        analysis_frame_bytes=analysis_frame_bytes,
-        raw_frame_bytes=raw_frame_bytes,
-    )
     manifest = SessionManifest(
         session_id=actual_session_id,
         project_id=project_id,
-        input_hashes={loaded.record.name: loaded.record.content_hash for loaded in loaded_datasets},
+        input_hashes={source.record.name: source.record.content_hash for source in dataset_sources},
         code_version="auto-eda",
         model_versions=manifest_model_versions(llm),
-        title=build_run_title([loaded.record.name for loaded in loaded_datasets]) or None,
+        title=build_run_title([source.record.name for source in dataset_sources]) or None,
     )
     if previous_manifest is not None and previous_manifest.input_hashes != manifest.input_hashes:
         store.reset_session_outputs(project_id=project_id, session_id=actual_session_id)
@@ -1851,61 +1941,26 @@ def run_auto_eda(
             budget=ctx.session_budget,
             session_dir=store.session_dir(project_id, actual_session_id),
         )
-    store.save_artifact(
-        _resource_preflight_artifact(preflight, project_id=project_id, session_id=actual_session_id)
-    )
     store.write_manifest(manifest)
     ctx.emit_trace(
         TraceEvent(
             session_id=actual_session_id,
-            event_type="eda_inputs_loaded",
-            name="load_inputs",
+            event_type="eda_inputs_staged",
+            name="stage_inputs",
             started_at=run_started_at,
             finished_at=datetime.now(UTC),
             summary={
-                "ingest_duration_seconds": round(perf_counter() - ingest_started, 6),
-                "analysis": _resource_footprint(loaded_datasets, analysis_frame_bytes).model_dump(
-                    mode="json"
-                ),
-                "raw_lineage": _resource_footprint(raw_loaded_datasets, raw_frame_bytes).model_dump(
-                    mode="json"
-                ),
+                "staging_duration_seconds": round(perf_counter() - ingest_started, 6),
+                "analysis_dataset_count": len(dataset_sources),
+                "raw_lineage_dataset_count": len(raw_dataset_sources),
                 "unique_file_bytes": _unique_loaded_file_bytes(
-                    [*loaded_datasets, *raw_loaded_datasets]
+                    [*dataset_sources, *raw_dataset_sources]
                 ),
             },
         )
     )
-    if preflight.status != "accepted":
-        _emit_auto_eda_resource_trace(
-            ctx,
-            driver_started=driver_started,
-            baseline_rss=baseline_rss,
-            preprocessing_duration_seconds=preprocessing_duration_seconds,
-        )
-        if preflight.status == "rejected":
-            store.mark_session_status(project_id, actual_session_id, "failed")
-            raise EdaResourceLimitError(preflight)
-        final_artifacts = _finalize_agent_artifacts(
-            store,
-            project_id=project_id,
-            session_id=actual_session_id,
-            manifest=manifest,
-            execution_fingerprint=ctx.execution_fingerprint,
-            emit_trace=ctx.emit_trace,
-        )
-        store.mark_session_status(project_id, actual_session_id, LIMITED_SESSION_STATUS)
-        return AutoEDAResult(
-            project_id=project_id,
-            session_id=actual_session_id,
-            business_context=business_context,
-            artifacts=final_artifacts,
-            report_markdown="",
-            workspace=workspace_path,
-            loaded_datasets=[],
-        )
     effective_dataset_workers = preflight.effective_dataset_workers
-    recipes = _align_precleaning(precleaning, len(loaded_datasets))
+    recipes = _align_precleaning(precleaning, len(dataset_sources))
     ctx.execution_fingerprint = stable_hash(
         {
             "execution_schema_version": 1,
@@ -1914,14 +1969,14 @@ def run_auto_eda(
                     "name": loaded.record.name,
                     "content_hash": loaded.record.content_hash,
                 }
-                for loaded in loaded_datasets
+                for loaded in dataset_sources
             ],
             "raw_inputs": [
                 {
                     "name": loaded.record.name,
                     "content_hash": loaded.record.content_hash,
                 }
-                for loaded in raw_loaded_datasets
+                for loaded in raw_dataset_sources
             ],
             "code_version": manifest.code_version,
             "llm": llm_execution_fingerprint(llm),
@@ -1954,12 +2009,29 @@ def run_auto_eda(
     # of the corresponding cleaned dataset's profile, so the evidence chain
     # records what was removed and why.
     raw_artifacts: list[Artifact] = []
-    if raw_loaded_datasets:
-        raw_result = run_pipeline(
-            [RecordRawDatasetStep(loaded) for loaded in raw_loaded_datasets],
-            ctx,
+    raw_frame_bytes: list[int] = []
+    raw_rows: list[int] = []
+    raw_columns: list[int] = []
+    for source in raw_dataset_sources:
+        loaded = source.materialize(
+            cancel_check=(
+                None
+                if cancel_check is None
+                else lambda: raise_if_cancelled(
+                    cancel_check, operation="raw input loading"
+                )
+            )
         )
-        raw_artifacts = raw_result.artifacts
+        raw_frame_bytes.append(
+            int(loaded.frame.memory_usage(index=True, deep=True).sum())
+        )
+        raw_rows.append(len(loaded.frame))
+        raw_columns.append(len(loaded.frame.columns))
+        raw_artifacts.extend(
+            run_pipeline([RecordRawDatasetStep(loaded)], ctx).artifacts
+        )
+        del loaded
+
     cleaning_recipe_result = run_pipeline(
         [EmitCleaningRecipeStep(recipe) for recipe in recipes if recipe is not None],
         ctx,
@@ -1969,102 +2041,191 @@ def run_auto_eda(
         [next(recipe_artifacts).id] if recipe is not None else [] for recipe in recipes
     ]
 
-    profile_result = run_pipeline(
-        [
-            ProfileDatasetStep(loaded, parent_ids=parent_ids)
-            for loaded, parent_ids in zip(loaded_datasets, profile_parent_ids, strict=True)
-        ],
-        ctx,
-        max_workers=effective_dataset_workers,
-    )
-    profile_artifacts = [
-        artifact
-        for artifact in profile_result.artifacts
-        if artifact.type is ArtifactType.DATASET_PROFILE
-    ]
-    profile_ids = [artifact.id for artifact in profile_artifacts]
-
-    quality_result = run_pipeline(
-        [ScanQualityStep(artifact_id) for artifact_id in profile_ids],
-        ctx,
-        max_workers=effective_dataset_workers,
-    )
-    quality_ids = [artifact.id for artifact in quality_result.artifacts]
-    quality_context_result = run_pipeline(
-        [
-            BuildQualityContextStep(loaded, profile_id, quality_id)
-            for loaded, profile_id, quality_id in zip(
-                loaded_datasets, profile_ids, quality_ids, strict=True
-            )
-        ],
-        ctx,
-        max_workers=effective_dataset_workers,
-    )
-    quality_context_ids = [artifact.id for artifact in quality_context_result.artifacts]
-    chart_result = run_pipeline(
-        [
-            CreateChartSpecsStep(loaded, artifact_id)
-            for loaded, artifact_id in zip(loaded_datasets, profile_ids, strict=True)
-        ],
-        ctx,
-        max_workers=effective_dataset_workers,
-    )
-    analysis_result = run_pipeline(
-        [
-            CreateAnalysisTablesStep(loaded, artifact_id)
-            for loaded, artifact_id in zip(loaded_datasets, profile_ids, strict=True)
-        ],
-        ctx,
-        max_workers=effective_dataset_workers,
-    )
-    # W-2 revised: a Bonferroni family is a set of tests serving one inferential
-    # question. Auto-EDA runs at most one test per dataset, and tests on
-    # unrelated datasets are not a family, so no cross-dataset adjustment is
-    # applied; every auto result instead carries an explicit
-    # exploratory_auto_selection warning.
-    profiles = [DatasetProfile.model_validate(artifact.payload) for artifact in profile_artifacts]
-    stat_specs = [
-        _select_stat_test(loaded, profile)
-        for loaded, profile in zip(loaded_datasets, profiles, strict=True)
-    ]
-    stat_plan = [
-        (loaded, artifact_id, spec)
-        for loaded, artifact_id, spec in zip(loaded_datasets, profile_ids, stat_specs, strict=True)
-        if spec is not None
-    ]
-    stat_result = run_pipeline(
-        [
-            SessionStatTestsStep(loaded, artifact_id, spec)
-            for loaded, artifact_id, spec in stat_plan
-        ],
-        ctx,
-    )
+    profile_step_artifacts: list[Artifact] = []
+    profile_artifacts: list[Artifact] = []
+    quality_artifacts: list[Artifact] = []
+    quality_context_artifacts: list[Artifact] = []
+    chart_artifacts: list[Artifact] = []
+    analysis_artifacts: list[Artifact] = []
+    stat_artifacts: list[Artifact] = []
     model_artifacts: list[Artifact] = []
-    if ml_target_column:
-        # W-3: only model datasets that actually contain the target column, rather
-        # than blindly applying one target name to every table.
-        model_result = run_pipeline(
-            [
-                SessionBaselineModelStep(
-                    loaded,
-                    artifact_id,
-                    target_column=ml_target_column,
-                    time_column=ml_time_column,
+    analysis_frame_bytes: list[int] = []
+    analysis_rows: list[int] = []
+    analysis_columns: list[int] = []
+
+    # One table owns the full-frame slot from load through its last core EDA
+    # operation.  Only typed artifacts and DatasetSource handles survive the
+    # loop, making peak memory a function of the largest table rather than the
+    # sum of every table in the run.
+    for source, parent_ids in zip(
+        dataset_sources, profile_parent_ids, strict=True
+    ):
+        loaded = source.materialize(
+            cancel_check=(
+                None
+                if cancel_check is None
+                else lambda: raise_if_cancelled(
+                    cancel_check, operation="analysis input loading"
                 )
-                for loaded, artifact_id in zip(loaded_datasets, profile_ids, strict=True)
-                if ml_target_column in loaded.frame.columns
-            ],
-            ctx,
+            )
         )
-        model_artifacts = model_result.artifacts
+        analysis_frame_bytes.append(
+            int(loaded.frame.memory_usage(index=True, deep=True).sum())
+        )
+        analysis_rows.append(len(loaded.frame))
+        analysis_columns.append(len(loaded.frame.columns))
+
+        produced_profiles = run_pipeline(
+            [ProfileDatasetStep(loaded, parent_ids=parent_ids)], ctx
+        ).artifacts
+        profile_step_artifacts.extend(produced_profiles)
+        profile_artifact = next(
+            artifact
+            for artifact in produced_profiles
+            if artifact.type is ArtifactType.DATASET_PROFILE
+        )
+        profile_artifacts.append(profile_artifact)
+
+        produced_quality = run_pipeline(
+            [ScanQualityStep(profile_artifact.id)], ctx
+        ).artifacts
+        quality_artifact = produced_quality[0]
+        quality_artifacts.extend(produced_quality)
+
+        quality_context_artifacts.extend(
+            run_pipeline(
+                [
+                    BuildQualityContextStep(
+                        loaded, profile_artifact.id, quality_artifact.id
+                    )
+                ],
+                ctx,
+            ).artifacts
+        )
+        chart_artifacts.extend(
+            run_pipeline(
+                [CreateChartSpecsStep(loaded, profile_artifact.id)], ctx
+            ).artifacts
+        )
+        analysis_artifacts.extend(
+            run_pipeline(
+                [CreateAnalysisTablesStep(loaded, profile_artifact.id)], ctx
+            ).artifacts
+        )
+
+        profile = DatasetProfile.model_validate(profile_artifact.payload)
+        stat_spec = _select_stat_test(loaded, profile)
+        if stat_spec is not None:
+            stat_artifacts.extend(
+                run_pipeline(
+                    [SessionStatTestsStep(loaded, profile_artifact.id, stat_spec)],
+                    ctx,
+                ).artifacts
+            )
+        if ml_target_column and ml_target_column in loaded.frame.columns:
+            model_artifacts.extend(
+                run_pipeline(
+                    [
+                        SessionBaselineModelStep(
+                            loaded,
+                            profile_artifact.id,
+                            target_column=ml_target_column,
+                            time_column=ml_time_column,
+                        )
+                    ],
+                    ctx,
+                ).artifacts
+            )
+        del loaded
+
+    profile_ids = [artifact.id for artifact in profile_artifacts]
+    quality_ids = [artifact.id for artifact in quality_artifacts]
+    quality_context_ids = [artifact.id for artifact in quality_context_artifacts]
+
+    preflight = _verify_resource_preflight(
+        preflight,
+        dataset_sources,
+        raw_dataset_sources,
+        analysis_frame_bytes=analysis_frame_bytes,
+        raw_frame_bytes=raw_frame_bytes,
+        analysis_rows=analysis_rows,
+        raw_rows=raw_rows,
+        analysis_columns=analysis_columns,
+        raw_columns=raw_columns,
+    )
+    store.save_artifact(
+        _resource_preflight_artifact(
+            preflight, project_id=project_id, session_id=actual_session_id
+        )
+    )
+    ctx.emit_trace(
+        TraceEvent(
+            session_id=actual_session_id,
+            event_type="eda_inputs_loaded",
+            name="load_inputs",
+            started_at=run_started_at,
+            finished_at=datetime.now(UTC),
+            summary={
+                "ingest_duration_seconds": round(perf_counter() - ingest_started, 6),
+                "analysis": _resource_footprint(
+                    dataset_sources,
+                    analysis_frame_bytes,
+                    rows=analysis_rows,
+                    columns=analysis_columns,
+                ).model_dump(mode="json"),
+                "raw_lineage": _resource_footprint(
+                    raw_dataset_sources,
+                    raw_frame_bytes,
+                    rows=raw_rows,
+                    columns=raw_columns,
+                ).model_dump(mode="json"),
+                "unique_file_bytes": _unique_loaded_file_bytes(
+                    [*dataset_sources, *raw_dataset_sources]
+                ),
+            },
+        )
+    )
+    if preflight.status == "limited":
+        # The operator chose `on_exceed="limited"`: keep the per-table work
+        # already done and close the session as limited, exactly like the
+        # estimate-phase limited stop. Only `rejected` may fail the session.
+        _emit_auto_eda_resource_trace(
+            ctx,
+            driver_started=driver_started,
+            baseline_rss=baseline_rss,
+            preprocessing_duration_seconds=preprocessing_duration_seconds,
+        )
+        dataset_frame_pool.clear()
+        final_artifacts = _finalize_agent_artifacts(
+            store,
+            project_id=project_id,
+            session_id=actual_session_id,
+            manifest=manifest,
+            execution_fingerprint=ctx.execution_fingerprint,
+            emit_trace=ctx.emit_trace,
+        )
+        store.mark_session_status(project_id, actual_session_id, LIMITED_SESSION_STATUS)
+        return AutoEDAResult(
+            project_id=project_id,
+            session_id=actual_session_id,
+            business_context=business_context,
+            artifacts=final_artifacts,
+            report_markdown="",
+            workspace=workspace_path,
+            loaded_datasets=[],
+        )
+    if preflight.status != "accepted":
+        store.mark_session_status(project_id, actual_session_id, "failed")
+        raise EdaResourceLimitError(preflight)
+
     relationship_artifacts: list[Artifact] = []
-    if len(loaded_datasets) >= 2 and relationship_discovery == "eager":
+    if len(dataset_sources) >= 2 and relationship_discovery == "eager":
         relationship_result = run_pipeline(
-            [DiscoverRelationshipsStep(loaded_datasets, profile_ids)],
+            [DiscoverRelationshipsStep(dataset_sources, profile_ids)],
             ctx,
         )
         relationship_artifacts = relationship_result.artifacts
-    elif len(loaded_datasets) >= 2:
+    elif len(dataset_sources) >= 2:
         ctx.emit_trace(
             TraceEvent(
                 session_id=actual_session_id,
@@ -2072,7 +2233,7 @@ def run_auto_eda(
                 name="discover_relationships",
                 finished_at=datetime.now(UTC),
                 summary={
-                    "dataset_count": len(loaded_datasets),
+                    "dataset_count": len(dataset_sources),
                     "reason": "default_on_demand_policy",
                     "trigger": "relationships_on_demand",
                 },
@@ -2082,12 +2243,12 @@ def run_auto_eda(
     core_eda_artifacts = [
         *raw_artifacts,
         *cleaning_recipe_result.artifacts,
-        *profile_result.artifacts,
-        *quality_result.artifacts,
-        *quality_context_result.artifacts,
-        *chart_result.artifacts,
-        *analysis_result.artifacts,
-        *stat_result.artifacts,
+        *profile_step_artifacts,
+        *quality_artifacts,
+        *quality_context_artifacts,
+        *chart_artifacts,
+        *analysis_artifacts,
+        *stat_artifacts,
         *model_artifacts,
         *relationship_artifacts,
     ]
@@ -2097,7 +2258,7 @@ def run_auto_eda(
         session_id=actual_session_id,
         raw_dataset_lineage={
             raw.record.dataset_id: clean.record.dataset_id
-            for raw, clean in zip(raw_loaded_datasets, loaded_datasets, strict=False)
+            for raw, clean in zip(raw_dataset_sources, dataset_sources, strict=False)
         },
     )
     store.save_artifact(handoff_artifact)
@@ -2133,15 +2294,15 @@ def run_auto_eda(
     question_result = run_pipeline(
         [
             DiscoverQuestionsStep(
-                loaded_datasets,
+                dataset_sources,
                 profile_artifact_ids=profile_ids,
                 quality_artifact_ids=quality_ids,
                 quality_context_artifact_ids=quality_context_ids,
                 analysis_artifact_ids=[
                     artifact.id
                     for artifact in [
-                        *analysis_result.artifacts,
-                        *stat_result.artifacts,
+                        *analysis_artifacts,
+                        *stat_artifacts,
                         *model_artifacts,
                     ]
                     if artifact.type is not ArtifactType.CHART_SPEC
@@ -2165,7 +2326,7 @@ def run_auto_eda(
     question_execution_result = run_pipeline(
         [
             ExecuteTopQuestionsStep(
-                loaded_datasets,
+                dataset_sources,
                 question_candidate_artifact_id=question_candidate_artifact.id,
                 relationship_artifact_ids=[artifact.id for artifact in relationship_artifacts],
                 llm=llm,
@@ -2173,16 +2334,17 @@ def run_auto_eda(
         ],
         ctx,
     )
+    dataset_frame_pool.clear()
 
     report_parent_ids = [
         artifact.id
         for artifact in [
-            *profile_result.artifacts,
-            *quality_result.artifacts,
-            *quality_context_result.artifacts,
-            *chart_result.artifacts,
-            *analysis_result.artifacts,
-            *stat_result.artifacts,
+            *profile_step_artifacts,
+            *quality_artifacts,
+            *quality_context_artifacts,
+            *chart_artifacts,
+            *analysis_artifacts,
+            *stat_artifacts,
             *model_artifacts,
             *relationship_artifacts,
             *value_map_result.artifacts,
@@ -2243,7 +2405,7 @@ def run_auto_eda(
     llm_title = _llm_session_title(
         ctx,
         llm,
-        dataset_names=[loaded.record.name for loaded in loaded_datasets],
+        dataset_names=[source.record.name for source in dataset_sources],
         business_context=business_context,
         report_artifacts=report_result.artifacts if report_result is not None else [],
     )
@@ -2278,7 +2440,7 @@ def run_auto_eda(
         artifacts=final_artifacts,
         report_markdown=report_markdown,
         workspace=workspace_path,
-        loaded_datasets=loaded_datasets,
+        loaded_datasets=list(dataset_sources),
     )
 
 
@@ -2593,17 +2755,29 @@ def _verify_resource_preflight(
     *,
     analysis_frame_bytes: Sequence[int],
     raw_frame_bytes: Sequence[int],
+    analysis_rows: Sequence[int],
+    raw_rows: Sequence[int],
+    analysis_columns: Sequence[int],
+    raw_columns: Sequence[int],
 ) -> EdaResourcePreflight:
     policy = decision.policy
     verified_estimates: list[EdaDatasetEstimate] = []
-    for index, (loaded, deep_bytes) in enumerate(zip(analysis, analysis_frame_bytes, strict=True)):
+    for index, (loaded, deep_bytes, rows, columns) in enumerate(
+        zip(
+            analysis,
+            analysis_frame_bytes,
+            analysis_rows,
+            analysis_columns,
+            strict=True,
+        )
+    ):
         source = decision.datasets[index] if index < len(decision.datasets) else None
         updates = {
             "role": "analysis",
             "name": loaded.record.name,
             "file_bytes": loaded.record.path.stat().st_size,
-            "columns": len(loaded.frame.columns),
-            "exact_rows": len(loaded.frame),
+            "columns": columns,
+            "exact_rows": rows,
             "exact_frame_deep_bytes": deep_bytes,
         }
         if source is not None:
@@ -2616,7 +2790,7 @@ def _verify_resource_preflight(
                     sample_frame_deep_bytes=0,
                     sample_serialized_bytes=0,
                     frame_expansion_ratio=0.0,
-                    estimated_rows=len(loaded.frame),
+                    estimated_rows=rows,
                     estimated_frame_deep_bytes=deep_bytes,
                 )
             )
@@ -2624,7 +2798,12 @@ def _verify_resource_preflight(
     def exact_working_set(workers: int) -> int:
         active_analysis = sum(sorted(analysis_frame_bytes, reverse=True)[:workers])
         active_raw = sum(sorted(raw_frame_bytes, reverse=True)[:workers])
-        retained = sum(analysis_frame_bytes) + sum(raw_frame_bytes)
+        retained = max(
+            max(analysis_frame_bytes, default=0),
+            max(raw_frame_bytes, default=0),
+        )
+        if decision.precleaning_enabled:
+            retained *= 2
         return ceil(
             decision.baseline_peak_rss_bytes
             + policy.held_frame_multiplier * retained
@@ -2648,15 +2827,17 @@ def _verify_resource_preflight(
 
     all_loaded = [*analysis, *raw_lineage]
     all_frame_bytes = [*analysis_frame_bytes, *raw_frame_bytes]
+    all_rows = [*analysis_rows, *raw_rows]
+    all_columns = [*analysis_columns, *raw_columns]
     file_sizes = [loaded.record.path.stat().st_size for loaded in all_loaded]
     reasons: list[str] = []
     if any(size > policy.max_single_input_bytes for size in file_sizes):
         reasons.append("single_input_bytes_exceeded")
     if _unique_loaded_file_bytes(all_loaded) > policy.max_input_bytes_total:
         reasons.append("input_bytes_total_exceeded")
-    if any(len(loaded.frame.columns) > policy.max_columns_per_dataset for loaded in all_loaded):
+    if any(columns > policy.max_columns_per_dataset for columns in all_columns):
         reasons.append("column_count_exceeded")
-    if any(len(loaded.frame) > policy.max_rows_per_dataset for loaded in all_loaded):
+    if any(rows > policy.max_rows_per_dataset for rows in all_rows):
         reasons.append("row_count_exceeded")
     if verified_working_set > policy.max_working_set_bytes:
         reasons.append("verified_working_set_exceeded")
@@ -2667,7 +2848,12 @@ def _verify_resource_preflight(
         if not [
             reason
             for reason in reasons
-            if reason not in {"memory_budget_worker_downgrade", "dataset_or_policy_worker_cap"}
+            if reason
+            not in {
+                "memory_budget_worker_downgrade",
+                "dataset_or_policy_worker_cap",
+                "streaming_dataset_lifecycle",
+            }
         ]
         else "limited"
         if policy.on_exceed == "limited"
@@ -2677,7 +2863,7 @@ def _verify_resource_preflight(
         update={
             "status": status,
             "phase": "verified",
-            "compute_mode": ("exact_in_memory" if status == "accepted" else "metadata_only"),
+            "compute_mode": ("streaming_exact" if status == "accepted" else "metadata_only"),
             "reason_codes": reasons,
             "effective_dataset_workers": workers,
             "worker_adjustment_reason": worker_reason,
@@ -2693,15 +2879,19 @@ def _verify_resource_preflight(
 
 
 def _resource_footprint(
-    datasets: Sequence[LoadedDataset], frame_bytes: Sequence[int]
+    datasets: Sequence[LoadedDataset],
+    frame_bytes: Sequence[int],
+    *,
+    rows: Sequence[int],
+    columns: Sequence[int],
 ) -> EdaDataFootprint:
     return EdaDataFootprint(
         dataset_count=len(datasets),
         file_bytes=sum(loaded.record.path.stat().st_size for loaded in datasets),
-        rows=sum(len(loaded.frame) for loaded in datasets),
-        columns=sum(len(loaded.frame.columns) for loaded in datasets),
-        max_rows=max((len(loaded.frame) for loaded in datasets), default=0),
-        max_columns=max((len(loaded.frame.columns) for loaded in datasets), default=0),
+        rows=sum(rows),
+        columns=sum(columns),
+        max_rows=max(rows, default=0),
+        max_columns=max(columns, default=0),
         frame_deep_bytes=sum(frame_bytes),
         measurement="exact" if datasets else "unavailable",
     )
@@ -2760,13 +2950,14 @@ def _align_precleaning(
     return recipes
 
 
-def _copy_and_load_upload(
+def _copy_upload_source(
     source: Path,
     workspace: Path,
     project_id: str,
     *,
     cancel_check: Callable[[], bool] | None = None,
-) -> LoadedDataset:
+    frame_pool: DatasetFramePool | None = None,
+) -> DatasetSource:
     # Stream the hash so large uploads do not inflate memory (no bytes->hex->json).
     cooperative_cancel = (
         None
@@ -2783,7 +2974,12 @@ def _copy_and_load_upload(
     # The source hash above is also the destination hash: copy2 is byte-for-byte.
     # Pass it through so the loader does not scan the file a second time.
     raise_if_cancelled(cancel_check, operation="input loading")
-    loaded = load_csv(destination, dataset_id=dataset_id, content_hash=content_hash)
+    loaded = defer_csv(
+        destination,
+        dataset_id=dataset_id,
+        content_hash=content_hash,
+        frame_pool=frame_pool,
+    )
     raise_if_cancelled(cancel_check, operation="input loading")
     return loaded
 

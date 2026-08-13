@@ -69,10 +69,13 @@ def summarize_session(
 
     question_route = _question_route_rollup(events)
     billed = spend_events(events)
+    trace_tool_calls = sum(1 for event in events if event.event_type in _TOOL_EVENT_TYPES)
+    trace_failures = sum(1 for event in events if _is_failure(event))
     metrics = SessionMetrics(
         session_id=session_id,
         llm_calls=len(billed),
-        tool_calls=sum(1 for e in events if e.event_type in _TOOL_EVENT_TYPES),
+        tool_calls=trace_tool_calls,
+        trace_tool_calls=trace_tool_calls,
         total_tokens=sum(_as_int(e.summary.get("total_tokens")) for e in billed),
         prompt_tokens=_prompt_tokens_total(billed),
         completion_tokens=sum(_as_int(e.summary.get("completion_tokens")) for e in billed),
@@ -118,7 +121,8 @@ def summarize_session(
         steps=_step_metrics(events),
         artifact_counts=dict(Counter(a.type.value for a in artifacts)),
         findings_count=_findings_count(artifacts),
-        failures_count=sum(1 for e in events if _is_failure(e)),
+        failures_count=trace_failures,
+        trace_failures_count=trace_failures,
         trace_status="unverifiable" if trace_unverifiable else "verified",
         question_llm_skipped=question_route.skipped,
         question_proposals_dropped=question_route.dropped,
@@ -198,6 +202,7 @@ def summarize_session(
     metrics.report_gate_verdict = report_gate.verdict
     _apply_di9_rollups(metrics, events, artifacts)
     _apply_question_quality_rollups(metrics, artifacts)
+    _reconcile_question_observability(metrics, artifacts)
     _apply_macro_loop_rollups(metrics, artifacts)
     report_freshness: dict[str, PublicationFreshness] = {}
     for artifact in artifacts:
@@ -721,6 +726,31 @@ def _apply_question_quality_rollups(metrics: SessionMetrics, artifacts: list[Art
     metrics.result_contract_failures = dict(contract_failures)
     metrics.interpretation_validated = interpretation_counts["validated"]
     metrics.interpretation_fallbacks = interpretation_counts["fallback"]
+
+
+def _reconcile_question_observability(
+    metrics: SessionMetrics, artifacts: list[Artifact]
+) -> None:
+    """Reconcile trace spans with durable question outcomes without double billing."""
+    agent_calls = 0
+    pipeline_calls = 0
+    for artifact in artifacts:
+        if artifact.type is not ArtifactType.QUESTION_EXECUTION_RESULT:
+            continue
+        if artifact.payload.get("execution_mode", "pipeline") == "agent":
+            agent_calls += _as_int(artifact.payload.get("tool_calls"))
+        elif artifact.payload.get("sql_result_artifact_id"):
+            # The fixed pipeline historically persisted SQL evidence without a
+            # tool span. Count that durable execution exactly once.
+            pipeline_calls += 1
+    metrics.artifact_tool_calls = agent_calls + pipeline_calls
+    # Agent qexec call counts normally overlap runtime trace completions, so
+    # they are a lower-bound repair rather than additive. Fixed-pipeline SQL is
+    # different: this driver persists SqlResult/qexec artifacts but emits no
+    # tool span, so those calls must be added independently.
+    metrics.tool_calls = pipeline_calls + max(metrics.trace_tool_calls, agent_calls)
+    metrics.question_failures_count = metrics.question_failed
+    metrics.failures_count = max(metrics.trace_failures_count, metrics.question_failed)
 
 
 def _apply_macro_loop_rollups(metrics: SessionMetrics, artifacts: list[Artifact]) -> None:

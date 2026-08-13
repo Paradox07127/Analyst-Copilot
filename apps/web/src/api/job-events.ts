@@ -174,12 +174,14 @@ export type JobPhase =
   | "queued"
   | "running"
   | "completed"
+  | "limited"
   | "failed"
   | "cancelled"
   | "disconnected";
 
 export const TERMINAL_PHASES: ReadonlySet<JobPhase> = new Set([
   "completed",
+  "limited",
   "failed",
   "cancelled",
 ]);
@@ -342,6 +344,13 @@ function reduce(state: JobEventsState, action: Action): JobEventsState {
       if (event.name === jobId) next.cancelRequested = true;
       break;
     case "job.completed":
+      if (event.name === jobId) {
+        next.phase =
+          event.summary["session_status"] === "limited"
+            ? "limited"
+            : "completed";
+      }
+      break;
     case "job.failed":
     case "job.cancelled":
       if (event.name === jobId) {

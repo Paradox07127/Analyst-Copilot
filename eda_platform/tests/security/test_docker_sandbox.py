@@ -1,21 +1,30 @@
 from __future__ import annotations
 
+import io
 import json
+import math
+import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from eda_platform.core.sandbox import SandboxLimits, SandboxMount
 from eda_platform.core.sandbox_docker import (
+    _OUTPUT_ADOPTION_TIMEOUT_SECONDS,
     DEFAULT_DOCKER_IMAGE,
     DockerSandboxBackend,
+    _copy_quiesced_container_outputs,
     _docker_argv,
     _docker_cli_env,
+    _docker_exec_argv,
+    _extract_output_archive,
     _resource_controls_match,
     _scan_output_dir,
     _stage_mounts,
+    _start_container,
     _validate_mounts,
     docker_available,
     docker_image_available,
@@ -82,6 +91,14 @@ def _mock_runtime_available(monkeypatch) -> None:
         "eda_platform.core.sandbox_docker.docker_image_digest",
         lambda image: "sha256:test-image",
     )
+    monkeypatch.setattr(
+        "eda_platform.core.sandbox_docker._start_container",
+        lambda argv, container_name, cli_env: None,
+    )
+
+
+def _exec_container_name(argv: list[str]) -> str:
+    return argv[argv.index("--workdir") + 2]
 
 
 def test_docker_backend_reports_unavailable_when_cli_missing(monkeypatch, tmp_path) -> None:
@@ -226,15 +243,18 @@ def test_docker_argv_builds_hardened_non_networked_container_command(tmp_path) -
         container_user="1234:1234",
     )
 
-    assert argv[:3] == ["docker", "run", "--rm"]
+    assert argv[:3] == ["docker", "run", "--detach"]
+    assert "--rm" not in argv
     assert argv[argv.index("--pull") + 1] == "never"
     assert "--name" in argv
     assert argv[argv.index("--name") + 1] == "eda-agent-test"
+    assert "--init" in argv
     assert "--network" in argv
     assert argv[argv.index("--network") + 1] == "none"
     assert "--read-only" in argv
     assert "--cap-drop" in argv
     assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert argv[argv.index("--cap-add") + 1] == "KILL"
     assert "--security-opt" in argv
     assert argv[argv.index("--security-opt") + 1] == "no-new-privileges=true"
     assert argv[argv.index("--cgroupns") + 1] == "private"
@@ -242,21 +262,45 @@ def test_docker_argv_builds_hardened_non_networked_container_command(tmp_path) -
     assert "--pid" not in argv
     assert "--tmpfs" in argv
     assert argv[argv.index("--tmpfs") + 1].startswith("/tmp:rw,noexec,nosuid,nodev,size=")
+    assert any(
+        item.startswith("/work:rw,nosuid,nodev,noexec") and "nr_inodes=" in item for item in argv
+    )
     assert "--memory-swap" in argv
     assert argv[argv.index("--memory-swap") + 1] == str(limits.max_memory_bytes)
     assert f"type=bind,src={exec_dir / 'analysis.py'},dst=/sandbox/analysis.py,readonly" in argv
-    assert f"type=bind,src={exec_dir / 'outputs'},dst=/work" in argv
+    assert f"type=bind,src={exec_dir / 'outputs'},dst=/work" not in argv
     assert f"type=bind,src={source},dst=/work/inputs/source.csv,readonly" in argv
     assert DEFAULT_DOCKER_IMAGE in argv
-    assert argv[-6:] == [
-        DEFAULT_DOCKER_IMAGE,
-        "python",
-        "-I",
-        "-B",
-        "-u",
-        "/sandbox/analysis.py",
-    ]
-    assert argv[argv.index("--user") + 1] == "1234:1234"
+    assert argv[-7:-1] == [DEFAULT_DOCKER_IMAGE, "python", "-I", "-B", "-u", "-c"]
+    assert re.fullmatch(r"import time; time\.sleep\(\d+\)", argv[-1])
+    assert argv[argv.index("--user") + 1] == "0:0"
+    exec_argv = _docker_exec_argv("eda-agent-test", "1234:1234")
+    assert exec_argv[exec_argv.index("--user") + 1] == "1234:1234"
+    assert exec_argv[-5:] == ["python", "-I", "-B", "-u", "/sandbox/analysis.py"]
+
+
+def test_docker_argv_supervisor_sleep_is_bounded_by_the_execution_window(tmp_path) -> None:
+    exec_dir = tmp_path / "exec"
+    exec_dir.mkdir()
+    (exec_dir / "analysis.py").write_text("print('ok')", encoding="utf-8")
+
+    def supervisor_sleep(timeout_seconds: float) -> int:
+        argv = _docker_argv(
+            exec_dir=exec_dir,
+            container_name="eda-agent-test",
+            mounts=[],
+            limits=SandboxLimits(timeout_seconds=timeout_seconds, max_memory_bytes=128 << 20),
+        )
+        match = re.fullmatch(r"import time; time\.sleep\((\d+)\)", argv[-1])
+        assert match is not None, f"supervisor payload is not a bounded sleep: {argv[-1]!r}"
+        return int(match.group(1))
+
+    short = supervisor_sleep(2.0)
+    long = supervisor_sleep(120.0)
+    assert long - short == 118
+    minimum_window = math.ceil(2.0 + _OUTPUT_ADOPTION_TIMEOUT_SECONDS)
+    assert short >= minimum_window
+    assert short <= minimum_window + 300
 
 
 def test_runtime_preflight_resource_report_fails_closed_on_any_mismatch() -> None:
@@ -305,9 +349,7 @@ def test_runtime_preflight_resource_report_fails_closed_on_any_mismatch() -> Non
         "inputs/../analysis.py",
     ],
 )
-def test_docker_argv_rejects_mount_targets_outside_inputs(
-    tmp_path, target: str
-) -> None:
+def test_docker_argv_rejects_mount_targets_outside_inputs(tmp_path, target: str) -> None:
     exec_dir = tmp_path / "exec"
     exec_dir.mkdir()
     source = tmp_path / "source.csv"
@@ -428,6 +470,74 @@ def test_docker_mounts_only_private_staged_copies(tmp_path: Path) -> None:
     assert "source" not in manifest[0]
 
 
+def test_docker_run_quiesces_then_adopts_tmpfs_before_cleanup(monkeypatch, tmp_path) -> None:
+    _mock_runtime_available(monkeypatch)
+    events: list[str] = []
+    fake_proc = _FakeDockerProcess(stdout=b"ok\n", returncode=0)
+
+    def fake_start(argv, container_name, cli_env):
+        assert argv[:3] == ["docker", "run", "--detach"]
+        events.append("start")
+        return None
+
+    def fake_popen(argv, **kwargs):
+        assert argv[:2] == ["docker", "exec"]
+        events.append("exec")
+        return fake_proc
+
+    def fake_run(argv, **kwargs):
+        events.append(argv[1])
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    def fake_quiesce(container_name, container_user, cli_env):
+        events.append("quiesce")
+        return None
+
+    def fake_copy(container_name, container_user, output_dir, limits, cli_env):
+        assert container_user == "65532:65532"
+        events.append("adopt")
+        return None
+
+    monkeypatch.setattr("eda_platform.core.sandbox_docker._start_container", fake_start)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("eda_platform.core.sandbox_docker._quiesce_container", fake_quiesce)
+    monkeypatch.setattr(
+        "eda_platform.core.sandbox_docker._copy_quiesced_container_outputs",
+        fake_copy,
+    )
+
+    result = DockerSandboxBackend(work_root=tmp_path).run_python(
+        "print('ok')",
+        limits=SandboxLimits(timeout_seconds=2),
+    )
+
+    assert result.status == "succeeded"
+    assert result.stdout == "ok\n"
+    assert events == ["start", "exec", "quiesce", "adopt", "rm"]
+
+
+def test_output_adoption_runs_as_the_sandbox_tmpfs_owner(monkeypatch, tmp_path) -> None:
+    observed_argv: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        observed_argv.extend(argv)
+        return subprocess.CompletedProcess(argv, 0, b"\0" * 10240, b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    error = _copy_quiesced_container_outputs(
+        "eda-agent-test",
+        "1234:5678",
+        tmp_path,
+        SandboxLimits(),
+        {"PATH": "/usr/bin"},
+    )
+
+    assert error is None
+    assert observed_argv[:4] == ["docker", "exec", "--user", "1234:5678"]
+
+
 def test_output_policy_rejects_symlinks_and_size_excess(tmp_path: Path) -> None:
     output_dir = tmp_path / "outputs"
     output_dir.mkdir()
@@ -453,6 +563,54 @@ def test_output_policy_rejects_symlinks_and_size_excess(tmp_path: Path) -> None:
     assert size_error is not None and "size limit" in size_error
 
 
+def test_output_archive_adoption_accepts_regular_files_only(tmp_path: Path) -> None:
+    buffer = io.BytesIO()
+    content = b"verified result\n"
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        member = tarfile.TarInfo("nested/result.txt")
+        member.size = len(content)
+        archive.addfile(member, io.BytesIO(content))
+
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    error = _extract_output_archive(buffer.getvalue(), output_dir, SandboxLimits())
+
+    assert error is None
+    assert (output_dir / "nested" / "result.txt").read_bytes() == content
+
+
+@pytest.mark.parametrize("member_name", ["../escape.txt", "/absolute.txt"])
+def test_output_archive_adoption_rejects_unsafe_paths(tmp_path: Path, member_name: str) -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        member = tarfile.TarInfo(member_name)
+        member.size = 1
+        archive.addfile(member, io.BytesIO(b"x"))
+
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    error = _extract_output_archive(buffer.getvalue(), output_dir, SandboxLimits())
+
+    assert error is not None and "unsafe path" in error
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_output_archive_adoption_rejects_links(tmp_path: Path) -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        member = tarfile.TarInfo("link")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "/etc/passwd"
+        archive.addfile(member)
+
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    error = _extract_output_archive(buffer.getvalue(), output_dir, SandboxLimits())
+
+    assert error is not None and "non-regular" in error
+    assert not (output_dir / "link").exists()
+
+
 def test_docker_run_python_cleans_container_and_cli_on_timeout(monkeypatch, tmp_path) -> None:
     _mock_runtime_available(monkeypatch)
     fake_proc = _FakeDockerProcess(stdout=b"START\n", timeout=True)
@@ -460,8 +618,8 @@ def test_docker_run_python_cleans_container_and_cli_on_timeout(monkeypatch, tmp_
     run_container_names: list[str] = []
 
     def fake_popen(argv, **kwargs):
-        assert "--name" in argv
-        run_container_names.append(argv[argv.index("--name") + 1])
+        assert argv[:2] == ["docker", "exec"]
+        run_container_names.append(_exec_container_name(argv))
         return fake_proc
 
     def fake_run(argv, **kwargs):
@@ -502,8 +660,8 @@ def test_docker_run_python_cleans_container_when_output_cap_is_exceeded(
     run_container_names: list[str] = []
 
     def fake_popen(argv, **kwargs):
-        assert "--name" in argv
-        run_container_names.append(argv[argv.index("--name") + 1])
+        assert argv[:2] == ["docker", "exec"]
+        run_container_names.append(_exec_container_name(argv))
         return fake_proc
 
     def fake_run(argv, **kwargs):
@@ -539,8 +697,8 @@ def test_docker_run_python_cleans_container_when_stderr_cap_is_exceeded(
     run_container_names: list[str] = []
 
     def fake_popen(argv, **kwargs):
-        assert "--name" in argv
-        run_container_names.append(argv[argv.index("--name") + 1])
+        assert argv[:2] == ["docker", "exec"]
+        run_container_names.append(_exec_container_name(argv))
         return fake_proc
 
     def fake_run(argv, **kwargs):
@@ -594,6 +752,20 @@ def _sandbox_container_names() -> set[str]:
     return {name for name in completed.stdout.splitlines() if name}
 
 
+def _track_started_containers(monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    started: set[str] = set()
+
+    def tracked_start(argv, container_name, cli_env):
+        started.add(container_name)
+        return _start_container(argv, container_name, cli_env)
+
+    monkeypatch.setattr(
+        "eda_platform.core.sandbox_docker._start_container",
+        tracked_start,
+    )
+    return started
+
+
 def test_dockerfile_installs_the_repository_locked_runtime() -> None:
     repository_root = Path(__file__).resolve().parents[3]
     dockerfile = (repository_root / "docker" / "eda-agent-sandbox" / "Dockerfile").read_text(
@@ -620,10 +792,7 @@ def test_dockerfile_installs_the_repository_locked_runtime() -> None:
 def test_docker_backend_pandas_analysis_with_read_only_input_succeeds(tmp_path: Path) -> None:
     source = tmp_path / "sales.csv"
     source.write_text(
-        "region,amount\n"
-        "east,10\n"
-        "west,7\n"
-        "east,5\n",
+        "region,amount\neast,10\nwest,7\neast,5\n",
         encoding="utf-8",
     )
     backend = DockerSandboxBackend(work_root=tmp_path / "work")
@@ -721,8 +890,7 @@ def test_docker_backend_cannot_read_unmounted_host_secret(
     monkeypatch.setattr("eda_platform.core.sandbox_docker._policy_violation", lambda code: None)
 
     result = DockerSandboxBackend(work_root=tmp_path / "work").run_python(
-        "from pathlib import Path\n"
-        f"print(Path({str(secret)!r}).read_text(encoding='utf-8'))\n",
+        f"from pathlib import Path\nprint(Path({str(secret)!r}).read_text(encoding='utf-8'))\n",
         limits=SandboxLimits(timeout_seconds=10),
     )
 
@@ -738,8 +906,7 @@ def test_later_sandbox_cannot_modify_prior_execution_result(
     monkeypatch.setattr("eda_platform.core.sandbox_docker._policy_violation", lambda code: None)
     backend = DockerSandboxBackend(work_root=tmp_path / "work")
     first = backend.run_python(
-        "from pathlib import Path\n"
-        "Path('result.txt').write_text('sealed', encoding='utf-8')\n",
+        "from pathlib import Path\nPath('result.txt').write_text('sealed', encoding='utf-8')\n",
         limits=SandboxLimits(timeout_seconds=10),
     )
     assert first.status == "succeeded"
@@ -774,7 +941,7 @@ def test_docker_runtime_memory_ceiling_kills_bounded_allocation_attack(
 ) -> None:
     """Prove the daemon/cgroup enforces the limit, not merely that argv contains it."""
     monkeypatch.setattr("eda_platform.core.sandbox_docker._policy_violation", lambda code: None)
-    containers_before = _sandbox_container_names()
+    started_containers = _track_started_containers(monkeypatch)
 
     result = DockerSandboxBackend(work_root=tmp_path / "work").run_python(
         "print('MEMORY_ATTACK_STARTED', flush=True)\n"
@@ -802,7 +969,8 @@ def test_docker_runtime_memory_ceiling_kills_bounded_allocation_attack(
     assert manifest["status"] == "failed"
     assert manifest["exit_code"] == result.exit_code
     assert manifest["error"] == result.error
-    assert _sandbox_container_names() == containers_before
+    assert started_containers
+    assert started_containers.isdisjoint(_sandbox_container_names())
 
 
 @requires_docker
@@ -812,7 +980,7 @@ def test_docker_runtime_pids_ceiling_bounds_child_process_attack(
     monkeypatch.setattr("eda_platform.core.sandbox_docker._policy_violation", lambda code: None)
     configured_limit = 16
     bounded_margin = 8
-    containers_before = _sandbox_container_names()
+    started_containers = _track_started_containers(monkeypatch)
 
     result = DockerSandboxBackend(
         work_root=tmp_path / "work",
@@ -845,7 +1013,8 @@ def test_docker_runtime_pids_ceiling_bounds_child_process_attack(
     report = json.loads(result.stdout.strip().splitlines()[-1])
     assert 0 < report["spawned"] <= configured_limit
     assert report["failure"] == "BlockingIOError"
-    assert _sandbox_container_names() == containers_before
+    assert started_containers
+    assert started_containers.isdisjoint(_sandbox_container_names())
 
 
 @requires_docker
@@ -854,7 +1023,7 @@ def test_docker_runtime_cpu_quota_bounds_multiworker_busy_loop(
 ) -> None:
     monkeypatch.setattr("eda_platform.core.sandbox_docker._policy_violation", lambda code: None)
     configured_cpus = 0.5
-    containers_before = _sandbox_container_names()
+    started_containers = _track_started_containers(monkeypatch)
 
     result = DockerSandboxBackend(
         work_root=tmp_path / "work",
@@ -892,4 +1061,34 @@ def test_docker_runtime_cpu_quota_bounds_multiworker_busy_loop(
     assert float(quota) / float(period) == pytest.approx(configured_cpus, abs=0.05)
     calibrated_ceiling = configured_cpus * report["wall_seconds"] + 0.5
     assert report["child_cpu_seconds"] <= calibrated_ceiling
-    assert _sandbox_container_names() == containers_before
+    assert started_containers
+    assert started_containers.isdisjoint(_sandbox_container_names())
+
+
+@requires_docker
+def test_mounted_inputs_are_not_charged_against_output_limits(tmp_path: Path) -> None:
+    """Codex pre-commit review (2026-08-13): the in-container archive walked
+    /work/inputs too, so a mounted input larger than max_output_file_bytes
+    blocked an otherwise successful execution and inputs burned output-entry
+    slots."""
+    source = tmp_path / "big_input.csv"
+    source.write_bytes(b"a,b\n" + b"x,1\n" * (1 << 18))  # ~1 MiB, > 512 KiB cap
+    backend = DockerSandboxBackend(work_root=tmp_path / "work")
+
+    result = backend.run_python(
+        "import pandas as pd\n"
+        "frame = pd.read_csv('inputs/big_input.csv')\n"
+        "frame.head(3).to_csv('out.txt', index=False)\n"
+        "print(len(frame))\n",
+        mounts=[SandboxMount(source=source, target="inputs/big_input.csv")],
+        limits=SandboxLimits(
+            timeout_seconds=30,
+            max_output_files=4,
+            max_output_file_bytes=512 << 10,
+            max_total_output_bytes=1 << 20,
+        ),
+    )
+
+    assert result.status == "succeeded", result.error
+    adopted = {item["path"] for item in result.output_manifest}
+    assert adopted == {"out.txt"}

@@ -7,7 +7,11 @@ from eda_platform.core.config import require_absolute_workspace
 from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.auto_eda import AutoEDAResult
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
-from eda_platform.tools.loader import LoadedDataset, load_csv
+from eda_platform.tools.loader import (
+    DatasetFramePool,
+    LoadedDataset,
+    defer_csv,
+)
 
 
 @dataclass
@@ -145,6 +149,7 @@ def _reload_datasets(
     """Reload each profiled dataset from its upload; skip unavailable sources."""
     uploads_root = workspace / "projects" / project_id / "uploads"
     loaded: list[LoadedDataset] = []
+    frame_pool = DatasetFramePool()
     all_reloaded = True
     profiled = 0
     for artifact in artifacts:
@@ -166,10 +171,11 @@ def _reload_datasets(
             continue
         try:
             loaded.append(
-                load_csv(
+                defer_csv(
                     source,
                     dataset_id=dataset_id,
                     content_hash=input_hashes.get(name),
+                    frame_pool=frame_pool,
                 )
             )
         except (OSError, ValueError):

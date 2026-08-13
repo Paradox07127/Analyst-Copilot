@@ -14380,7 +14380,8 @@
           "LoopLedger",
           "EdaHandoff",
           "AgentHandoff",
-          "EvidenceReceipt"
+          "EvidenceReceipt",
+          "WorkflowEvalTrial"
         ],
         "title": "ArtifactType"
       },
@@ -14418,6 +14419,7 @@
             "type": "string",
             "enum": [
               "exact_in_memory",
+              "streaming_exact",
               "metadata_only",
               "unknown"
             ],
@@ -25411,7 +25413,7 @@
           "schema_version": {
             "type": "integer",
             "title": "Schema Version",
-            "default": 6
+            "default": 7
           },
           "session_id": {
             "type": "string",
@@ -25429,6 +25431,16 @@
           "tool_calls": {
             "type": "integer",
             "title": "Tool Calls",
+            "default": 0
+          },
+          "trace_tool_calls": {
+            "type": "integer",
+            "title": "Trace Tool Calls",
+            "default": 0
+          },
+          "artifact_tool_calls": {
+            "type": "integer",
+            "title": "Artifact Tool Calls",
             "default": 0
           },
           "total_tokens": {
@@ -25607,6 +25619,16 @@
           "failures_count": {
             "type": "integer",
             "title": "Failures Count",
+            "default": 0
+          },
+          "trace_failures_count": {
+            "type": "integer",
+            "title": "Trace Failures Count",
+            "default": 0
+          },
+          "question_failures_count": {
+            "type": "integer",
+            "title": "Question Failures Count",
             "default": 0
           },
           "findings_count": {

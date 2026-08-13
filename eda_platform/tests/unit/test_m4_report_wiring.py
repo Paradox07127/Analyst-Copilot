@@ -730,6 +730,43 @@ def test_truncated_report_attempt_raises_budget_and_shortens_retry(
     assert "truncat" in result.llm_events[0].error_type.lower()
 
 
+def test_wide_run_scales_first_attempt_claim_budget_and_completion_cap(
+    tmp_path: Path,
+) -> None:
+    # 2026-08-12 deepseek run: an 11-question plan could not fit 12 claims in
+    # the default completion cap and burned all attempts on truncation.
+    base = _base_artifacts(tmp_path)
+    profile = base[0]
+    wide = [
+        _artifact_from(
+            QuestionExecutionResult(
+                question_id=f"q_wide_{index}",
+                question=f"Wide-run question {index}?",
+                origin="llm",
+                status="succeeded",
+            ),
+            f"qexec_q_wide_{index}",
+        )
+        for index in range(11)
+    ]
+    llm = TruncatingThenValidReportLLM(_minimal_plan(profile.id), max_tokens=6000)
+
+    result = generate_agentic_report(
+        [*base, *wide],
+        project_id="project_demo",
+        session_id="run_demo",
+        business_context="Revenue analysis",
+        llm=llm,
+    )
+
+    assert result.bundle.status is ReportStatus.VALIDATED
+    # 12 base claims minus one per question beyond 6, and the budget starts at
+    # the ceiling instead of climbing to it across wasted attempts.
+    assert llm.payloads[0]["payload"]["max_claims"] == 7
+    assert llm.max_tokens_seen[0] == 12000
+    assert llm.payloads[1]["payload"]["max_claims"] < llm.payloads[0]["payload"]["max_claims"]
+
+
 def test_dataset_overview_gets_deterministic_claim_when_profiles_exist(
     tmp_path: Path,
 ) -> None:

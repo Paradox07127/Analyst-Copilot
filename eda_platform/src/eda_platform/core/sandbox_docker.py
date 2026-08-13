@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import math
 import os
 import shutil
 import stat
 import subprocess
+import tarfile
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import IO, cast
+from typing import IO
 from uuid import uuid4
 
 from eda_platform.core.cancellation import (
@@ -50,6 +52,69 @@ _CLEANUP_TIMEOUT_SECONDS = 5.0
 _CLEANUP_RETRY_DELAY_SECONDS = 0.05
 _CLI_TERMINATE_GRACE_SECONDS = 1.0
 _PREFLIGHT_TIMEOUT_SECONDS = 8.0
+_OUTPUT_ADOPTION_TIMEOUT_SECONDS = 30.0
+_SUPERVISOR_SLACK_SECONDS = 30.0
+
+_QUIESCE_SCRIPT = """\
+import os, sys, time
+target_uid = int(sys.argv[1])
+me = os.getpid()
+for _ in range(100):
+    targets = []
+    for name in os.listdir('/proc'):
+        if not name.isdigit() or int(name) in {1, me}:
+            continue
+        try:
+            with open(f'/proc/{name}/status', encoding='ascii') as stream:
+                uid_line = next(line for line in stream if line.startswith('Uid:'))
+            if target_uid in {int(value) for value in uid_line.split()[1:]}:
+                targets.append(int(name))
+        except (FileNotFoundError, ProcessLookupError, StopIteration):
+            pass
+    if not targets:
+        raise SystemExit(0)
+    for pid in targets:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.01)
+raise SystemExit(3)
+"""
+
+_ARCHIVE_SCRIPT = """\
+import os, stat, sys, tarfile
+root = '/work'
+inputs_root = '/work/inputs'
+max_entries, max_file, max_total = map(int, sys.argv[1:])
+pending = [root]
+paths = []
+total = 0
+while pending:
+    directory = pending.pop()
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.path == inputs_root:
+                continue
+            paths.append(entry.path)
+            if len(paths) > max_entries:
+                raise SystemExit(10)
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode):
+                pending.append(entry.path)
+            elif stat.S_ISREG(mode):
+                size = entry.stat(follow_symlinks=False).st_size
+                if size > max_file:
+                    raise SystemExit(11)
+                total += size
+                if total > max_total:
+                    raise SystemExit(12)
+            else:
+                raise SystemExit(13)
+with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
+    for path in sorted(paths):
+        archive.add(path, arcname=os.path.relpath(path, root), recursive=False)
+"""
 
 
 def docker_available() -> bool:
@@ -305,7 +370,7 @@ class DockerSandboxBackend:
         started = time.monotonic()
         exec_dir = self.work_root / f"exec_{uuid4().hex[:12]}"
         output_dir = exec_dir / "outputs"
-        output_dir.mkdir(parents=True, exist_ok=False)
+        output_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
         try:
             if cancellation is not None:
                 cancellation.checkpoint()
@@ -372,8 +437,6 @@ class DockerSandboxBackend:
         try:
             script_path.write_text(code, encoding="utf-8")
             script_path.chmod(0o444)
-            _prepare_output_dir(output_dir, container_user)
-            _prepare_input_mountpoints(output_dir, staged_mounts, container_user)
         except (OSError, ValueError) as exc:
             return ExecArtifact(
                 status="blocked",
@@ -396,9 +459,19 @@ class DockerSandboxBackend:
             tmpfs_size=self.tmpfs_size,
             container_user=container_user,
         )
+        start_error = _start_container(argv, container_name, cli_env)
+        if start_error is not None:
+            _cleanup_container(container_name, cli_env)
+            return ExecArtifact(
+                status="blocked",
+                backend=self.name,
+                error=start_error,
+                duration_seconds=_elapsed(started),
+                work_dir=output_dir,
+            )
         try:
             proc = subprocess.Popen(
-                argv,
+                _docker_exec_argv(container_name, container_user),
                 cwd=exec_dir,
                 env=cli_env,
                 stdout=subprocess.PIPE,
@@ -421,8 +494,6 @@ class DockerSandboxBackend:
             _start_reader(proc.stdout, stdout, stream_limit_exceeded),
             _start_reader(proc.stderr, stderr, stream_limit_exceeded),
         ]
-        output_watchdog = _OutputDirectoryWatchdog(output_dir, limits)
-        output_watchdog.start()
 
         deadline = time.monotonic() + limits.timeout_seconds
         returncode: int | None = None
@@ -439,9 +510,6 @@ class DockerSandboxBackend:
             if stream_limit_exceeded.is_set():
                 failure = "Execution output exceeded configured byte limit."
                 break
-            if output_watchdog.violation is not None:
-                failure = output_watchdog.violation
-                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
@@ -451,13 +519,32 @@ class DockerSandboxBackend:
             except subprocess.TimeoutExpired:
                 continue
 
+        container_aborted = False
         if cancellation_error is not None:
             _cancel_container_run(proc, container_name, cli_env)
+            container_aborted = True
         elif failure is not None or timed_out:
             _abort_container_run(proc, container_name, cli_env)
-        output_watchdog.stop()
+            container_aborted = True
         _join_readers(readers)
-        _remove_input_mountpoints(output_dir, staged_mounts)
+        if stdout.truncated or stderr.truncated:
+            failure = failure or "Execution output exceeded configured byte limit."
+        copy_error: str | None = None
+        if cancellation_error is None and failure is None and not timed_out:
+            copy_error = _quiesce_container(container_name, container_user, cli_env)
+            if copy_error is None:
+                copy_error = _copy_quiesced_container_outputs(
+                    container_name,
+                    container_user,
+                    output_dir,
+                    limits,
+                    cli_env,
+                )
+            if copy_error is None:
+                _remove_input_mountpoints(output_dir, staged_mounts)
+            _cleanup_container(container_name, cli_env)
+        elif not container_aborted:
+            _cleanup_container(container_name, cli_env)
 
         if cancellation_error is not None:
             artifact = ExecArtifact(
@@ -477,6 +564,16 @@ class DockerSandboxBackend:
                 stderr=stderr.text,
                 timed_out=True,
                 error=f"Execution exceeded {limits.timeout_seconds:.2f}s timeout.",
+                duration_seconds=_elapsed(started),
+                work_dir=output_dir,
+            )
+        elif copy_error is not None:
+            artifact = ExecArtifact(
+                status="blocked",
+                backend=self.name,
+                stdout=stdout.text,
+                stderr=stderr.text,
+                error=copy_error,
                 duration_seconds=_elapsed(started),
                 work_dir=output_dir,
             )
@@ -547,10 +644,8 @@ def _docker_argv(
 ) -> list[str]:
     exec_root = exec_dir.resolve()
     script_path = (exec_root / "analysis.py").resolve()
-    output_dir = (exec_root / "outputs").resolve()
     bind_mounts = [
         f"type=bind,src={script_path},dst=/sandbox/analysis.py,readonly",
-        f"type=bind,src={output_dir},dst=/work",
     ]
     for mount in mounts:
         target = _resolve_mount_target(exec_root, mount.target)
@@ -562,18 +657,21 @@ def _docker_argv(
     argv = [
         "docker",
         "run",
-        "--rm",
+        "--detach",
         "--pull",
         "never",
         "--name",
         container_name,
         "--hostname",
         "eda-sandbox",
+        "--init",
         "--network",
         "none",
         "--read-only",
         "--cap-drop",
         "ALL",
+        "--cap-add",
+        "KILL",
         "--security-opt",
         "no-new-privileges=true",
         "--cgroupns",
@@ -596,6 +694,8 @@ def _docker_argv(
         "nofile=256:256",
         "--tmpfs",
         f"/tmp:rw,noexec,nosuid,nodev,size={tmpfs_size}",
+        "--tmpfs",
+        _work_tmpfs_spec(limits, container_user or _container_user()),
         "--workdir",
         "/work",
         "--log-driver",
@@ -603,12 +703,55 @@ def _docker_argv(
         "--stop-timeout",
         "1",
         "--user",
-        container_user or _container_user(),
+        "0:0",
     ]
     for bind_mount in bind_mounts:
         argv.extend(["--mount", bind_mount])
-    argv.extend([image, "python", "-I", "-B", "-u", "/sandbox/analysis.py"])
+    # If the host worker dies uncleanly between start and cleanup, a leaked
+    # container must exit on its own instead of sleeping as in-container root
+    # forever; --init reaps the expired sleep.
+    supervisor_lifetime = math.ceil(
+        limits.timeout_seconds + _OUTPUT_ADOPTION_TIMEOUT_SECONDS + _SUPERVISOR_SLACK_SECONDS
+    )
+    argv.extend(
+        [
+            image,
+            "python",
+            "-I",
+            "-B",
+            "-u",
+            "-c",
+            f"import time; time.sleep({supervisor_lifetime})",
+        ]
+    )
     return argv
+
+
+def _docker_exec_argv(container_name: str, container_user: str) -> list[str]:
+    return [
+        "docker",
+        "exec",
+        "--user",
+        container_user,
+        "--workdir",
+        "/work",
+        container_name,
+        "python",
+        "-I",
+        "-B",
+        "-u",
+        "/sandbox/analysis.py",
+    ]
+
+
+def _work_tmpfs_spec(limits: SandboxLimits, container_user: str) -> str:
+    uid, gid = (int(part) for part in container_user.split(":"))
+    byte_cap = limits.max_total_output_bytes + (1 << 20)
+    inode_cap = max(128, limits.max_output_files * 4 + 64)
+    return (
+        "/work:rw,nosuid,nodev,noexec,mode=0770,"
+        f"uid={uid},gid={gid},size={byte_cap},nr_inodes={inode_cap}"
+    )
 
 
 def _validate_mounts(exec_dir: Path, mounts: list[SandboxMount]) -> list[dict[str, object]]:
@@ -672,7 +815,7 @@ def _stage_mounts(
                     shutil.copyfileobj(source_stream, staged_stream, length=1 << 20)
             if staged_source.stat().st_size != source_stat.st_size:
                 raise ValueError("Sandbox input changed while it was being staged.")
-            staged_source.chmod(0o400)
+            staged_source.chmod(0o444)
         finally:
             if source_fd >= 0:
                 os.close(source_fd)
@@ -704,46 +847,7 @@ def _container_mount_target(exec_root: Path, target: Path) -> PurePosixPath:
 
 
 def _container_user() -> str:
-    getuid = cast(Callable[[], int] | None, getattr(os, "getuid", None))
-    getgid = cast(Callable[[], int] | None, getattr(os, "getgid", None))
-    if callable(getuid) and callable(getgid):
-        uid = int(getuid())
-        gid = int(getgid())
-        if uid > 0 and gid >= 0:
-            return f"{uid}:{gid}"
     return DEFAULT_CONTAINER_USER
-
-
-def _prepare_output_dir(output_dir: Path, container_user: str) -> None:
-    output_dir.chmod(0o700)
-    if container_user == DEFAULT_CONTAINER_USER:
-        chown = getattr(os, "chown", None)
-        if callable(chown):
-            uid, gid = (int(part) for part in DEFAULT_CONTAINER_USER.split(":"))
-            try:
-                chown(output_dir, uid, gid)
-            except PermissionError:
-                raise ValueError(
-                    "Cannot prepare a non-root sandbox output directory for this host user."
-                ) from None
-
-
-def _prepare_input_mountpoints(
-    output_dir: Path,
-    mounts: list[SandboxMount],
-    container_user: str,
-) -> None:
-    for mount in mounts:
-        target = output_dir / mount.target
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.touch(exist_ok=False)
-        target.chmod(0o400)
-    if container_user == DEFAULT_CONTAINER_USER:
-        chown = getattr(os, "chown", None)
-        if callable(chown):
-            uid, gid = (int(part) for part in DEFAULT_CONTAINER_USER.split(":"))
-            for path in [output_dir / "inputs", *(output_dir / "inputs").rglob("*")]:
-                chown(path, uid, gid)
 
 
 def _remove_input_mountpoints(output_dir: Path, mounts: list[SandboxMount]) -> None:
@@ -839,30 +943,6 @@ class _CappedOutput:
         return bytes(self._data).decode("utf-8", errors="replace")
 
 
-class _OutputDirectoryWatchdog(threading.Thread):
-    def __init__(self, output_dir: Path, limits: SandboxLimits) -> None:
-        super().__init__(daemon=True)
-        self._output_dir = output_dir
-        self._limits = limits
-        self._stop_event = threading.Event()
-        self.violation: str | None = None
-
-    def run(self) -> None:
-        while not self._stop_event.wait(_WAIT_POLL_SECONDS):
-            _, violation = _scan_output_dir(
-                self._output_dir,
-                self._limits,
-                include_hashes=False,
-            )
-            if violation is not None:
-                self.violation = violation
-                return
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        self.join(timeout=1.0)
-
-
 def _scan_output_dir(
     output_dir: Path,
     limits: SandboxLimits,
@@ -872,38 +952,44 @@ def _scan_output_dir(
     manifest: list[dict[str, object]] = []
     total_size = 0
     entry_count = 0
-    try:
-        entries = sorted(output_dir.rglob("*"))
-    except OSError:
-        return [], "Sandbox output directory could not be inspected."
-    for path in entries:
-        entry_count += 1
-        if entry_count > limits.max_output_files:
-            return [], "Sandbox output entry count exceeded the configured limit."
+    pending = [output_dir]
+    while pending:
+        directory = pending.pop()
         try:
-            mode = path.lstat().st_mode
+            entries = os.scandir(directory)
         except OSError:
-            return [], "Sandbox output changed while it was being inspected."
-        if stat.S_ISLNK(mode):
-            return [], "Sandbox output cannot contain symbolic links."
-        if stat.S_ISDIR(mode):
-            continue
-        if not stat.S_ISREG(mode):
-            return [], "Sandbox output can contain only regular files and directories."
-        size = path.stat().st_size
-        if size > limits.max_output_file_bytes:
-            return [], "A sandbox output file exceeded the configured size limit."
-        total_size += size
-        if total_size > limits.max_total_output_bytes:
-            return [], "Sandbox output exceeded the configured total size limit."
-        item: dict[str, object] = {
-            "path": path.relative_to(output_dir).as_posix(),
-            "size": size,
-        }
-        if include_hashes:
-            item["sha256"] = _hash_file(path)
-        manifest.append(item)
-    return manifest, None
+            return [], "Sandbox output directory could not be inspected."
+        with entries:
+            for entry in entries:
+                path = Path(entry.path)
+                entry_count += 1
+                if entry_count > limits.max_output_files:
+                    return [], "Sandbox output entry count exceeded the configured limit."
+                try:
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                except OSError:
+                    return [], "Sandbox output changed while it was being inspected."
+                if stat.S_ISLNK(mode):
+                    return [], "Sandbox output cannot contain symbolic links."
+                if stat.S_ISDIR(mode):
+                    pending.append(path)
+                    continue
+                if not stat.S_ISREG(mode):
+                    return [], "Sandbox output can contain only regular files and directories."
+                size = entry.stat(follow_symlinks=False).st_size
+                if size > limits.max_output_file_bytes:
+                    return [], "A sandbox output file exceeded the configured size limit."
+                total_size += size
+                if total_size > limits.max_total_output_bytes:
+                    return [], "Sandbox output exceeded the configured total size limit."
+                item: dict[str, object] = {
+                    "path": path.relative_to(output_dir).as_posix(),
+                    "size": size,
+                }
+                if include_hashes:
+                    item["sha256"] = _hash_file(path)
+                manifest.append(item)
+    return sorted(manifest, key=lambda item: str(item["path"])), None
 
 
 def _start_reader(
@@ -953,15 +1039,19 @@ def _policy_digest(
     container_user: str,
 ) -> str:
     payload = {
-        "version": 2,
+        "version": 3,
         "network": "none",
         "read_only_rootfs": True,
         "cap_drop": ["ALL"],
+        "cap_add_supervisor": ["KILL"],
         "no_new_privileges": True,
         "cgroupns": "private",
         "ipc": "none",
         "pid": "private",
-        "user": container_user,
+        "init_reaper": True,
+        "supervisor_user": "0:0",
+        "sandbox_exec_user": container_user,
+        "output_adoption": "quiesce-bounded-tar-v2",
         "pids_limit": pids_limit,
         "cpus": cpus,
         "tmpfs_size": tmpfs_size,
@@ -1062,6 +1152,149 @@ def _cleanup_container(container_name: str, cli_env: dict[str, str]) -> None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return
+
+
+def _start_container(argv: list[str], container_name: str, cli_env: dict[str, str]) -> str | None:
+    try:
+        completed = subprocess.run(
+            argv,
+            env=cli_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=_PREFLIGHT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Failed to launch Docker sandbox: {type(exc).__name__}."
+    if completed.returncode != 0:
+        return f"Failed to launch Docker sandbox container {container_name}."
+    return None
+
+
+def _quiesce_container(
+    container_name: str,
+    container_user: str,
+    cli_env: dict[str, str],
+) -> str | None:
+    """Kill every remaining untrusted process before output adoption."""
+    sandbox_uid = container_user.split(":", maxsplit=1)[0]
+    try:
+        completed = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "--user",
+                "0:0",
+                container_name,
+                "python",
+                "-I",
+                "-B",
+                "-c",
+                _QUIESCE_SCRIPT,
+                sandbox_uid,
+            ],
+            env=cli_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_CLEANUP_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Sandbox process quiescence failed: {type(exc).__name__}."
+    if completed.returncode != 0:
+        return "Sandbox process quiescence failed; residual processes may still be running."
+    return None
+
+
+def _copy_quiesced_container_outputs(
+    container_name: str,
+    container_user: str,
+    output_dir: Path,
+    limits: SandboxLimits,
+    cli_env: dict[str, str],
+) -> str | None:
+    """Stream a doubly bounded archive from the quiesced container tmpfs.
+
+    Docker cannot copy a tmpfs mount with ``docker cp``. A trusted process
+    validates the tree and emits tar only after all sandbox-UID processes have
+    been killed; the host validates every member again while adopting it.
+    """
+    try:
+        completed = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "--user",
+                container_user,
+                container_name,
+                "python",
+                "-I",
+                "-B",
+                "-c",
+                _ARCHIVE_SCRIPT,
+                str(limits.max_output_files),
+                str(limits.max_output_file_bytes),
+                str(limits.max_total_output_bytes),
+            ],
+            env=cli_env,
+            capture_output=True,
+            timeout=_OUTPUT_ADOPTION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Sandbox output adoption failed: {type(exc).__name__}."
+    if completed.returncode != 0:
+        return "Sandbox output adoption failed; the container archive was rejected."
+    return _extract_output_archive(completed.stdout, output_dir, limits)
+
+
+def _extract_output_archive(
+    payload: bytes,
+    output_dir: Path,
+    limits: SandboxLimits,
+) -> str | None:
+    entry_count = 0
+    total_size = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+            for member in archive:
+                entry_count += 1
+                if entry_count > limits.max_output_files:
+                    return "Sandbox output entry count exceeded the configured limit."
+                relative = PurePosixPath(member.name)
+                if (
+                    relative.is_absolute()
+                    or not relative.parts
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                ):
+                    return "Sandbox output archive contained an unsafe path."
+                target = output_dir.joinpath(*relative.parts)
+                if member.isdir():
+                    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    continue
+                if not member.isreg():
+                    return "Sandbox output archive contained a non-regular entry."
+                if member.size > limits.max_output_file_bytes:
+                    return "A sandbox output file exceeded the configured size limit."
+                total_size += member.size
+                if total_size > limits.max_total_output_bytes:
+                    return "Sandbox output exceeded the configured total size limit."
+                source = archive.extractfile(member)
+                if source is None:
+                    return "Sandbox output archive contained an unreadable file."
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                written = 0
+                with source, target.open("xb") as destination:
+                    while chunk := source.read(1 << 20):
+                        written += len(chunk)
+                        if written > member.size:
+                            return "Sandbox output archive size did not match its header."
+                        destination.write(chunk)
+                if written != member.size:
+                    return "Sandbox output archive size did not match its header."
+    except (OSError, tarfile.TarError, ValueError):
+        return "Sandbox output archive could not be validated safely."
+    return None
 
 
 def _abort_container_run(

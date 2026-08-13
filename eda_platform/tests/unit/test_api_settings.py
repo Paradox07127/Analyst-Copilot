@@ -232,8 +232,8 @@ def test_failed_connection_test_does_not_echo_the_key(client: TestClient) -> Non
     client.put(
         "/api/v1/settings",
         json={
-            "provider": "deepseek",
-            "model": "deepseek-v4-pro",
+            "provider": "openai_compatible",
+            "model": "local-test-model",
             "base_url": "http://127.0.0.1:9",
             "api_key": SECRET,
             "timeout_seconds": 10,
@@ -586,6 +586,7 @@ def test_local_backend_hands_the_overlay_to_the_child_process(
     reach subprocess.Popen, or the worker never sees the session's provider."""
     seen: dict[str, object] = {}
 
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp-not-for-workers")
     _mock_backend_spawn(monkeypatch, seen, pid=4321)
     LocalProcessJobBackend(workspace).enqueue(
         JobCommand(
@@ -601,12 +602,16 @@ def test_local_backend_hands_the_overlay_to_the_child_process(
     assert isinstance(env, dict)
     assert env["EDA_LLM_API_KEY"] == SECRET
     assert env["EDA_LLM_PROVIDER"] == "deepseek"
-    # Inherited environment is preserved, not replaced.
+    # Runtime plumbing is preserved, not the API's complete credential set.
+    # HOME is deliberately inherited (docker CLI config lookup in the worker);
+    # foreign credentials must not be.
     assert env.get("PATH") == os.environ.get("PATH")
+    assert env.get("HOME") == os.environ.get("HOME")
+    assert "GITHUB_TOKEN" not in env
     assert SECRET not in " ".join(str(item) for item in seen["argv"])  # type: ignore[union-attr]
 
 
-def test_local_backend_inherits_the_environment_when_no_overlay(
+def test_local_backend_uses_a_minimal_environment_when_no_overlay(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: dict[str, object] = {}
@@ -621,7 +626,10 @@ def test_local_backend_inherits_the_environment_when_no_overlay(
             params_json="{}",
         )
     )
-    assert seen["env"] is None
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env.get("PATH") == os.environ.get("PATH")
+    assert "EDA_LLM_API_KEY" not in env
 
 
 def test_repointing_the_same_model_at_a_new_endpoint_forgets_what_was_learned(
@@ -637,7 +645,7 @@ def test_repointing_the_same_model_at_a_new_endpoint_forgets_what_was_learned(
     service.update_settings(
         SettingsPatch(
             provider="openai_compatible",
-            base_url="http://host-a:8000/v1",
+            base_url="http://127.0.0.1:8000/v1",
             model="my-finetune:latest",
         )
     )
@@ -647,7 +655,7 @@ def test_repointing_the_same_model_at_a_new_endpoint_forgets_what_was_learned(
         ParamRepair("rename", "max_tokens", "max_completion_tokens"),
     )
 
-    service.update_settings(SettingsPatch(base_url="http://host-b:8000/v1"))
+    service.update_settings(SettingsPatch(base_url="http://127.0.0.1:8001/v1"))
 
     assert learned_repairs(LLMProvider.OPENAI_COMPATIBLE, "my-finetune:latest") == ()
 
@@ -662,7 +670,7 @@ def test_an_unrelated_setting_change_keeps_the_learned_dialect(tmp_path: Path) -
     service.update_settings(
         SettingsPatch(
             provider="openai_compatible",
-            base_url="http://host-a:8000/v1",
+            base_url="http://127.0.0.1:8000/v1",
             model="my-finetune:latest",
         )
     )
@@ -739,3 +747,18 @@ def test_reset_clears_the_report_model(workspace: Path) -> None:
     service.update_settings(SettingsPatch(report_model="deepseek-v4"))
     assert service.reset().report_model == ""
     _ = workspace
+
+
+def test_env_overlay_carries_the_llm_organization(workspace: Path) -> None:
+    """Codex pre-commit review (2026-08-13): env.py consumes
+    EDA_LLM_ORGANIZATION and llm.py sends the OpenAI-Organization header, but
+    the overlay dropped it, so every worker request lost the organization."""
+    from eda_platform.application.services.settings_service import _env_overlay
+
+    settings = LLMSettings(
+        provider=LLMProvider.OPENAI, api_key=SECRET, organization="org_123"
+    )
+    assert _env_overlay(settings)["EDA_LLM_ORGANIZATION"] == "org_123"
+    assert "EDA_LLM_ORGANIZATION" not in _env_overlay(
+        LLMSettings(provider=LLMProvider.OPENAI, api_key=SECRET)
+    )

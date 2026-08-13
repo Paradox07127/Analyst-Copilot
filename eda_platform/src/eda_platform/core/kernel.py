@@ -171,8 +171,8 @@ def _run_pipeline_sequential(steps: Sequence[Step], ctx: SessionContext) -> Pipe
                 )
             ctx.budget.check()
             ctx.session_budget.check_wall_time()
-            checkpoint_path = _checkpoint_path(ctx, index, step.name)
             cache_key = _step_cache_key(step, ctx)
+            checkpoint_path = _checkpoint_path(ctx, index, step.name, cache_key)
             cached = _read_checkpoint(checkpoint_path)
             if cached is not None and cached.cache_key == cache_key:
                 cached_artifacts = _load_checkpoint_artifacts(cached, ctx)
@@ -263,8 +263,8 @@ def _run_pipeline_parallel(
                 )
             ctx.budget.check()
             ctx.session_budget.check_wall_time()
-            checkpoint_path = _checkpoint_path(ctx, index, step.name)
             cache_key = _step_cache_key(step, ctx)
+            checkpoint_path = _checkpoint_path(ctx, index, step.name, cache_key)
             cached = _read_checkpoint(checkpoint_path)
             if cached is not None and cached.cache_key == cache_key:
                 cached_artifacts = _load_checkpoint_artifacts(cached, ctx)
@@ -507,11 +507,16 @@ class _Checkpoint:
     artifact_ids: list[str]
 
 
-def _checkpoint_path(ctx: SessionContext, index: int, step_name: str) -> Path:
+def _checkpoint_path(
+    ctx: SessionContext,
+    index: int,
+    step_name: str,
+    cache_key: str,
+) -> Path:
     return (
         ctx.store.session_dir(ctx.project_id, ctx.session_id)
         / "checkpoints"
-        / f"{index:03d}_{step_name}.txt"
+        / f"{index:03d}_{step_name}_{cache_key[:12]}.txt"
     )
 
 

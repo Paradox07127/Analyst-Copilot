@@ -23,10 +23,12 @@ class StepMetric(BaseModel):
 class SessionMetrics(BaseModel):
     """Whole-run observability rollup; artifact prefix ``session_metrics``."""
 
-    schema_version: int = 6
+    schema_version: int = 7
     session_id: str
     llm_calls: int = 0
     tool_calls: int = 0
+    trace_tool_calls: int = 0
+    artifact_tool_calls: int = 0
     total_tokens: int = 0
     # Run-wide prompt-cache rollup: cache_hit_rate = cached_tokens / prompt_tokens.
     prompt_tokens: int = 0
@@ -65,6 +67,8 @@ class SessionMetrics(BaseModel):
     artifact_counts: dict[str, int] = Field(default_factory=dict)
     findings_count: int = 0
     failures_count: int = 0
+    trace_failures_count: int = 0
+    question_failures_count: int = 0
     trace_status: Literal["verified", "unverifiable"] = "verified"
     # Question-route degradation and repair metrics.
     question_llm_skipped: bool = False

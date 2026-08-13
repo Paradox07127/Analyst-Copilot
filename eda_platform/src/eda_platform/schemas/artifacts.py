@@ -53,6 +53,7 @@ class ArtifactType(StrEnum):
     EDA_HANDOFF = "EdaHandoff"
     AGENT_HANDOFF = "AgentHandoff"
     EVIDENCE_RECEIPT = "EvidenceReceipt"
+    WORKFLOW_EVAL_TRIAL = "WorkflowEvalTrial"
 
 
 class EvidenceRef(BaseModel):

@@ -27,7 +27,7 @@ from eda_platform.core.llm import (
     manifest_model_versions,
 )
 from eda_platform.core.llm_ledger import meter_llm_client, restore_run_budget_state
-from eda_platform.core.query import DuckDBQueryEngine, QueryTimeout, UnsafeQueryError
+from eda_platform.core.query import QueryTimeout, UnsafeQueryError
 from eda_platform.core.sandbox import ExecutionBackend
 from eda_platform.core.semantic import (
     SemanticSeeds,
@@ -46,19 +46,24 @@ from eda_platform.core.tool_guard import (
 )
 from eda_platform.drivers.cancellation import raise_if_cancelled
 from eda_platform.drivers.report_artifacts import build_agentic_report_artifacts
+from eda_platform.schemas.anomaly import AnomalyScreenResult
 from eda_platform.schemas.artifacts import (
+    AnalysisTable,
     Artifact,
     ArtifactType,
     DatasetProfile,
     EvidenceRef,
     SqlResult,
 )
+from eda_platform.schemas.model_card import ModelCard
 from eda_platform.schemas.plans import AnalysisPlan
 from eda_platform.schemas.questions import (
+    QuestionAnswerContract,
     QuestionCandidate,
     QuestionCandidateSet,
     QuestionExecutionResult,
     QuestionFinding,
+    method_answer_contract,
 )
 from eda_platform.schemas.relations import RelationshipCandidateSet
 from eda_platform.schemas.sessions import (
@@ -67,6 +72,7 @@ from eda_platform.schemas.sessions import (
     build_run_title,
     clip_run_title,
 )
+from eda_platform.schemas.stats import StatTestResult
 from eda_platform.tools.domain_metrics import (
     DOMAIN_METRIC_REGISTRY,
     MetricDefinition,
@@ -75,9 +81,12 @@ from eda_platform.tools.domain_metrics import (
     validate_metric_result,
 )
 from eda_platform.tools.evidence import PayloadPolicy
-from eda_platform.tools.loader import LoadedDataset, load_csv
+from eda_platform.tools.loader import (
+    DatasetFramePool,
+    LoadedDataset,
+    defer_csv,
+)
 from eda_platform.tools.profiler import looks_like_id_name
-from eda_platform.tools.relationship_discovery import _relation_name
 from eda_platform.tools.report_validator import full_coverage_evidence_refs
 from eda_platform.tools.sql_runner import SqlCatalog, build_catalog, run_sql
 
@@ -157,10 +166,7 @@ def select_auto_execution_candidates(
 def _eligible_for_auto_execution(candidate: QuestionCandidate) -> bool:
     if candidate.origin != "template" or candidate.sql_template is None:
         return False
-    if candidate.feasibility is not None and candidate.feasibility.status in {
-        "needs_data",
-        "unsuitable",
-    }:
+    if candidate.feasibility is not None and candidate.feasibility.status != "ready":
         return False
     if candidate.score.join_risk > 0.3 or candidate.score.quality_risk > 0.6:
         return False
@@ -233,6 +239,7 @@ def execute_question_candidate(
     on_guard_rejected: Callable[[ToolGuardError], None] | None = None,
     confirmed_joins: Collection[str] = (),
     on_join_used: Callable[[str], None] | None = None,
+    catalog: SqlCatalog | None = None,
 ) -> list[Artifact]:
     if candidate.origin == "llm":
         return _execute_llm_question(
@@ -248,6 +255,7 @@ def execute_question_candidate(
             on_guard_rejected=on_guard_rejected,
             confirmed_joins=confirmed_joins,
             on_join_used=on_join_used,
+            catalog=catalog,
         )
     return _execute_template_question(
         candidate,
@@ -261,6 +269,7 @@ def execute_question_candidate(
         seeds=seeds,
         confirmed_joins=confirmed_joins,
         on_join_used=on_join_used,
+        catalog=catalog,
     )
 
 
@@ -737,6 +746,30 @@ def _agent_qexec_artifact(
             **common,
         )
 
+    contract_failure = _method_contract_failure(
+        candidate,
+        evidence_artifacts=evidence_artifacts,
+        tool_names=agent_result.tool_names,
+    )
+    if contract_failure is not None:
+        contract = _effective_answer_contract(candidate)
+        return _failed_qexec_artifact(
+            question_id=candidate.question_id,
+            question=candidate.question_en,
+            origin=candidate.origin,
+            metric_id=candidate.metric_id,
+            project_id=project_id,
+            session_id=session_id,
+            parent_ids=[*parent_ids, *evidence_ids],
+            error=f"Result contract rejected publication: {contract_failure.reason}",
+            outcome="abstained",
+            abstention_code=contract_failure.code,
+            exploratory=candidate.exploratory,
+            answer_contract=contract,
+            contract_status="failed",
+            **common,
+        )
+
     sql_artifacts = [
         artifact
         for artifact in evidence_artifacts
@@ -785,6 +818,12 @@ def _agent_qexec_artifact(
                 if unique_tool_names
                 else "."
             )
+        ),
+        answer_contract=_effective_answer_contract(candidate),
+        contract_status=(
+            "passed"
+            if _effective_answer_contract(candidate) is not None
+            else "not_required"
         ),
         sql=sql_text,
         sql_result_artifact_id=last_sql.id if last_sql is not None else None,
@@ -861,6 +900,7 @@ def _execute_template_question(
     seeds: SemanticSeeds | None = None,
     confirmed_joins: Collection[str] = (),
     on_join_used: Callable[[str], None] | None = None,
+    catalog: SqlCatalog | None = None,
 ) -> list[Artifact]:
     if candidate.sql_template is None:
         return [
@@ -901,7 +941,7 @@ def _execute_template_question(
         ]
     try:
         sql_artifact = run_sql(
-            _template_catalog(datasets),
+            catalog or _template_catalog(datasets),
             candidate.sql_template,
             project_id=project_id,
             session_id=session_id,
@@ -958,6 +998,7 @@ def _execute_llm_question(
     on_guard_rejected: Callable[[ToolGuardError], None] | None = None,
     confirmed_joins: Collection[str] = (),
     on_join_used: Callable[[str], None] | None = None,
+    catalog: SqlCatalog | None = None,
 ) -> list[Artifact]:
     if llm is None or is_offline_client(llm):
         return [
@@ -997,7 +1038,7 @@ def _execute_llm_question(
                 exploratory=candidate.exploratory,
             )
         ]
-    catalog = build_catalog(datasets)
+    catalog = catalog or build_catalog(datasets)
 
     def plan_question(previous_error: str | None = None) -> AnalysisPlan:
         return build_plan(
@@ -1085,20 +1126,15 @@ def _execute_llm_question(
 
 
 def _template_catalog(datasets: Sequence[LoadedDataset]) -> SqlCatalog:
-    engine = DuckDBQueryEngine()
-    relations: dict[str, str] = {}
-    for dataset in datasets:
-        relation_name = _relation_name(dataset.record.dataset_id)
-        engine.register_frame(relation_name, dataset.frame)
-        relations[dataset.record.dataset_id] = relation_name
-        relations[dataset.record.name] = relation_name
-    return SqlCatalog(engine=engine, relations=relations)
+    return build_catalog(datasets, relation_key="dataset_id")
 
 
 def _catalog_columns(
     datasets: Sequence[LoadedDataset],
     catalog: SqlCatalog,
 ) -> dict[str, set[str]]:
+    if catalog.columns is not None:
+        return catalog.columns
     columns: dict[str, set[str]] = {}
     for dataset in datasets:
         relation_name = catalog.relations[dataset.record.name]
@@ -1132,6 +1168,8 @@ def _successful_qexec_artifact(
             outcome="abstained",
             abstention_code=contract_failure.code,
             exploratory=candidate.exploratory,
+            answer_contract=_effective_answer_contract(candidate),
+            contract_status="failed",
         )
     findings = _findings(candidate, sql_artifact)
     sql_result = SqlResult.model_validate(sql_artifact.payload)
@@ -1156,6 +1194,12 @@ def _successful_qexec_artifact(
         origin=candidate.origin,
         metric_id=candidate.metric_id,
         plan_summary=plan_summary,
+        answer_contract=_effective_answer_contract(candidate),
+        contract_status=(
+            "passed"
+            if _effective_answer_contract(candidate) is not None
+            else "not_required"
+        ),
         sql=sql_result.sql,
         sql_result_artifact_id=sql_artifact.id,
         findings=findings,
@@ -1188,6 +1232,13 @@ def _result_contract_failure(
     candidate: QuestionCandidate, sql_artifact: Artifact
 ) -> _ResultContractFailure | None:
     """Fail closed when a successful SQL result cannot answer its question."""
+    method_failure = _method_contract_failure(
+        candidate,
+        evidence_artifacts=[sql_artifact],
+        tool_names=["run_sql"],
+    )
+    if method_failure is not None:
+        return method_failure
     result = SqlResult.model_validate(sql_artifact.payload)
     if not result.rows_preview:
         return _ResultContractFailure("empty_query_result", "query returned no answer rows")
@@ -1248,6 +1299,88 @@ def _result_contract_failure(
     return None
 
 
+def _method_contract_failure(
+    candidate: QuestionCandidate,
+    *,
+    evidence_artifacts: Sequence[Artifact],
+    tool_names: Sequence[str],
+) -> _ResultContractFailure | None:
+    """Bind non-SQL analysis claims to the method that actually produced them."""
+    # Method requirements are policy, not candidate-controlled metadata.  Use
+    # the canonical requirement first so a legacy or injected metric/shape
+    # contract cannot downgrade a prediction/anomaly/etc. question to SQL.
+    contract = _effective_answer_contract(candidate)
+    if contract is None or contract.kind != "method":
+        return None
+    artifact_types = {
+        artifact.type for artifact in evidence_artifacts if _valid_method_artifact(artifact)
+    }
+    observed_tools = set(tool_names)
+    missing_artifacts = [
+        artifact_type.value
+        for artifact_type in contract.required_artifact_types
+        if artifact_type not in artifact_types
+    ]
+    missing_tools = [
+        tool_name
+        for tool_name in contract.required_tool_names
+        if tool_name not in observed_tools
+    ]
+    if missing_artifacts or missing_tools:
+        details: list[str] = []
+        if missing_artifacts:
+            details.append(f"missing artifact types {', '.join(missing_artifacts)}")
+        if missing_tools:
+            details.append(f"missing method tools {', '.join(missing_tools)}")
+        return _ResultContractFailure(
+            contract.abstention_code,
+            f"method {contract.required_method_id!r} was not proven: " + "; ".join(details),
+        )
+    if contract.requires_complete_result and any(
+        artifact.payload.get("truncated") is True for artifact in evidence_artifacts
+    ):
+        return _ResultContractFailure(
+            contract.abstention_code,
+            f"method {contract.required_method_id!r} returned truncated evidence",
+        )
+    return None
+
+
+def _effective_answer_contract(
+    candidate: QuestionCandidate,
+) -> QuestionAnswerContract | None:
+    """Return the non-downgradable publication contract for a candidate."""
+    return method_answer_contract(candidate.analysis_mode) or candidate.answer_contract
+
+
+def _valid_method_artifact(artifact: Artifact) -> bool:
+    """Reject type-label spoofing at the answer publication boundary."""
+    validators: dict[ArtifactType, tuple[str, type[Any]]] = {
+        ArtifactType.MODEL_CARD: ("model", ModelCard),
+        ArtifactType.ANOMALY_SCREEN_RESULT: ("anomaly", AnomalyScreenResult),
+        ArtifactType.STAT_TEST_RESULT: ("stat", StatTestResult),
+        ArtifactType.TABLE: ("table", AnalysisTable),
+    }
+    binding = validators.get(artifact.type)
+    if binding is not None:
+        prefix, model = binding
+        try:
+            model.model_validate(artifact.payload)
+        except (TypeError, ValueError):
+            return False
+        return artifact.id == make_artifact_id(prefix, artifact.payload)
+    if artifact.type is ArtifactType.CODE_EXECUTION_RESULT:
+        stdout_json = artifact.payload.get("stdout_json")
+        return bool(
+            artifact.payload.get("status") == "succeeded"
+            and isinstance(stdout_json, dict)
+            and str(stdout_json.get("summary") or "").strip()
+            and artifact.payload.get("policy_digest")
+            and artifact.payload.get("execution_manifest_sha256")
+        )
+    return True
+
+
 def _failed_qexec_artifact(
     *,
     question_id: str,
@@ -1266,6 +1399,8 @@ def _failed_qexec_artifact(
     tool_calls: int = 0,
     tool_names: list[str] | None = None,
     evidence_artifact_ids: list[str] | None = None,
+    answer_contract: QuestionAnswerContract | None = None,
+    contract_status: Literal["failed", "not_required"] = "not_required",
 ) -> Artifact:
     result = QuestionExecutionResult(
         question_id=question_id,
@@ -1275,6 +1410,8 @@ def _failed_qexec_artifact(
         tool_calls=tool_calls,
         tool_names=tool_names or [],
         evidence_artifact_ids=evidence_artifact_ids or [],
+        answer_contract=answer_contract,
+        contract_status=contract_status,
         sql=sql,
         findings=[],
         status="failed",
@@ -1619,7 +1756,15 @@ def _findings_for(candidate: QuestionCandidate, sql_artifact: Artifact) -> list[
         if finding is not None:
             return [finding]
     if candidate.template_id == "trend" and len(rows) >= 2:
-        return [_trend_finding(candidate, sql_artifact.id, rows)]
+        return [
+            _trend_finding(
+                candidate,
+                sql_artifact.id,
+                rows,
+                total_periods=result.row_count,
+                truncated=result.truncated,
+            )
+        ]
     if candidate.template_id in {"group_difference", "cross_table_aggregation"}:
         return [
             _ranked_group_finding(
@@ -1681,6 +1826,9 @@ def _trend_finding(
     candidate: QuestionCandidate,
     artifact_id: str,
     rows: list[dict[str, object]],
+    *,
+    total_periods: int | None = None,
+    truncated: bool = False,
 ) -> QuestionFinding:
     # Prefer the trend metric that matches the question's intent.
     intent = infer_question_intent(candidate.question_en)
@@ -1697,12 +1845,27 @@ def _trend_finding(
     end = _number(end_row.get(metric_column))
     if start is None or end is None:
         return _generic_finding(candidate, artifact_id, rows)
-    direction = "increased" if end > start else "decreased" if end < start else "stayed flat"
-    return QuestionFinding(
-        text=(
+    if truncated and total_periods is not None and total_periods > len(rows):
+        # The preview holds only the head of the ordered series: its last row
+        # is not the series end, so a direction verdict is unsupported
+        # (2026-08-12: a 50-of-100 daily freight series shipped as a trend).
+        unseen = total_periods - len(rows)
+        text = (
+            f"{candidate.question_en} Over the first {len(rows)} of "
+            f"{total_periods} periods the metric moved from {start:g} to "
+            f"{end:g}; {unseen} later periods were not returned, so the "
+            "overall trend is not established."
+        )
+    else:
+        direction = (
+            "increased" if end > start else "decreased" if end < start else "stayed flat"
+        )
+        text = (
             f"{candidate.question_en} The metric {direction} from {start:g} "
             f"to {end:g} across the returned periods."
-        ),
+        )
+    return QuestionFinding(
+        text=text,
         evidence=[
             EvidenceRef(
                 kind="sql",
@@ -2450,6 +2613,7 @@ def _load_source_datasets(
 ) -> list[LoadedDataset]:
     del source_session_id
     datasets: list[LoadedDataset] = []
+    frame_pool = DatasetFramePool()
     for artifact in source_artifacts:
         if artifact.type is not ArtifactType.DATASET_PROFILE:
             continue
@@ -2464,7 +2628,13 @@ def _load_source_datasets(
             if not matches:
                 raise FileNotFoundError(f"Could not reload source dataset: {profile.name}")
             path = matches[0]
-        datasets.append(load_csv(path, dataset_id=profile.dataset_id))
+        datasets.append(
+            defer_csv(
+                path,
+                dataset_id=profile.dataset_id,
+                frame_pool=frame_pool,
+            )
+        )
     return datasets
 
 

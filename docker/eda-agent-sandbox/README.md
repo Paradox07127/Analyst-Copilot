@@ -26,23 +26,30 @@ closed if the proof is unavailable.
 ## Enforced boundary
 
 - Linux-container Docker engine with seccomp and cgroup namespaces
-- non-root UID, all Linux capabilities dropped, and `no-new-privileges`
+- model-authored code runs as non-root UID `65532`, with zero effective Linux
+  capabilities and `no-new-privileges`
+- PID 1 is a root supervisor with only `CAP_KILL`; after the analysis process
+  exits it kills residual sandbox-UID processes before output adoption
 - no network, private cgroup namespace, no IPC namespace sharing
 - read-only root filesystem; `/tmp` is a bounded `noexec,nosuid,nodev` tmpfs
 - pids, memory plus swap, CPU, wall-clock, file-descriptor, stdout, and stderr limits
 - per-file, total-size, file-count, symlink, and special-file output checks
 - model script mounted read-only at `/sandbox/analysis.py`
-- one fresh writable `/work` directory per execution
+- one fresh byte- and inode-bounded `/work` tmpfs per execution
 - only requested regular-file inputs, copied first to a private staging area and
   mounted read-only under `/work/inputs`
+- after quiescence, trusted output adoption runs as the tmpfs owner and uses a
+  container-side bounded tar stream followed by a second host-side
+  path/type/count/size validation; the host output directory is never writable
+  by live model-authored code
 - scrubbed Docker CLI environment: application/API credentials do not enter the
   sandbox process
 - SHA-256 input, code, stdout, stderr, image, policy, and output manifests stored
   outside the container-visible directory
 
-The preflight canary verifies the effective runtime—not just generated command
-arguments—by checking UID, effective capabilities, `NoNewPrivs`, seccomp,
-read-only root behavior, and network denial.
+The preflight canary verifies the effective analysis runtime—not just generated
+command arguments—by checking UID, effective capabilities, `NoNewPrivs`,
+seccomp, read-only root behavior, cgroup limits, and network denial.
 
 Never mount the project root, workspace root, `.env`, credential directories, a
 home directory, or the Docker socket into this image. The packaged `docker/app`

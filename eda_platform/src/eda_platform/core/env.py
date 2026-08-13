@@ -88,6 +88,20 @@ def load_llm_settings_from_env_file(
     )
 
 
+def llm_provider_explicitly_configured(
+    path: Path | str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """True when EDA_LLM_PROVIDER is set non-empty in the env file or environ.
+
+    Distinguishes "the operator chose offline" from "no configuration reached
+    this process at all" — the loader defaults both to offline."""
+    merged = parse_env_file(DEFAULT_ENV_PATH if path is None else path)
+    merged.update(dict(os.environ if environ is None else environ))
+    return bool((merged.get("EDA_LLM_PROVIDER") or "").strip())
+
+
 REPORT_LLM_ENV_PREFIX = "EDA_REPORT_LLM_"
 
 

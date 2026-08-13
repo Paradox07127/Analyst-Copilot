@@ -26,6 +26,7 @@ from eda_platform.schemas.artifacts import Artifact, ArtifactType, EvidenceRef, 
 from eda_platform.schemas.quality_context import QualityContext, QualityContextSet
 from eda_platform.schemas.questions import (
     FindingScore,
+    QuestionCandidateSet,
     QuestionExecutionResult,
     QuestionFinding,
 )
@@ -137,6 +138,41 @@ def _profile_artifact(tmp_path: Path) -> Artifact:
     )
     loaded = load_csv(csv_path, dataset_id="ds_x")
     return profile_dataset(loaded, project_id="project_demo", session_id="run_demo")
+
+
+def _qcand_artifact(*, llm_route_skipped: bool) -> Artifact:
+    payload = QuestionCandidateSet(
+        candidates=[],
+        llm_route_skipped=llm_route_skipped,
+        llm_route_error="LLM route skipped after retry: truncated" if llm_route_skipped else None,
+    ).model_dump(mode="json")
+    return Artifact(
+        id="qcand_240544bab75d",
+        type=ArtifactType.QUESTION_CANDIDATE_SET,
+        project_id="project_demo",
+        session_id="run_demo",
+        payload=payload,
+    )
+
+
+def test_a_skipped_discovery_route_is_disclosed_in_limitations() -> None:
+    markdown = report_bundle_to_markdown(
+        _empty_bundle(), artifacts=[_qcand_artifact(llm_route_skipped=True)]
+    )
+    limitations = _section_text(markdown, "## Limitations and Risks")
+    assert "question discovery" in limitations
+    assert "built-in templates" in limitations
+    # No internal error strings or ids leak into the prose.
+    assert "LLM route skipped after retry" not in limitations
+    assert not _INTERNAL_ID_RE.search(limitations)
+
+
+def test_a_healthy_discovery_route_adds_no_disclosure() -> None:
+    markdown = report_bundle_to_markdown(
+        _empty_bundle(), artifacts=[_qcand_artifact(llm_route_skipped=False)]
+    )
+    limitations = _section_text(markdown, "## Limitations and Risks")
+    assert "question discovery" not in limitations
 
 
 # --------------------------------------------------------------------------- #

@@ -187,8 +187,10 @@ describe("Routing", () => {
     const navigation = await screen.findByRole("navigation", {
       name: "Session sections",
     });
-    expect(
-      within(navigation).getByRole("link", { name: "Table preview" }),
-    ).toHaveAttribute("aria-current", "page");
+    await waitFor(() => {
+      expect(
+        within(navigation).getByRole("link", { name: "Table preview" }),
+      ).toHaveAttribute("aria-current", "page");
+    });
   });
 });

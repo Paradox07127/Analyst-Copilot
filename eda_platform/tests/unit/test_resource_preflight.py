@@ -143,11 +143,11 @@ def test_working_set_formula_accounts_for_preclean_raw_retention() -> None:
         policy=policy,
         precleaning_enabled=True,
     )
-    assert ordinary == 1_000
-    assert preclean == 1_400
+    assert ordinary == 800
+    assert preclean == 1_000
 
 
-def test_two_workers_downgrade_to_one_when_only_one_fits() -> None:
+def test_streaming_lifecycle_uses_one_full_frame_worker() -> None:
     estimates = [_estimate("a"), _estimate("b")]
     policy = _policy(max_working_set_bytes=1_000)
 
@@ -159,9 +159,9 @@ def test_two_workers_downgrade_to_one_when_only_one_fits() -> None:
 
     assert decision.status == "accepted"
     assert decision.effective_dataset_workers == 1
-    assert decision.estimated_working_set_bytes == 900
-    assert decision.worker_adjustment_reason == "memory_budget_worker_downgrade"
-    assert "memory_budget_worker_downgrade" in decision.reason_codes
+    assert decision.estimated_working_set_bytes == 700
+    assert decision.worker_adjustment_reason == "streaming_dataset_lifecycle"
+    assert "streaming_dataset_lifecycle" in decision.reason_codes
 
 
 def test_single_worker_over_budget_returns_metadata_only_limited() -> None:
@@ -242,7 +242,39 @@ def test_exact_thresholds_are_accepted() -> None:
         policy=policy,
     )
     assert decision.status == "accepted"
-    assert decision.effective_dataset_workers == 2
+    assert decision.compute_mode == "streaming_exact"
+    assert decision.effective_dataset_workers == 1
+    assert decision.worker_adjustment_reason == "streaming_dataset_lifecycle"
+
+
+def test_olist_scale_uses_largest_table_not_sum_of_all_frames() -> None:
+    frame_sizes = [
+        243_116_876,
+        83_000_000,
+        48_000_000,
+        35_000_000,
+        28_000_000,
+        22_000_000,
+        17_000_000,
+        11_000_000,
+        7_867_388,
+    ]
+    estimates = [
+        _estimate(f"table_{index}.csv", frame_bytes=frame_bytes)
+        for index, frame_bytes in enumerate(frame_sizes)
+    ]
+
+    decision = decide_resource_preflight(
+        estimates,
+        baseline_peak_rss_bytes=206_143_488,
+        policy=EdaResourcePolicy(max_working_set_bytes=2 << 30),
+    )
+
+    assert sum(frame_sizes) == 494_984_264
+    assert decision.status == "accepted"
+    assert decision.compute_mode == "streaming_exact"
+    assert decision.estimated_working_set_bytes == 1_907_961_620
+    assert decision.estimated_working_set_bytes < 2 << 30
 
 
 def test_empty_inputs_are_limited_and_workers_are_zero() -> None:

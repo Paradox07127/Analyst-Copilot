@@ -1,25 +1,61 @@
-# EDA Agent Platform
+# Analyst Copilot
 
-> A local-first, traceable, and safety-bounded workspace for AI-assisted exploratory data analysis.
+[![CI](https://github.com/Paradox07127/Analyst-Copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/Paradox07127/Analyst-Copilot/actions/workflows/ci.yml)
+![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
+![Node.js 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&logoColor=white)
+![Status](https://img.shields.io/badge/status-active%20development-orange)
 
-EDA Agent Platform helps analysts understand CSV data quality, structure, relationships, and business signals. It combines deterministic analysis with constrained LLM workflows and evidence validation: establish reproducible facts first, then extend them through inspectable questions, reports, and chat analysis.
+> A local-first analytical workspace that turns CSV data into reviewable facts,
+> evidence-backed findings, and reproducible reports.
 
-The current package version is `0.2.0`. The implementation lives in `eda_platform/`.
-The former `single_eda_agent Ver1.0/` implementation has been removed from the
-working tree and remains available only through Git history.
+Analyst Copilot combines a deterministic data-analysis core with bounded agent
+workflows. Pandas, DuckDB, SciPy, and scikit-learn establish reproducible facts;
+LLMs may plan, select typed tools, and explain results, but they cannot bypass
+method contracts, evidence validation, approval boundaries, or publication
+gates.
+
+The project is designed for analysts who want AI assistance without treating a
+model response as the system of record. Every meaningful result is represented
+as a typed artifact, linked to source evidence, recorded in a trace, and exposed
+for review in a React workbench.
+
+The current release is `0.2.0`. The Python implementation lives in
+[`eda_platform/`](eda_platform/), the web application in
+[`apps/web/`](apps/web/), and operational entry points in [`scripts/`](scripts/).
+
+## Project status
+
+Analyst Copilot is under active development. The local, single-workspace flow,
+deterministic EDA, question execution, reporting, comparison, and guarded chat
+paths are implemented and covered by automated tests. Autonomous exploration is
+present behind a fail-closed production certificate gate; it remains hidden
+until a trusted provider-specific three-bucket evaluation certificate is
+installed.
+
+Remote mode is a protected single-workspace deployment option, not a
+multi-tenant security boundary. Open-ended model-authored Python requires the
+separate Docker sandbox and fails closed when its runtime proof is unavailable.
+See [Security model](#security-model) and [Known boundaries](#known-boundaries)
+before using the project with sensitive data.
 
 ## Contents
 
 - [Capabilities](#capabilities)
+- [How it works](#how-it-works)
+- [Agent harness and evaluation](#agent-harness-and-evaluation)
 - [Technology and requirements](#technology-and-requirements)
 - [Quick start](#quick-start)
 - [Ways to run the app](#ways-to-run-the-app)
 - [User guide](#user-guide)
 - [LLM and privacy settings](#llm-and-privacy-settings)
 - [Optional: open-ended Python analysis](#optional-open-ended-python-analysis)
-- [Artifacts, traceability, and safety boundaries](#artifacts-traceability-and-safety-boundaries)
+- [Artifacts and traceability](#artifacts-and-traceability)
+- [Security model](#security-model)
+- [Known boundaries](#known-boundaries)
 - [Development and quality checks](#development-and-quality-checks)
 - [Project structure](#project-structure)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Capabilities
 
@@ -33,6 +69,93 @@ working tree and remains available only through Git history.
 | Conversational analysis | In live LLM mode, use Chat for intent routing, planning, read-only DuckDB SQL, guarded missingness diagnostics, and leakage-aware baseline modeling. Open-ended Python analysis is isolated behind a sandbox; causal guidance is advisory and causal claims remain fail-closed. |
 | Reuse and comparison | Edit semantic knowledge, save validated analysis skills, and compare two runs or fork a one-change variant. |
 | Observability | Watch a run's stages and events in the floating Activity panel, then inspect the typed artifacts, validation state, and errors it produced. |
+
+## How it works
+
+```mermaid
+flowchart LR
+    U["CSV files + business context"] --> D["Deterministic profiling and quality"]
+    D --> Q["Questions + AnswerContract"]
+    Q --> R{"Execution route"}
+    R -->|"typed tool calling"| A["bounded question agent"]
+    R -->|"offline or unsupported"| P["deterministic SQL pipeline"]
+    A --> G["method and evidence gates"]
+    P --> G
+    G -->|"pass"| F["typed findings"]
+    G -->|"fail"| X["typed abstention"]
+    F --> O["report + claim ledger"]
+    X --> O
+    O --> T["trace, artifacts, usage, and eval trial"]
+```
+
+The model is never the persistence layer. Drivers invoke typed tools; tools
+produce content-addressed artifacts and evidence references; deterministic
+validators decide whether a result may become a finding or report claim. A
+failed method contract becomes an explicit abstention instead of a plausible
+but unsupported answer.
+
+The runtime deliberately stays framework-light. It uses project-owned Pydantic
+contracts, an explicit tool loop, durable journals and receipts for exploration,
+and a single canonical evaluation trial format. This keeps execution semantics
+inspectable without coupling the product to a third-party agent graph runtime.
+
+### Bounded-memory data plane
+
+Auto EDA uses a staged, per-table lifecycle instead of retaining every pandas
+DataFrame for the duration of a run:
+
+1. Inputs are copied into content-addressed storage and represented by
+   lightweight `DatasetSource` handles.
+2. One table is materialized for profiling, quality checks, charts, statistics,
+   and optional modeling; only typed artifacts survive when that table is
+   released.
+3. Multi-table SQL imports the trusted CSV inputs sequentially into a private
+   temporary DuckDB database. External file access is then disabled before any
+   generated or template SQL can execute. DuckDB has a 512 MB memory ceiling
+   and may spill into that private temporary directory.
+4. Reports consume the artifact graph rather than source DataFrames.
+
+Resource preflight records both the estimated and verified working set. Its
+memory decision is based on the largest active table plus bounded temporary
+work, while total input bytes, rows, columns, and deep-frame bytes remain
+separate admission and telemetry fields. A resource stop is published as
+`limited`, not as a successfully completed analysis.
+
+As a reference regression, the nine-table Olist fixture (126 MB of CSV,
+approximately 495 MB combined deep-frame size) completes offline with 123
+artifacts in about 32 seconds on the development machine. The measured process
+peak was approximately 446 MB, or 242 MB above the imported-runtime baseline;
+these measurements are illustrative rather than deployment guarantees.
+
+## Agent harness and evaluation
+
+The harness treats the complete system—model, prompts, tools, policy,
+environment, data fingerprints, and budget—as the unit under test.
+
+- `QuestionAnswerContract` binds an answer to its required metric, method,
+  artifact type, tool identity, and result shape. Prediction and anomaly work
+  require their dedicated typed outputs; unsupported forecast, segmentation,
+  and causal execution paths abstain.
+- `WorkflowEvalTrial` is the canonical release record. It combines final-output
+  quality with artifact lineage, evidence locators, action spans, pending
+  approvals, report publication state, and ledger/budget/metrics reconciliation.
+- Exploration certification evaluates three independent buckets: planted
+  analytical capability, negative controls, and prompt/tool injection. All
+  buckets share signed identity, fingerprint, seed, and budget constraints.
+- Component scores cannot override a failed hard gate. Replay without durable
+  trace evidence is inconclusive rather than silently passing.
+
+Run the deterministic workflow evaluation with:
+
+```bash
+uv run python scripts/evaluate_workflow.py \
+  --case eda_platform/tests/evals/workflow_quality/cases/semantic_guardrails.json \
+  --input-dir eda_platform/tests/evals/workflow_quality/data \
+  --repeat 3
+```
+
+The repository also contains adversarial, golden, scoreboard, security, and
+exploration-release suites under [`eda_platform/tests/`](eda_platform/tests/).
 
 ## Technology and requirements
 
@@ -135,7 +258,9 @@ uv run python scripts/serve.py --port 8321  # alternate port
 
 `serve.py` serves the static build and the API from one origin, with an SPA
 fallback so deep links like `/projects/<id>/sessions/<id>/data-map` work on refresh.
-It binds loopback by default; pass `--host` explicitly for remote access.
+It binds loopback by default. In local mode, non-loopback bind addresses are
+rejected; configure authenticated remote mode before passing a public or LAN
+`--host` value.
 The web UI is enabled by passing `serve_web_dist` to `create_app` (which is what
 `serve.py` does); a bare `create_app()` (Option B) serves the API only.
 
@@ -288,6 +413,13 @@ started afterward. Choose it according to your data classification, vendor
 agreement, and organization policy. API keys are write-only in the UI after
 submission and are never written into project files.
 
+Managed SaaS providers are pinned to their registered origins. Custom endpoints
+are loopback-only unless an operator explicitly allows the exact HTTPS origin
+with `EDA_LLM_ENDPOINT_ALLOWLIST`; URLs containing user info, query parameters,
+or fragments are rejected. Credential-bearing requests do not follow redirects,
+and changing an endpoint clears the stored API key so credentials cannot be
+silently reused at a different origin.
+
 ## Optional: open-ended Python analysis
 
 Open-ended Python analysis is used only when a matching Chat request requires it. Deterministic Auto EDA, reports, and read-only SQL do not depend on it. For the recommended isolation boundary, start Docker Desktop and build the image once:
@@ -305,8 +437,12 @@ network. If any check fails, open-ended code is rejected.
 Only the requested dataset files are copied into a private per-execution staging
 directory and mounted read-only under `/work/inputs`; original uploads, the
 workspace, source tree, `.env`, credentials, and Docker socket are never mounted.
-Only `/work` and a bounded `/tmp` tmpfs are writable. Outputs are size/count
-limited and sealed with SHA-256 manifests after execution.
+`/work` is a byte- and inode-bounded tmpfs; `/tmp` is a separate bounded tmpfs.
+The analysis process runs as UID `65532` with no effective capabilities. After
+it exits, a narrowly privileged supervisor clears residual sandbox-user
+processes, validates the output tree, streams regular files through a bounded
+tar channel, and destroys the container. The host validates paths, entry types,
+file counts, and sizes again before sealing SHA-256 manifests.
 
 For deployments that must refuse to start unless this runtime proof succeeds,
 set `EDA_SANDBOX_REQUIRED=1`. You can run the same operational check directly:
@@ -318,7 +454,7 @@ uv run python scripts/check_sandbox.py
 Set `EDA_SANDBOX_DOCKER_IMAGE` to use a custom prebuilt image. See the
 [sandbox documentation](docker/eda-agent-sandbox/README.md).
 
-## Artifacts, traceability, and safety boundaries
+## Artifacts and traceability
 
 ### Local storage
 
@@ -343,6 +479,41 @@ The platform is local-first: uploaded files and generated artifacts remain in th
 - Each run records its `code_version`, tool calls, model token usage, estimated cost, and failures for reproduction and troubleshooting.
 
 These controls reduce the risk of unsupported conclusions; they do not replace business review, data-owner confirmation, or human judgment in production decisions.
+
+## Security model
+
+The platform follows a fail-closed boundary for capabilities that can cross a
+trust domain:
+
+| Boundary | Enforcement |
+|---|---|
+| Model data access | Per-session payload policy limits requests to schema, aggregates, or explicitly enabled samples. |
+| Provider credentials | Keys are write-only in the UI, omitted from project artifacts, and sent only to pinned or operator-approved origins. Worker processes receive an explicit environment allow-list. |
+| SQL | DuckDB statements are parsed and constrained to read-only analysis; results become inspectable artifacts. |
+| Python | Model-authored code is accepted only by the verified Docker backend. No host-process or macOS Seatbelt fallback exists. |
+| Tool actions | Typed schemas, method contracts, permission classification, bounded budgets, and approval hashes guard invocation and publication. |
+| Reports | Evidence references, claim ledgers, publication state, and deterministic validators gate release. |
+| Remote access | Exact hosts and origins, TLS-protected authentication, CSRF checks, upload quotas, and explicit remote mode are required. |
+
+LLM debug capture stores metadata—type, shape, size, digest, and keys—by
+default. Full plaintext capture requires an explicit developer opt-in and should
+not be enabled for sensitive or remotely hosted workloads.
+
+## Known boundaries
+
+- The application is local-first and single-workspace. Its remote mode is not a
+  multi-tenant authorization system.
+- Autonomous exploration stays disabled until a trusted production certificate
+  covers planted, negative-control, and injection trials for the configured
+  provider and policy.
+- Forecasting, segmentation, and causal execution do not yet have dedicated
+  typed adapters. Requests requiring those methods abstain rather than falling
+  back to generic SQL or Python.
+- Docker live-runtime probes require a Linux-container Docker engine and the
+  prebuilt sandbox image. Deterministic EDA and read-only SQL remain available
+  when Docker is absent; model-authored Python does not.
+- Generated analysis assists review but does not replace domain validation,
+  privacy review, or human approval for consequential decisions.
 
 ## Development and quality checks
 
@@ -424,7 +595,52 @@ uv run python scripts/evaluate_workflow.py \
   --repeat 3
 ```
 
+## Project structure
+
+```text
+apps/web/                         React + Vite workbench
+api/openapi.json                  generated API contract
+docker/app/                       containerized application deployment
+docker/eda-agent-sandbox/         isolated Python runtime and locked image
+eda_platform/src/eda_platform/    Python application, agents, tools, and schemas
+eda_platform/tests/               unit, golden, eval, scoreboard, and security suites
+scripts/                          server, demos, operations, and eval entry points
+```
+
+The primary architectural seams are:
+
+- `agents/`: model-facing loops, tool definitions, planning, interpretation,
+  reporting, and exploration orchestration;
+- `core/`: storage-independent policies, budgets, traces, sandbox broker,
+  endpoint security, and durable control primitives;
+- `drivers/`: end-to-end workflows that connect agents and deterministic tools;
+- `schemas/`: versioned persisted and API-facing contracts;
+- `tools/`: deterministic analytical and evaluation operations;
+- `application/` and `api/`: use cases, services, HTTP contracts, and the web
+  application boundary.
+
+## Contributing
+
+Issues and focused pull requests are welcome. Before opening a pull request:
+
+1. keep generated files, schemas, and frontend types in sync;
+2. add regression tests for behavioral or security changes;
+3. run `scripts/ci_local.sh`, or the equivalent individual checks documented
+   above;
+4. describe any provider calls, Docker requirements, skipped live probes, or
+   changes to a trust boundary explicitly.
+
+Do not commit `.env`, API keys, user workspaces, model payload captures, or
+evaluation output containing project data.
+
+## License
+
+This repository does not currently declare an open-source license. Source
+availability does not grant permission to copy, modify, or redistribute the
+project; add a license before publishing it for third-party reuse.
 
 ## Related documentation
 
 - [Docker sandbox documentation](docker/eda-agent-sandbox/README.md)
+- [Changelog](CHANGELOG.md)
+- [Generated OpenAPI contract](api/openapi.json)

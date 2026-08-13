@@ -41,6 +41,7 @@ const PHASE_LABELS: Record<JobPhase, string> = {
   queued: "Queued",
   running: "Running",
   completed: "Completed",
+  limited: "Resource limited",
   failed: "Failed",
   cancelled: "Cancelled",
   disconnected: "Stream lost",
@@ -459,7 +460,7 @@ function Launcher({
   const progressLabel =
     phase === "completed"
       ? "✓"
-      : phase === "failed" || phase === "disconnected"
+      : phase === "limited" || phase === "failed" || phase === "disconnected"
         ? "!"
         : phase === "cancelled"
           ? "–"
@@ -1057,7 +1058,7 @@ function AgentActivityCenter() {
   }).length;
   const attentionCount = trackedJobs.filter((trackedJob) => {
     const phase = snapshots.get(trackedJob.jobId)?.state.phase;
-    return phase === "failed" || phase === "disconnected";
+    return phase === "limited" || phase === "failed" || phase === "disconnected";
   }).length;
 
   const close = () => {

@@ -32,7 +32,11 @@ from eda_platform.drivers.auto_eda import run_auto_eda
 from eda_platform.drivers.question_exec import execute_question_candidate
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile
 from eda_platform.schemas.plans import AnalysisPlan
-from eda_platform.schemas.questions import QuestionCandidate, QuestionScore
+from eda_platform.schemas.questions import (
+    QuestionAnswerContract,
+    QuestionCandidate,
+    QuestionScore,
+)
 from eda_platform.schemas.sessions import TraceEvent
 from eda_platform.tools.loader import LoadedDataset, load_csv
 from eda_platform.tools.profiler import profile_dataset
@@ -148,6 +152,28 @@ def test_threshold_question_receives_typed_answer_contract() -> None:
     assert contract is not None
     assert contract.kind == "threshold"
     assert contract.required_column_tokens == ["threshold"]
+
+
+def test_method_contract_overrides_weaker_candidate_contract() -> None:
+    ranked = rank_and_deduplicate_questions(
+        [
+            _llm_question(
+                "Can we predict which orders will be returned?",
+                analysis_mode="prediction",
+                metric_id="return_rate",
+                answer_contract=QuestionAnswerContract(
+                    kind="threshold",
+                    required_column_tokens=["rate"],
+                ),
+            )
+        ]
+    )
+
+    contract = ranked.candidates[0].answer_contract
+    assert contract is not None
+    assert contract.kind == "method"
+    assert contract.required_method_id == "ml_baseline"
+    assert contract.required_tool_names == ["run_baseline_model"]
 
 
 def test_llm_route_covering_everything_needs_no_template_backstop(tmp_path: Path) -> None:

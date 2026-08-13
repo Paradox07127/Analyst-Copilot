@@ -713,6 +713,9 @@ def test_delete_removes_job_results_and_sandbox_scratch(tmp_path: Path) -> None:
     scratch = store.root / "_sandbox" / "code_agent" / PROJECT_ID / RUN_ID
     scratch.mkdir(parents=True)
     (scratch / "analysis.py").write_text("print(1)\n", encoding="utf-8")
+    question_scratch = store.root / "_sandbox" / "question_agent" / PROJECT_ID / RUN_ID
+    question_scratch.mkdir(parents=True)
+    (question_scratch / "analysis.py").write_text("print(2)\n", encoding="utf-8")
     kept_scratch = store.root / "_sandbox" / "code_agent" / PROJECT_ID / "run_keep"
     kept_scratch.mkdir(parents=True)
 
@@ -721,6 +724,7 @@ def test_delete_removes_job_results_and_sandbox_scratch(tmp_path: Path) -> None:
     with pytest.raises(JobResultNotReadyError):
         read_job_result(store.root, PROJECT_ID, RUN_ID, "job_terminal_direct")
     assert not scratch.exists()
+    assert not question_scratch.exists()
     assert read_job_result(store.root, PROJECT_ID, "run_keep", "job_keep") == '{"ok":2}'
     assert kept_scratch.exists()
 

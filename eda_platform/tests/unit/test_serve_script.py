@@ -51,10 +51,17 @@ def test_defaults(serve: ModuleType, dist: Path, tmp_path: Path) -> None:
     assert config.workspace == tmp_path / "eda_platform" / "workspace"
 
 
-def test_host_port_overrides(serve: ModuleType, dist: Path) -> None:
-    config = serve.resolve_config(["--dist", str(dist), "--host", "0.0.0.0", "--port", "8321"])
-    assert config.host == "0.0.0.0"
-    assert config.port == 8321
+def test_local_mode_rejects_non_loopback_host(serve: ModuleType, dist: Path) -> None:
+    with pytest.raises(serve.ServeConfigError, match="loopback"):
+        serve.resolve_config(
+            ["--dist", str(dist), "--host", "0.0.0.0", "--port", "8321"]
+        )
+
+
+def test_local_mode_accepts_ipv6_loopback(serve: ModuleType, dist: Path) -> None:
+    config = serve.resolve_config(["--dist", str(dist), "--host", "::1"])
+
+    assert config.host == "::1"
 
 
 def test_missing_dist_mentions_npm_build(serve: ModuleType, tmp_path: Path) -> None:

@@ -12,6 +12,10 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field, ValidationError
 
 from eda_platform.core.cancellation import CancellationToken
+from eda_platform.core.endpoint_security import (
+    credential_safe_urlopen,
+    validate_llm_base_url,
+)
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.model_capabilities import agent_model_profile
 from eda_platform.core.provider_registry import (
@@ -397,7 +401,7 @@ class OpenAICompatibleLLMClient(_ThreadLocalCallState):
         if not settings.resolved_base_url:
             raise ValueError("Base URL could not be resolved for this provider.")
         self.settings = settings
-        self.base_url = settings.resolved_base_url
+        self.base_url = validate_llm_base_url(settings.provider, settings.resolved_base_url)
         self._init_call_state()
 
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
@@ -530,7 +534,9 @@ class OpenAICompatibleLLMClient(_ThreadLocalCallState):
         while True:
             attempt += 1
             try:
-                with request.urlopen(req, timeout=self.settings.timeout_seconds) as response:
+                with credential_safe_urlopen(
+                    req, timeout=self.settings.timeout_seconds
+                ) as response:
                     self._last_request_id = _response_request_id(
                         getattr(response, "headers", None)
                     )
@@ -630,7 +636,7 @@ class AnthropicLLMClient(_ThreadLocalCallState):
         if not settings.api_key:
             raise ValueError("API key is required for Anthropic.")
         self.settings = settings
-        self.base_url = settings.resolved_base_url
+        self.base_url = validate_llm_base_url(settings.provider, settings.resolved_base_url)
         self._init_call_state()
 
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
@@ -721,7 +727,9 @@ class AnthropicLLMClient(_ThreadLocalCallState):
         self._last_request_bytes = len(data)
         req = request.Request(url, data=data, headers=headers, method="POST")
         try:
-            with request.urlopen(req, timeout=self.settings.timeout_seconds) as response:
+            with credential_safe_urlopen(
+                req, timeout=self.settings.timeout_seconds
+            ) as response:
                 self._last_request_id = _response_request_id(getattr(response, "headers", None))
                 raw = response.read()
                 self._last_response_bytes = len(raw)

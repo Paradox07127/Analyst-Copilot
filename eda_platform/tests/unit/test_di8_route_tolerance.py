@@ -14,6 +14,7 @@ from eda_platform.agents.question_agent import (
     propose_llm_question_candidates,
     resolve_dataset_name,
 )
+from eda_platform.core.llm import MalformedProviderResponseError
 from eda_platform.core.session_metrics import summarize_session
 from eda_platform.core.store import ArtifactStore
 from eda_platform.core.tool_guard import ToolGuardError
@@ -225,6 +226,58 @@ def test_low_confidence_dataset_rejection_lists_known_datasets_in_feedback(
     assert retry_payload["schema_example"]["questions"][0]["llm_business_relevance"] == 0.8
     assert retry_payload["repair_attempt"] == 1
     assert guard_errors and "revenue_summary_2024.csv" in guard_errors[0].to_model_feedback()
+
+
+def test_a_truncated_provider_response_is_retried_with_feedback(tmp_path: Path) -> None:
+    # Regression: core/llm.py wraps pydantic ValidationError in
+    # MalformedProviderResponseError (a RuntimeError), which used to hit the
+    # give-up branch and skip the route without burning a single retry.
+    profile = _sales_profile(tmp_path)
+    good = {"questions": [_good_question()]}
+
+    class TruncatedThenGoodLLM(FakeQuestionLLM):
+        def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
+            if self.call_count == 0:
+                self.calls.append({"task": task, "schema": schema.__name__, "payload": payload})
+                self.call_count += 1
+                raise MalformedProviderResponseError(
+                    "structured response violates RawLLMQuestionProposalSet: "
+                    "1 validation error (truncated JSON)"
+                )
+            return super().structured(task=task, schema=schema, payload=payload)
+
+    llm = TruncatedThenGoodLLM(good)
+
+    result = propose_llm_question_candidates([profile], llm=llm, max_questions=1)
+
+    assert len(llm.calls) == 2  # the malformed response burned a repair retry
+    retry_payload = llm.calls[1]["payload"]
+    assert "previous_error" in retry_payload
+    assert "MalformedProviderResponseError" in retry_payload["previous_error"]
+    assert retry_payload["repair_attempt"] == 1
+    assert result.error is None
+    assert len(result.candidates) == 1
+
+
+def test_a_persistently_malformed_response_degrades_after_retries(tmp_path: Path) -> None:
+    profile = _sales_profile(tmp_path)
+
+    class AlwaysMalformedLLM(FakeQuestionLLM):
+        def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
+            self.calls.append({"task": task, "schema": schema.__name__, "payload": payload})
+            self.call_count += 1
+            raise MalformedProviderResponseError(
+                "structured response violates RawLLMQuestionProposalSet: truncated"
+            )
+
+    llm = AlwaysMalformedLLM({})
+
+    result = propose_llm_question_candidates([profile], llm=llm, max_questions=1)
+
+    assert len(llm.calls) == 3  # full retry budget spent, not an instant skip
+    assert result.error is not None and "LLM route skipped after retry" in result.error
+    assert result.degraded is True
+    assert result.candidates == []
 
 
 def test_every_retry_payload_differs_from_the_previous_call(tmp_path: Path) -> None:

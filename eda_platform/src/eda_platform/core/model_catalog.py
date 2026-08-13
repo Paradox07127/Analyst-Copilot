@@ -7,6 +7,11 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from urllib import error, request
 
+from eda_platform.core.endpoint_security import (
+    EndpointPolicyError,
+    build_credential_safe_opener,
+    validate_llm_base_url,
+)
 from eda_platform.core.llm import LLMSettings
 from eda_platform.core.model_capabilities import is_verified_agent_model
 from eda_platform.core.provider_registry import auth_style, provider_spec
@@ -38,20 +43,18 @@ class DiscoveredCatalog:
     truncated: bool = False
 
 
-class _NoRedirect(request.HTTPRedirectHandler):
-    """Never forward a provider credential to another origin via redirects."""
-
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None
-
-
 def fetch_model_catalog(settings: LLMSettings) -> DiscoveredCatalog:
     spec = provider_spec(settings.provider)
     if spec.model_discovery == "none":
         raise ModelCatalogError("This provider has no live model-list endpoint.")
     if spec.requires_api_key and not settings.api_key:
         raise ModelCatalogError("Save an API key before refreshing models.")
-    base_url = settings.resolved_base_url.rstrip("/")
+    try:
+        base_url = validate_llm_base_url(
+            settings.provider, settings.resolved_base_url
+        ).rstrip("/")
+    except EndpointPolicyError as exc:
+        raise ModelCatalogError(str(exc)) from exc
     if not base_url:
         raise ModelCatalogError("Save a base URL before refreshing models.")
 
@@ -59,7 +62,7 @@ def fetch_model_catalog(settings: LLMSettings) -> DiscoveredCatalog:
     endpoint = f"{base_url}{path}"
     headers = _headers(settings)
     req = request.Request(endpoint, headers=headers, method="GET")
-    opener = request.build_opener(_NoRedirect)
+    opener = build_credential_safe_opener()
     try:
         with opener.open(
             req,

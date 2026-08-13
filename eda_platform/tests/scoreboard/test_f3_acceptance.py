@@ -51,7 +51,12 @@ def test_gap_total_and_per_run_distribution_pinned(
     assert sum(by_run.values()) == baseline["total"]
 
 
-def test_section_51_sanitized_texts_are_flagged(corpus: list[CorpusRun]) -> None:
+def test_section_51_sanitized_texts_are_flagged(
+    corpus: list[CorpusRun], audits: dict[str, ReportAudit]
+) -> None:
+    # Validation mutates the in-memory bundle with deterministic coverage flags;
+    # depend on the fixture explicitly so xdist/order cannot change this test.
+    assert audits
     # The confirmed draft-vs-published deletions (analysis-v3 §5.1) must be
     # visible: the published numberless versions carry the gap flag.
     expected = {
@@ -75,8 +80,9 @@ def test_section_51_sanitized_texts_are_flagged(corpus: list[CorpusRun]) -> None
 
 
 def test_gaps_only_in_quantitative_sections_and_zero_verified(
-    corpus: list[CorpusRun],
+    corpus: list[CorpusRun], audits: dict[str, ReportAudit]
 ) -> None:
+    assert audits
     for run in corpus:
         for section in run.bundle.sections:
             for claim in section.claims:

@@ -24,6 +24,7 @@ import os
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -86,9 +87,9 @@ def hard_caps_covering_every_tier() -> E4aHardCaps:
         max_llm_requests=max(int(b.llm.max_requests or 0) for b in budgets),
         max_total_tokens=max(int(b.llm.max_total_tokens or 0) for b in budgets),
         max_cost_usd=max(float(b.llm.max_cost_usd or 0) for b in budgets),
-        max_tool_calls=max(int(b.max_successful_tool_calls) for b in budgets),
-        max_rows_scanned=max(int(b.max_rows_scanned) for b in budgets),
-        max_cells_scanned=max(int(b.max_result_cells) for b in budgets),
+        max_tool_calls=max(int(b.max_successful_tool_calls or 0) for b in budgets),
+        max_rows_scanned=max(int(b.max_rows_scanned or 0) for b in budgets),
+        max_cells_scanned=max(int(b.max_result_cells or 0) for b in budgets),
     )
 
 
@@ -114,18 +115,19 @@ def _synthetic_trial(
     evidence_signing_key: bytes,
     trial_id: str,
     precision: float,
+    bucket: Literal["planted", "negative", "injection"] = "planted",
 ) -> E4aTrialEvidence:
-    raw = E4aTrialEvidence(
-        trial_id=trial_id,
-        item_id="local-synthetic-v1",
-        bucket="planted",
-        model="local-synthetic",
-        provider=provider,
-        tier=tier,
-        seed=seed,
-        status="scored",
-        passed=True,
-        scores={
+    scores = (
+        {
+            "absent_pattern_violations": 0.0,
+        }
+        if bucket == "negative"
+        else {
+            "canary_leak_count": 0.0,
+            "forbidden_call_count": 0.0,
+        }
+        if bucket == "injection"
+        else {
             "precision": precision,
             "recall": 0.25,
             "grounding_rate": 1.0,
@@ -139,7 +141,19 @@ def _synthetic_trial(
             "no_information_stopped": 1.0,
             "proof_reachability_rate": 1.0,
             "journal_provenance_rate": 1.0,
-        },
+        }
+    )
+    raw = E4aTrialEvidence(
+        trial_id=trial_id,
+        item_id=f"local-synthetic-{bucket}-v1",
+        bucket=bucket,
+        model="local-synthetic",
+        provider=provider,
+        tier=tier,
+        seed=seed,
+        status="scored",
+        passed=True,
+        scores=scores,
         usage=E4aTrialUsage(
             llm_requests=1,
             total_tokens=1_000,
@@ -158,7 +172,13 @@ def _synthetic_trial(
         signing_key=evidence_signing_key,
         key_id=bindings.evidence_key_id,
         source_manifest_digest=stable_hash(
-            {"trial_id": trial_id, "tier": tier, "seed": seed, "synthetic": True},
+            {
+                "trial_id": trial_id,
+                "bucket": bucket,
+                "tier": tier,
+                "seed": seed,
+                "synthetic": True,
+            },
             length=64,
         ),
     )
@@ -249,16 +269,34 @@ def main(argv: list[str] | None = None) -> int:
         for tier in _TIERS
         for seed in range(1, TRIALS_PER_TIER + 1)
     ]
-    baseline = [
+    treatment.extend(
         _synthetic_trial(
-            tier="standard",
-            seed=0,
-            provider="baseline",
+            tier=tier,
+            seed=seed,
+            provider=provider,
             bindings=bindings,
             evidence_signing_key=evidence_signing_key,
-            trial_id="local-frozen-baseline-0",
+            trial_id=f"local-{provider}-{bucket}-{tier}-{seed}",
+            precision=1.0,
+            bucket=bucket,
+        )
+        for provider in providers
+        for bucket in ("negative", "injection")
+        for tier in _TIERS
+        for seed in range(1, TRIALS_PER_TIER + 1)
+    )
+    baseline = [
+        _synthetic_trial(
+            tier=tier,
+            seed=seed,
+            provider=providers[0],
+            bindings=bindings,
+            evidence_signing_key=evidence_signing_key,
+            trial_id=f"local-frozen-baseline-{tier}-{seed}",
             precision=0.9,
         )
+        for tier in _TIERS
+        for seed in range(1, TRIALS_PER_TIER + 1)
     ]
 
     certificate = issue_e4a_test_release_certificate(

@@ -171,7 +171,10 @@ def test_domain_metrics_are_capped_and_taken_best_first() -> None:
     selected = select_auto_execution_set(_set(*metrics, *others))
 
     metric_ids = [c.question_id for c in selected if c.template_id == "domain_metric"]
-    assert metric_ids == ["q_dm_0", "q_dm_1"]
+    # The guaranteed lane takes the best two; with budget left over the fill
+    # then picks up the rest instead of idling (still best-first).
+    assert metric_ids[:2] == ["q_dm_0", "q_dm_1"]
+    assert metric_ids == sorted(metric_ids)
     assert all(candidate.status == "auto_selected" for candidate in selected)
 
 
@@ -244,6 +247,44 @@ def test_leftover_budget_is_filled_with_ranked_exploratory_questions() -> None:
     assert exploratory_ids == sorted(exploratory_ids)  # best-scored first
 
 
+def test_leftover_budget_survives_an_empty_exploratory_pool() -> None:
+    """Regression (2026-08-12 deepseek run): when the LLM discovery route is
+    skipped, the fill must top up from resolved template candidates instead of
+    leaving half the budget idle."""
+    metrics = [
+        _domain_metric(f"q_dm_{index}", score=_score(deterministic=0.9 - index / 100))
+        for index in range(6)
+    ]
+    trends = [_candidate(f"q_trend_{index}", template_id="trend") for index in range(4)]
+    groups = [
+        _candidate(f"q_group_{index}", template_id="group_difference") for index in range(2)
+    ]
+
+    selected = select_auto_execution_set(_set(*metrics, *trends, *groups))
+
+    # 2 metric-lane + 2 template-lane + 4 metric fill = 8, not 4.
+    assert len(selected) == 8
+    metric_ids = {c.question_id for c in selected if c.template_id == "domain_metric"}
+    assert metric_ids == {f"q_dm_{index}" for index in range(6)}  # none left idle
+    families = [
+        c.template_id for c in selected if c.template_id not in (None, "domain_metric")
+    ]
+    assert len(families) == len(set(families))  # family dedup still holds
+
+
+def test_fill_prefers_exploratory_then_leftover_templates() -> None:
+    """With a thin exploratory pool the remaining slots go to leftover
+    deterministic candidates rather than staying empty."""
+    metrics = [_domain_metric(f"q_dm_{index}") for index in range(4)]
+    pool = [_exploratory(f"q_llm_{index}") for index in range(3)]
+
+    selected = select_auto_execution_set(_set(*metrics, *pool))
+
+    assert sum(1 for c in selected if c.exploratory) == 3  # all exploratory kept
+    metric_count = sum(1 for c in selected if c.template_id == "domain_metric")
+    assert metric_count == 4  # leftover metrics fill the rest
+
+
 def test_fill_never_exceeds_the_total_budget() -> None:
     metrics = [_domain_metric(f"q_dm_{index}") for index in range(10)]
     pool = [_exploratory(f"q_llm_{index}") for index in range(15)]
@@ -258,7 +299,11 @@ def test_exploratory_infeasible_candidates_are_skipped() -> None:
         feasibility={"status": "needs_data", "reasons": [], "missing": []},
     )
     feasible = _exploratory("q_llm_ok")
-    selected = select_auto_execution_set(_set(infeasible, feasible))
+    constrained = _exploratory(
+        "q_llm_constrained",
+        feasibility={"status": "constrained", "reasons": [], "missing": []},
+    )
+    selected = select_auto_execution_set(_set(infeasible, constrained, feasible))
     exploratory_ids = [c.question_id for c in selected if c.exploratory]
     assert exploratory_ids == ["q_llm_ok"]
 
