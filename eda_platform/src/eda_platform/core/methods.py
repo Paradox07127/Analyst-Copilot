@@ -253,7 +253,10 @@ def _forecast_gate(ctx: MethodGateContext) -> MethodGateResult:
     if any(_columns(profile, {"datetime"}) for profile in _target_profiles(ctx)):
         return MethodGateResult(
             ok=True,
-            reasons=["forecast method family not implemented yet; start with a descriptive trend"],
+            reasons=[
+                "A descriptive trend baseline is available; it projects recent patterns, "
+                "not a forecasting model."
+            ],
             missing=[],
         )
     return MethodGateResult(
@@ -265,18 +268,36 @@ def _forecast_gate(ctx: MethodGateContext) -> MethodGateResult:
 
 
 def _segmentation_gate(ctx: MethodGateContext) -> MethodGateResult:
-    if not _target_profiles(ctx):
+    profiles = _target_profiles(ctx)
+    if not profiles:
         return MethodGateResult(
             ok=False,
             reasons=["No target dataset profile is available for segmentation."],
             missing=["target dataset profile"],
             missing_kinds=["data"],
         )
+    numeric_profiles = [
+        profile for profile in profiles if len(_columns(profile, {"numeric"})) >= 2
+    ]
+    if not numeric_profiles:
+        return MethodGateResult(
+            ok=False,
+            reasons=["Segmentation needs at least two numeric feature columns."],
+            missing=["at least 2 numeric columns"],
+            missing_kinds=["structural"],
+        )
+    if not any(profile.rows >= 30 for profile in numeric_profiles):
+        return MethodGateResult(
+            ok=False,
+            reasons=["Fewer than 30 rows leave segment stability unverifiable."],
+            missing=["at least 30 rows"],
+            missing_kinds=["scale"],
+        )
     return MethodGateResult(
         ok=True,
         reasons=[
-            "Segmentation method family is not implemented yet; first confirm meaningful "
-            "features and segment stability criteria."
+            "Clustering can run on the numeric features; segment stability is "
+            "verified per run."
         ],
         missing=[],
     )
@@ -293,10 +314,20 @@ def _causal_gate(ctx: MethodGateContext) -> MethodGateResult:
     return MethodGateResult(
         ok=True,
         reasons=[
-            "Causal analysis is not implemented; define a treatment, outcome, and approved "
-            "experiment design before making an intervention claim."
+            "A treatment/outcome contrast with covariate balance checks can run; "
+            "causal attribution additionally requires a user-confirmed randomized "
+            "experiment design."
         ],
         missing=[],
+    )
+
+
+def causal_treatment_candidate_exists(ctx: MethodGateContext) -> bool:
+    """Whether any target profile has a two-valued assignment-shaped column."""
+    return any(
+        column.semantic_type in {"categorical", "boolean"} and column.unique_count == 2
+        for profile in _target_profiles(ctx)
+        for column in profile.columns_detail
     )
 
 
@@ -320,8 +351,8 @@ METHOD_REGISTRY: dict[str, AnalysisMethod] = {
         AnalysisMethod(
             method_id="forecast",
             mode="forecast",
-            summary="Estimate a future value from time-ordered history.",
-            supported=False,
+            summary="Project time-ordered history forward with a backtested baseline.",
+            supported=True,
             gate=_forecast_gate,
         ),
         AnalysisMethod(
@@ -335,7 +366,7 @@ METHOD_REGISTRY: dict[str, AnalysisMethod] = {
             method_id="segmentation",
             mode="segmentation",
             summary="Identify stable groups with meaningfully different behavior.",
-            supported=False,
+            supported=True,
             gate=_segmentation_gate,
         ),
         AnalysisMethod(
@@ -348,8 +379,12 @@ METHOD_REGISTRY: dict[str, AnalysisMethod] = {
         AnalysisMethod(
             method_id="causal_experiment",
             mode="causal_experiment",
-            summary="Design an experiment to test an intervention effect.",
-            supported=False,
+            summary=(
+                "Contrast a two-group treatment against an outcome with balance "
+                "checks; analyze it as an experiment once the user confirms a "
+                "randomized design."
+            ),
+            supported=True,
             gate=_causal_gate,
         ),
         # Keep after descriptive_sql because feasibility selects the first method per mode.
@@ -380,9 +415,13 @@ def evaluate_feasibility(ctx: MethodGateContext) -> OpportunityFeasibility:
     method = methods[0]
     result = method.gate(ctx)
     if result.ok:
+        # causal_experiment stays constrained even when executable: the tier-B
+        # experiment analysis is gated on a user-confirmed randomized design,
+        # so the constraint marker never clears (design decision 2026-08-25).
         status = (
             "constrained"
-            if not method.supported or method.method_id == "outcome_prediction"
+            if not method.supported
+            or method.method_id in {"outcome_prediction", "causal_experiment"}
             else "ready"
         )
     elif result.missing_kinds:

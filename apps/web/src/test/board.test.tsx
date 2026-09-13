@@ -459,7 +459,7 @@ describe("Investigation board", () => {
     renderAppAt(`/projects/${PROJECT}/sessions/${RUN}/board`);
 
     expect(
-      await screen.findByText("Request failed (project_not_found)"),
+      await screen.findByText("project_not_found"),
     ).toBeInTheDocument();
     expect(screen.getByText("Project p1 does not exist.")).toBeInTheDocument();
     const retry = screen.getByRole("button", { name: "Retry" });

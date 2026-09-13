@@ -19,6 +19,8 @@ const base = [
   ["workspace-usage"],
   ["session-metrics", "derived"],
   ["trace", "derived"],
+  /* Job history feeds the report-staleness banner on the launching session. */
+  ["session-jobs", "source"],
 ];
 
 const expected: Record<JobKind, unknown[][]> = {
@@ -73,19 +75,6 @@ const expected: Record<JobKind, unknown[][]> = {
     ...base,
     ["questions", "source"],
     ["artifacts", "source"],
-  ],
-  investigation_plan: [...base, ["investigations", "source"]],
-  investigation_execute: [
-    ...base,
-    ["investigations", "source"],
-    ["artifacts", "result"],
-    ["findings", "result"],
-  ],
-  macro_loop: [
-    ...base,
-    ["investigations", "source"],
-    ["artifacts", "result"],
-    ["findings", "result"],
   ],
   synthesis_brief_create: [...base, ["decision-story", "source"]],
   decision_report_generate: [

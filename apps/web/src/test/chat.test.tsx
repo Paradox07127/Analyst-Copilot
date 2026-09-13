@@ -468,4 +468,116 @@ describe("Chat page", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("offers Stop during a running turn and re-enables input once stopped", async () => {
+    let cancelCalled = false;
+    server.use(
+      http.post("/api/v1/sessions/:sessionId/chat/cancel", ({ params }) => {
+        cancelCalled = true;
+        return HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          message_id: "msg_1",
+          cancel_requested: true,
+        });
+      }),
+    );
+
+    const { user, source } = await sendMessage("count all the things");
+    act(() =>
+      source.emit(
+        "turn.started",
+        frame(1, "turn.started", { stage: "loading_datasets" }),
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(cancelCalled).toBe(true);
+    /* While the backend winds the turn down the button must not re-fire. */
+    expect(
+      await screen.findByRole("button", { name: "Stopping…" }),
+    ).toBeDisabled();
+
+    act(() =>
+      source.emit(
+        "message.completed",
+        frame(2, "message.completed", {
+          role: "assistant",
+          content:
+            "Stopped at your request. This turn ended before a final answer; " +
+            "ask again to continue.",
+          status: "cancelled",
+          sql: null,
+          artifact_refs: [],
+          validation: null,
+        }),
+      ),
+    );
+
+    expect(
+      await screen.findByText(/Stopped at your request/),
+    ).toBeInTheDocument();
+    /* The turn settled, so the composer is usable again and Stop is gone. */
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Stop/ })).toBeNull();
+  });
+});
+
+describe("Chat answer engine option", () => {
+  it("keeps the mode picker behind an advanced toggle with plain-language labels", async () => {
+    renderAppAt(`/projects/p1/sessions/${RUN}/chat`);
+    await screen.findByRole("heading", { name: "Chat" });
+
+    expect(screen.queryByText("LLM mode")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Answers" }),
+    ).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Options" }));
+    const picker = screen.getByRole("combobox", { name: "Answers" });
+    expect(picker).toHaveValue("env");
+    expect(
+      screen.getByRole("option", { name: "Live model" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Offline (no model calls)" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("env (live model)")).not.toBeInTheDocument();
+  });
+
+  it("sends the selected offline mode with the message", async () => {
+    let sentBody: Record<string, unknown> | null = null;
+    server.use(
+      http.post(
+        "/api/v1/sessions/:sessionId/chat/messages",
+        async ({ request, params }) => {
+          sentBody = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json(
+            {
+              session_id: String(params["sessionId"]),
+              message_id: "msg_1",
+              stream_url: `/api/v1/sessions/${String(params["sessionId"])}/chat/stream`,
+            },
+            { status: 202 },
+          );
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderAppAt(`/projects/p1/sessions/${RUN}/chat`);
+    await screen.findByRole("heading", { name: "Chat" });
+
+    await user.click(screen.getByRole("button", { name: "Options" }));
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Answers" }),
+      "offline",
+    );
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "count rows" },
+    });
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(sentBody).not.toBeNull());
+    expect(sentBody!["llm"]).toBe("offline");
+  });
 });

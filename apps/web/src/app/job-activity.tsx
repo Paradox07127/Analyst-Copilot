@@ -13,6 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { api, type SessionJobSummary } from "../api/client";
 import type { JobEventsState } from "../api/job-events";
 
 export interface ActiveJob {
@@ -51,6 +52,8 @@ interface JobActivityValue {
   panelOpen: boolean;
   launcherVisible: boolean;
   startTracking: (job: ActiveJob) => void;
+  /** Merge server-known runs without stealing the selection (recovery path). */
+  adoptJobs: (jobs: ActiveJob[]) => void;
   selectJob: (jobId: string) => void;
   dismissJob: (jobId: string) => void;
   /** Transitional alias for callers that act on the selected run. */
@@ -214,6 +217,17 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const adoptJobs = useCallback((jobs: ActiveJob[]) => {
+    setTrackedJobs((current) => {
+      const known = new Set(current.map((job) => job.jobId));
+      const added = jobs.filter((job) => !known.has(job.jobId));
+      if (added.length === 0) return current;
+      /* Recovered runs go after what this tab already tracks: local entries
+       * are what the user just launched, and adoption must not evict them. */
+      return [...current, ...added].slice(0, MAX_TRACKED_JOBS);
+    });
+  }, []);
+
   const selectJob = useCallback((jobId: string) => {
     setTrackedJobs((current) => {
       if (!current.some((job) => job.jobId === jobId)) return current;
@@ -277,6 +291,7 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
       panelOpen,
       launcherVisible,
       startTracking,
+      adoptJobs,
       selectJob,
       dismissJob,
       clearActiveJob,
@@ -293,6 +308,7 @@ export function JobActivityProvider({ children }: { children: ReactNode }) {
       panelOpen,
       launcherVisible,
       startTracking,
+      adoptJobs,
       selectJob,
       dismissJob,
       clearActiveJob,
@@ -316,4 +332,42 @@ export function useJobActivity(): JobActivityValue {
     throw new Error("useJobActivity must be used inside JobActivityProvider");
   }
   return value;
+}
+
+const SETTLED_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+function recoveredJob(job: SessionJobSummary): ActiveJob {
+  return {
+    jobId: job.job_id,
+    sessionId: job.session_id,
+    sourceSessionId: job.source_session_id ?? job.session_id,
+    resultSessionId: job.source_session_id ?? undefined,
+    projectId: job.project_id,
+    eventsUrl: job.events_url,
+  };
+}
+
+/* Server-side recovery: localStorage only knows about jobs this browser
+ * launched, so after a cleared cache or a device switch a run still executing
+ * would be invisible — and uncancellable. Entering a session asks the backend
+ * for that session's live jobs and adopts the ones not already tracked. */
+export function useServerJobRecovery(sessionId: string | undefined) {
+  const { adoptJobs } = useJobActivity();
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const controller = new AbortController();
+    api
+      .listSessionJobs(sessionId, controller.signal)
+      .then((listing) => {
+        const live = (listing.jobs ?? []).filter(
+          (job) => !SETTLED_JOB_STATUSES.has(job.status),
+        );
+        if (live.length > 0) adoptJobs(live.map(recoveredJob));
+      })
+      .catch(() => {
+        /* Recovery is best-effort; local tracking keeps working without it. */
+      });
+    return () => controller.abort();
+  }, [sessionId, adoptJobs]);
 }

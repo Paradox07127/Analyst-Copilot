@@ -8,6 +8,8 @@ export type {
   ExplorationBudgetExtendedDto,
   ExplorationBudgetIncrease,
   ExplorationEventDto,
+  ExplorationListDto,
+  ExplorationListItemDto,
   ExplorationPrepareRequest,
   ExplorationPreparedDto,
   ExplorationStartedDto,
@@ -17,6 +19,7 @@ export type {
 import type {
   ExplorationBudgetExtendedDto,
   ExplorationBudgetIncrease,
+  ExplorationListDto,
   ExplorationPrepareRequest,
   ExplorationPreparedDto,
   ExplorationStartedDto,
@@ -52,6 +55,8 @@ export type UploadStatus = Schemas["UploadStatus"];
 export type JobCreateRequest = Schemas["JobCreateRequest"];
 export type JobCreated = Schemas["JobCreated"];
 export type JobStatus = Schemas["JobStatus"];
+export type SessionJobSummary = Schemas["SessionJobSummary"];
+export type SessionJobList = Schemas["SessionJobList"];
 export type CleaningPreviewRequest = Schemas["CleaningPreviewRequest"];
 export type CleaningApplyRequest = Schemas["CleaningApplyRequest"];
 export type CleaningPreviewResult = Schemas["CleaningPreviewResult"];
@@ -110,6 +115,10 @@ export type SkillParamSpec = Schemas["SkillParamSpec"];
 export type SkillTargetDataset = Schemas["SkillTargetDataset"];
 export type SkillReplayPrepared = Schemas["SkillReplayPrepared"];
 export type SkillReplayStarted = Schemas["SkillReplayStarted"];
+export type SkillTemplateView = Schemas["SkillTemplateView"];
+export type SkillTemplatesView = Schemas["SkillTemplatesView"];
+export type SkillTemplateBound = Schemas["SkillTemplateBound"];
+export type SkillTemplateCreateRequest = Schemas["SkillTemplateCreateRequest"];
 export type ChatMessageView = Schemas["ChatMessageView"];
 export type ChatMessagePage = Schemas["ChatMessagePage"];
 export type ChatMessageAccepted = Schemas["ChatMessageAccepted"];
@@ -154,6 +163,7 @@ export type ModelCatalog = Schemas["ModelCatalog"];
 export type ConnectionTestResult = Schemas["ConnectionTestResult"];
 export type AboutInfo = Schemas["AboutInfo"];
 export type PrecleaningOptions = Schemas["PrecleaningOptions"];
+export type ResourceLimitGuidance = Schemas["EdaResourceLimitGuidance"];
 export type KnowledgePromotionPrepared = Schemas["KnowledgePromotionPrepared"];
 export type KnowledgePromoted = Schemas["KnowledgePromoted"];
 export type ReportGenerationStarted = Schemas["ReportGenerationStarted"];
@@ -165,9 +175,6 @@ export type SandboxStatusView = Schemas["SandboxStatusView"];
 export type SystemCapabilitiesView = Schemas["SystemCapabilitiesView"];
 export type QuestionDraftPrepared = Schemas["QuestionDraftPrepared"];
 export type QuestionDraftStarted = Schemas["QuestionDraftStarted"];
-export type InvestigationsView = Schemas["InvestigationsView"];
-export type InvestigationPlanView = Schemas["InvestigationPlanView"];
-export type InvestigationGateView = Schemas["InvestigationGateView"];
 export type CleaningLogView = Schemas["CleaningLogView"];
 export type CleaningLogSummaryRow = Schemas["CleaningLogSummaryRow"];
 export type CleaningLogOperationRow = Schemas["CleaningLogOperationRow"];
@@ -203,14 +210,6 @@ export type DecisionReportGenerateRequest =
   Schemas["DecisionReportGenerateRequest"];
 export type DecisionReportGenerationStarted =
   Schemas["DecisionReportGenerationStarted"];
-export type InvestigationPlanBuildStarted = Schemas["InvestigationPlanBuildStarted"];
-export type InvestigationDecisionPrepared = Schemas["InvestigationDecisionPrepared"];
-export type InvestigationDecisionRecorded = Schemas["InvestigationDecisionRecorded"];
-export type InvestigationExecutionPrepared = Schemas["InvestigationExecutionPrepared"];
-export type InvestigationExecutionStarted = Schemas["InvestigationExecutionStarted"];
-export type MacroLoopPrepared = Schemas["MacroLoopPrepared"];
-export type MacroLoopStarted = Schemas["MacroLoopStarted"];
-export type MacroLoopView = Schemas["MacroLoopView"];
 export type QuestionPrepareRequest = JsonRequestBody<
   "prepare_question_execution_api_v1_sessions__session_id__questions__question_id__prepare_post"
 >;
@@ -226,6 +225,7 @@ export type SkillReplayPrepareRequest = Schemas["SkillReplayPrepareRequest"];
 export type SkillReplayExecuteRequest = Schemas["SkillReplayExecuteRequest"];
 export type QuestionExecuteRequest = Schemas["QuestionExecuteRequest"];
 export type ChatSendRequest = Schemas["ChatSendRequest"];
+export type ChatTurnCancelled = Schemas["ChatTurnCancelled"];
 export type ChatPlanDecisionRequest = Schemas["ChatPlanDecisionRequest"];
 export type BoardUpdateRequest = Schemas["BoardUpdateRequest"];
 export type SkillSaveRequest = Schemas["SkillSaveRequest"];
@@ -233,16 +233,10 @@ export type RelationshipValidateRequest = Schemas["RelationshipValidateRequest"]
 export type FindingPromoteRequest = Schemas["FindingPromoteRequest"];
 export type QuestionCardEdit = Schemas["QuestionCardEditRequest"];
 export type QuestionDraftPrepareRequest = Schemas["QuestionDraftPrepareRequest"];
+export type RandomizedDesignConfirmRequest =
+  Schemas["RandomizedDesignConfirmRequest"];
+export type RandomizedDesignConfirmed = Schemas["RandomizedDesignConfirmed"];
 export type QuestionDraftRequest = Schemas["QuestionDraftRequest"];
-export type InvestigationPlanRequest = Schemas["InvestigationPlanRequest"];
-export type InvestigationDecisionPrepareRequest =
-  Schemas["InvestigationDecisionPrepareRequest"];
-export type InvestigationDecisionRequest = Schemas["InvestigationDecisionRequest"];
-export type InvestigationExecutePrepareRequest =
-  Schemas["InvestigationExecutePrepareRequest"];
-export type InvestigationExecuteRequest = Schemas["InvestigationExecuteRequest"];
-export type MacroLoopPrepareRequest = Schemas["MacroLoopPrepareRequest"];
-export type MacroLoopRequest = Schemas["MacroLoopRequest"];
 
 export type ReportExportFormat = "html" | "pdf" | "md";
 
@@ -462,13 +456,19 @@ export const api = {
 
   listSessions: (
     projectId: string,
-    opts: { limit?: number; cursor?: string; q?: string } = {},
+    opts: {
+      limit?: number;
+      cursor?: string;
+      q?: string;
+      include_derived?: boolean;
+    } = {},
     signal?: AbortSignal,
   ) => {
     const params = new URLSearchParams();
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
     if (opts.cursor) params.set("cursor", opts.cursor);
     if (opts.q) params.set("q", opts.q);
+    if (opts.include_derived) params.set("include_derived", "true");
     const qs = params.size > 0 ? `?${params.toString()}` : "";
     return apiFetch<SessionPage>(`/projects/${enc(projectId)}/sessions${qs}`, {
       signal,
@@ -477,6 +477,11 @@ export const api = {
 
   getSession: (sessionId: string, signal?: AbortSignal) =>
     apiFetch<SessionDetail>(`/sessions/${enc(sessionId)}`, { signal }),
+
+  listExplorations: (sessionId: string, signal?: AbortSignal) =>
+    apiFetch<ExplorationListDto>(`/sessions/${enc(sessionId)}/explorations`, {
+      signal,
+    }),
 
   prepareExploration: (sessionId: string, body: ExplorationPrepareRequest) =>
     apiFetch<ExplorationPreparedDto>(
@@ -663,8 +668,17 @@ export const api = {
   getJob: (jobId: string, signal?: AbortSignal) =>
     apiFetch<JobStatus>(`/jobs/${enc(jobId)}`, { signal }),
 
+  listSessionJobs: (sessionId: string, signal?: AbortSignal) =>
+    apiFetch<SessionJobList>(`/sessions/${enc(sessionId)}/jobs`, { signal }),
+
   cancelJob: (jobId: string) =>
     apiFetch<JobStatus>(`/jobs/${enc(jobId)}/cancel`, { method: "POST" }),
+
+  retryJob: (jobId: string, idempotencyKey: string) =>
+    apiFetch<JobCreated>(`/jobs/${enc(jobId)}/retry`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+    }),
 
   previewCleaning: (
     sessionId: string,
@@ -709,6 +723,15 @@ export const api = {
   ) =>
     apiFetch<QuestionExecutionPrepared>(
       `/sessions/${enc(sessionId)}/questions/${enc(questionId)}/prepare`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  confirmRandomizedDesign: (
+    sessionId: string,
+    body: RandomizedDesignConfirmRequest,
+  ) =>
+    apiFetch<RandomizedDesignConfirmed>(
+      `/sessions/${enc(sessionId)}/experiment-designs/confirm`,
       { method: "POST", body: JSON.stringify(body) },
     ),
 
@@ -898,6 +921,13 @@ export const api = {
     apiFetch<ChatMessageAccepted>(`/sessions/${enc(sessionId)}/chat/messages`, {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+
+  /* Cooperative stop: the in-flight turn halts at its next checkpoint and the
+     stream then delivers a readable "stopped" result. */
+  cancelChatTurn: (sessionId: string) =>
+    apiFetch<ChatTurnCancelled>(`/sessions/${enc(sessionId)}/chat/cancel`, {
+      method: "POST",
     }),
 
   /* Recovery path: the approval token only ever reaches the client over SSE,
@@ -1097,6 +1127,53 @@ export const api = {
       method: "DELETE",
       headers: { "Idempotency-Key": idempotencyKey },
     }),
+
+  /* Builtin seeds plus this project's user-defined SQL templates. */
+  listSkillTemplates: (projectId: string, signal?: AbortSignal) =>
+    apiFetch<SkillTemplatesView>(`/projects/${enc(projectId)}/skill-templates`, {
+      signal,
+    }),
+
+  /* Content-addressed id: re-POSTing an identical body returns the same
+   * template instead of creating a duplicate. */
+  createSkillTemplate: (
+    projectId: string,
+    body: SkillTemplateCreateRequest,
+    idempotencyKey: string,
+  ) =>
+    apiFetch<SkillTemplateView>(`/projects/${enc(projectId)}/skill-templates`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "Idempotency-Key": idempotencyKey },
+    }),
+
+  /* 204: user templates only; builtin seeds are not deletable (409). */
+  deleteSkillTemplate: (
+    projectId: string,
+    templateId: string,
+    idempotencyKey: string,
+  ) =>
+    apiFetch<void>(
+      `/projects/${enc(projectId)}/skill-templates/${enc(templateId)}`,
+      { method: "DELETE", headers: { "Idempotency-Key": idempotencyKey } },
+    ),
+
+  /* Binds a user template to this session's data, trial-runs the SQL for
+   * real, and returns the saved skill with a first-rows preview. */
+  importSkillTemplate: (
+    sessionId: string,
+    templateId: string,
+    body: SeedImportRequest,
+    idempotencyKey: string,
+  ) =>
+    apiFetch<SkillTemplateBound>(
+      `/sessions/${enc(sessionId)}/skill-templates/${enc(templateId)}/import`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
+    ),
 
   getRelationships: (sessionId: string, signal?: AbortSignal) =>
     apiFetch<RelationshipGraphView>(`/sessions/${enc(sessionId)}/relationships`, {

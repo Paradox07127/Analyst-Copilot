@@ -57,7 +57,8 @@ from eda_platform.application.workspace_paths import (
     relativize_warnings,
     relativize_workspace_paths,
 )
-from eda_platform.core.ids import INTERNAL_SESSION_MARKER
+from eda_platform.core.ids import INTERNAL_SESSION_MARKER, make_artifact_id
+from eda_platform.core.provenance import code_ref
 from eda_platform.core.store import ArtifactStore
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile
 from eda_platform.schemas.charts import ChartSpec
@@ -406,6 +407,9 @@ class InsightService:
         values, size_capped = _inline_values(chart_frame)
         spec["$schema"] = VEGALITE_SCHEMA_URL
         spec["data"] = {"values": values}
+        saved_chart_id: str | None = None
+        if options.save_to_charts:
+            saved_chart_id = self._save_custom_chart(session_id, options, aggregate, spec)
         return CustomChartView(
             session_id=session_id,
             dataset_id=options.dataset_id,
@@ -423,7 +427,41 @@ class InsightService:
             series_truncated=full_aggregate and size_capped,
             row_limit=CUSTOM_CHART_ROW_LIMIT,
             spec=spec,
+            saved_chart_id=saved_chart_id,
         )
+
+    def _save_custom_chart(
+        self,
+        session_id: str,
+        options: CustomChartRequest,
+        aggregate: str,
+        spec: dict[str, Any],
+    ) -> str:
+        """Persist the finished spec as a CHART_SPEC artifact so it appears in
+        the session's Charts listing. The id is content-derived, so saving the
+        same chart twice overwrites one artifact instead of duplicating it."""
+        payload = ChartSpec(
+            dataset_id=options.dataset_id,
+            title=_custom_chart_title(options, aggregate),
+            description="Saved from the custom chart builder.",
+            category="distribution",
+            mark=spec["mark"],
+            encoding=spec["encoding"],
+            data=spec["data"],
+        ).model_dump(mode="json")
+        artifact = Artifact(
+            id=make_artifact_id("chart", payload),
+            type=ArtifactType.CHART_SPEC,
+            project_id=self._project_for_run(session_id),
+            session_id=session_id,
+            payload=payload,
+            code_ref=code_ref(InsightService.build_custom_chart),
+            plain_language=(
+                f"Chart the user built and saved over {options.dataset_id}."
+            ),
+        )
+        self._store.save_artifact(artifact)
+        return artifact.id
 
     def _custom_chart_source(
         self, session_id: str, dataset_id: str, *, datasets: DatasetService
@@ -512,6 +550,19 @@ class InsightService:
                 "warnings": relativize_warnings(list(artifact.warnings), root),
             }
         )
+
+
+def _custom_chart_title(options: CustomChartRequest, aggregate: str) -> str:
+    if options.chart_type == "histogram":
+        return f"Distribution of {options.x_column}"
+    if options.y_column is None or aggregate == "count":
+        return f"Row count by {options.x_column}"
+    prefix = {
+        "sum": f"Total {options.y_column}",
+        "mean": f"Average {options.y_column}",
+        "median": f"Median {options.y_column}",
+    }.get(aggregate, options.y_column)
+    return f"{prefix} by {options.x_column}"
 
 
 def _inside_projects(path: Path, root: Path) -> bool:

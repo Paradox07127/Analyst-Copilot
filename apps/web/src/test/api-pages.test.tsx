@@ -317,7 +317,7 @@ describe("Data Map with real API", () => {
     renderAppAt("/projects/p1/sessions/r1/data-map");
 
     expect(
-      await screen.findByText("Request failed (session_not_found)"),
+      await screen.findByText("session_not_found"),
     ).toBeInTheDocument();
     expect(screen.getByText("Session r1 is missing")).toBeInTheDocument();
 
@@ -357,6 +357,90 @@ describe("Data Map with real API", () => {
     expect(
       screen.queryByText("No datasets in this session"),
     ).not.toBeInTheDocument();
+  });
+
+  it("explains a failed run and offers Run again instead of asking for uploads", async () => {
+    const retried: string[] = [];
+    server.use(
+      http.get("/api/v1/sessions/:sessionId", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          project_id: "p1",
+          title: "Failed run",
+          status: "failed",
+          created_at: "2026-07-20T10:00:00Z",
+          updated_at: "2026-07-21T10:00:00Z",
+          dataset_names: [],
+          artifact_count: 0,
+          report_status: null,
+          chat_message_count: 0,
+          code_version: "abc123",
+          seed: 42,
+          source_session_id: null,
+          artifact_type_counts: {},
+          warnings: [],
+        }),
+      ),
+      http.get("/api/v1/sessions/:sessionId/datasets", () =>
+        HttpResponse.json([]),
+      ),
+      http.get("/api/v1/sessions/:sessionId/jobs", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          jobs: [
+            {
+              job_id: "job_failed_1",
+              session_id: String(params["sessionId"]),
+              project_id: "p1",
+              kind: "auto_eda",
+              status: "failed",
+              cancel_requested: false,
+              created_at: "2026-07-25T10:00:00Z",
+              started_at: "2026-07-25T10:00:01Z",
+              finished_at: "2026-07-25T10:00:02Z",
+              error_code: "FileNotFoundError",
+              error_message:
+                "A data file this analysis needed could not be found. Re-upload the file or start a new session with the current data.",
+              source_session_id: null,
+              events_url: "/api/v1/jobs/job_failed_1/events",
+            },
+          ],
+        }),
+      ),
+      http.post("/api/v1/jobs/:jobId/retry", ({ params }) => {
+        retried.push(String(params["jobId"]));
+        return HttpResponse.json(
+          {
+            job_id: "job_retry_1",
+            session_id: "r1",
+            status: "queued",
+            events_url: "/api/v1/jobs/job_retry_1/events",
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+
+    expect(
+      await screen.findByText("The analysis failed before data was ready"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(/A data file this analysis needed could not be found/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("No datasets in this session"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Trace/ }),
+    ).toHaveAttribute("href", "/projects/p1/sessions/r1/trace");
+
+    await user.click(await screen.findByRole("button", { name: "Run again" }));
+    await waitFor(() => expect(retried).toEqual(["job_failed_1"]));
+    /* The retried run lands in Activity tracking. */
+    expect(await screen.findByTestId("activity-run-count")).toBeInTheDocument();
   });
 
   it("renders quality 403 as forbidden without claiming the dataset has no issues", async () => {
@@ -427,7 +511,7 @@ describe("Table Preview with real API", () => {
 
     renderAppAt("/projects/p1/sessions/r1/table/nope");
     expect(
-      await screen.findByText("Request failed (dataset_not_found)"),
+      await screen.findByText("dataset_not_found"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });

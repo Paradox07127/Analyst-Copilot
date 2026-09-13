@@ -4,13 +4,29 @@ from __future__ import annotations
 
 import math
 import re
+import subprocess
 from collections import Counter
 from collections.abc import Iterable
 from copy import deepcopy
+from functools import lru_cache
+from importlib import metadata
+from pathlib import Path
 from statistics import mean
 
+from eda_platform.agents.data_tools import data_tool_registry_digest
+from eda_platform.agents.question_runtime import (
+    QUESTION_AGENT_POLICY_VERSION,
+    QUESTION_AGENT_PROMPT_DIGEST,
+)
+from eda_platform.core.exploration_profiles import (
+    EXPLORATION_PROFILE_VERSION,
+    EXPLORATION_STATISTICAL_POLICY_VERSION,
+)
 from eda_platform.core.ids import stable_hash
+from eda_platform.core.llm import LLMClient, build_generation_controls
 from eda_platform.core.llm_ledger import BUDGET_SETTLED_EVENT
+from eda_platform.core.publication_fingerprint import DECISION_REPORT_POLICY_VERSION
+from eda_platform.core.sandbox_docker import default_policy_digest
 from eda_platform.core.session_metrics import spend_events
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile, EvidenceRef
 from eda_platform.schemas.questions import QuestionExecutionResult
@@ -43,6 +59,55 @@ from eda_platform.schemas.workflow_eval import (
     WorkflowEvalUsageTotals,
     WorkflowQualityResult,
 )
+
+
+@lru_cache(maxsize=1)
+def _code_revision() -> str:
+    """Git commit of the running checkout, or the installed package version."""
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        return "pkg:" + metadata.version("eda-agent-platform")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def build_workflow_eval_environment(llm: LLMClient | None = None) -> WorkflowEvalEnvironment:
+    """Describe the real execution environment, so its fingerprint discriminates
+    between code revisions, prompts, policies, tools, and provider settings."""
+    settings = getattr(llm, "settings", None)
+    provider = str(getattr(settings, "provider", "") or "offline")
+    model = str(getattr(settings, "model", "") or "deterministic")
+    model_settings = (
+        dict(build_generation_controls(settings)) if settings is not None else {}
+    )
+    return WorkflowEvalEnvironment(
+        environment_id=f"{provider}:{model}",
+        provider=provider,
+        model=model,
+        model_settings=model_settings,
+        prompt_versions={"question_agent_system": QUESTION_AGENT_PROMPT_DIGEST},
+        code_revision=_code_revision(),
+        policy_versions={
+            "question_agent": QUESTION_AGENT_POLICY_VERSION,
+            "exploration_profile": EXPLORATION_PROFILE_VERSION,
+            "exploration_statistical": EXPLORATION_STATISTICAL_POLICY_VERSION,
+            "decision_report": DECISION_REPORT_POLICY_VERSION,
+        },
+        tool_registry_digest=data_tool_registry_digest(),
+        sandbox_policy_digest=default_policy_digest(),
+    )
 
 
 def compile_workflow_eval_case(
@@ -87,7 +152,7 @@ def compile_workflow_eval_case(
         required_milestones=spec.required_milestones,
         minefields=spec.minefields,
     )
-    resolved_environment = environment or WorkflowEvalEnvironment()
+    resolved_environment = environment or build_workflow_eval_environment()
     case_fingerprint = stable_hash(case.model_dump(mode="json"), length=32)
     environment_fingerprint = stable_hash(resolved_environment.model_dump(mode="json"), length=32)
     resolved_dataset_fingerprints = dataset_fingerprints or {}

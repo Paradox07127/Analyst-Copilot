@@ -1,5 +1,226 @@
 # Changelog
 
+## Unreleased: what two real runs exposed — resource limits, the tool loop auto-EDA never entered, and five bugs - 2026-08-26
+
+Two live runs on the Olist nine-table set (gpt-5.6-luna) drove this pass. Plan
+and per-slice acceptance: `docs/agent/remediation-plan-2026-08-25.md` (T13–T15).
+
+- Resource ceilings are now user settings that persist: the working-set ceiling
+  (GB) and the per-dataset row ceiling (millions) are editable, allow-listed
+  server-side, and applied as the default policy for new runs. A stopped run no
+  longer reports only "Resource preflight stopped this run before data
+  ingestion" — `EdaResourceLimitGuidance` carries the estimate, the ceiling, the
+  overage, the largest table, and the ways out, including a *computed* "turning
+  the clean off would fit" (re-estimated, not guessed, and offered only when the
+  working set is the sole limit). The run that started this: precleaning doubles
+  the retained term, taking the estimate from 1820 MB to 2284 MB against a
+  2048 MB ceiling, and the whole analysis stopped in 0.19 s while reporting
+  "completed".
+- Auto-EDA now enters the agent tool loop. It previously called only the SQL
+  executor, so all twenty typed tools — including the three method families
+  added earlier this month — were unreachable from the main pipeline: a
+  forecasting question failed on generated SQL and two method questions
+  abstained. Questions carrying a method answer contract now route through the
+  shared `execute_question_with_tools`; plain aggregates stay on SQL. The step's
+  output contract widened to the ten artifact types the loop can emit (the
+  kernel rejects undeclared types, so a call swap alone would have failed at
+  runtime), and the loop's context now includes this run's earlier EDA
+  artifacts, filtered so context artifacts are not republished as step output.
+- A method-contract failure no longer discards a successful query and tells the
+  user nothing was produced. Anomaly and segmentation questions publish their
+  findings with `contract_status="unverified"` and a plain-language disclosure;
+  forecast, prediction and causal questions still refuse a SQL proxy. The run
+  that motivated this had 2591 rows of freight outliers and 73 category
+  diagnostics sitting in artifacts while the report said the evidence was never
+  produced.
+- `causal_overclaim` is repaired deterministically instead of deleted: causal
+  verbs are rewritten to association wording with a qualifier, then re-gated.
+  Deleting them had emptied both Key EDA Insights and Business Recommendations,
+  and the LLM repair round was measured going in circles (two byte-identical
+  validation rounds).
+- Claims cite large values exactly. `{value:.4g}` rendered 25455 as
+  "2.546e+04"; the gate read 25460, disagreed with the stored evidence, and
+  pruned three *correct* claims (25460/19780/12410 in the live run match the
+  rendering exactly). The same leak ran wider than the ranked builder: `{value:g}`
+  gave up at six significant digits, so single-value, generic and trend findings,
+  the ranked group-size suffix, and — the third pruned claim — the
+  `allowed_numbers` list the interpretation model copies its figures from all
+  offered "1.35916e+07" for a GMV of 13591643.7. The renderer that answers the
+  gate's half-ULP rule now lives beside it as `report_validator.gate_safe_number`,
+  and every one of those sites calls it.
+- Quality-issue locators with `code=`/`column=` predicates resolve again, so a
+  data-quality claim whose figures match the artifact verbatim is no longer
+  labeled unverified; the qualifier labels themselves now read as English.
+  Share claims must restate the evidence's own denominator (the report had
+  called freight "14.2% of GMV" when the query's denominator was price+freight).
+- Report redundancy: a question contributes one merged claim instead of a
+  finding plus a near-duplicate interpretation, and de-duplication drops a
+  repeated claim outright rather than leaving a "see other section" pointer.
+
+Gates: backend `tests/unit` 3721 passed, 0 failed, 0 errors; `tests/golden` +
+`tests/evals` 198 passed, 1 skipped; frontend vitest 653/653; `tsc --noEmit`
+clean; production build clean; `scripts/benchmark_offline.py` exit 0; ruff clean.
+
+## Unreleased: 2026-08 remediation — exploration reaches the user, investigation branch retired, three method families land - 2026-08-26
+
+A four-agent design-completeness review (interaction surface / design-vs-code
+gaps / unfinished markers / end-to-end journey) drove a ten-slice remediation
+run. Plan and per-slice acceptance: `docs/agent/remediation-plan-2026-08-25.md`.
+
+- **The exploration admission gate is gone.** A deep dive no longer needs an
+  E4a release certificate, a pinned issuer public key, or any environment
+  variable: a bare install runs prepare → authorize → execute → publish. The
+  certificate schema, its verifier, and the evidence issuer stay as
+  *evaluation* tooling (`drivers/exploration_evidence_issuer.py` still answers
+  "can the deep dive find planted structure?"); they no longer decide who may
+  use the feature. What replaces the certificate as the run's identity is
+  derived from the live build — the read-only tool digest, the two policy
+  versions, and a per-tier budget ceiling (`exploration_hard_caps`) — so
+  policy freeze and budget hard caps still hold on resume. The pre-run budget
+  confirmation (prepare → authorize, `exploration_start` approval chain) is
+  untouched: that is a spend confirmation, not an admission gate.
+  `scripts/issue_local_exploration_certificate.py` is deleted, and
+  `SystemCapabilitiesView` no longer reports exploration as optional.
+- Exploration output is no longer a dead end: a gracefully stopped run
+  publishes its gate-passed findings, cited receipts, and rendered report into
+  the ArtifactStore (`publish_exploration_outputs`), the main report gains a
+  hard-gated "Deep-Dive Exploration" section whose numbers resolve against
+  receipt artifacts, and each finding is also published as a `ValidatedFinding`
+  (`origin="exploration"`) so Findings, Decision Report, promotion, and
+  publication chains finally have a live producer.
+- The investigation branch (plan → approve → execute → macro-loop) is retired
+  end to end per user decision: 24 files / ~13k lines deleted (routers, three
+  worker job kinds, orchestrator, loop agents, service, loop schemas), eight
+  cross-cutting contract tests decoupled, macro-loop metrics removed, and
+  `RETIRED_ARTIFACT_TYPES` keeps stores with legacy payloads readable.
+  `ValidatedFinding`/`InvestigationRecord`/`InvestigationPlan` schemas stay —
+  live consumers read them.
+- Per-question interpretations now reach the main report as `qintp_` claims
+  citing the question's own evidence union; `_diagnose_missingness` registers
+  its Holm-corrected target associations in the stat registry, so those tests
+  count toward multiplicity families instead of silently escaping them.
+- Exploration UX: `GET /sessions/{id}/explorations`, goal carried server-side,
+  LLM spend rolled up into the source session's trace (own event type — the
+  budget-restore path must not see foreign `llm_usage`), markdown report
+  rendering, nav entry and split-pane routes.
+- Failure paths: failed/cancelled runs are named as such in the nav (no more
+  eternal "still preparing"), `POST /jobs/{id}/retry` re-runs a failed
+  auto_eda with its persisted params, worker exceptions translate to
+  user-readable messages (raw detail stays in trace), and LLM degradation
+  (question fallback, deterministic report) marks the job summary degraded
+  with the reason surfaced on the report page.
+- Task management: the frontend cancel whitelist is gone (the backend never
+  had one), `GET /sessions/{id}/jobs` lets Activity recover in-flight jobs
+  without localStorage, and a chat turn can be stopped between tool steps.
+- Follow-up loop: "Ask about this" entries on report sections and findings,
+  chat's tool context includes derived-session result artifacts, a stale-report
+  banner offers one-click regeneration after new question runs.
+- Method families are live (design: `docs/agent/method-families-design-2026-08-25.md`):
+  `run_forecast` (four fpp3 baselines under rolling-origin backtests, empirical
+  error bands, fixed "descriptive baseline projection" limitation),
+  `run_segmentation` (KMeans + silhouette k, ARI resampling stability; unstable
+  runs are marked evidence-invalid; new `SEGMENTATION_RESULT` artifact), and
+  `run_causal_experiment` (observational contrast + SMD balance by default;
+  the randomized tier computes ATE±CI only under a user-issued
+  `randomized_design_confirmation` credential, and the claim gate licenses
+  causal wording solely from that receipt provenance — never from text).
+- Interaction pack: upload size pre-check and human-readable 413, CSV export
+  for table preview and findings, custom charts saveable as artifacts, delete
+  confirmations (incl. unfiled uploads), activity-button recovery, project
+  list expansion, search empty state, derived-runs filter, plain-language LLM
+  mode control, and a minimal UI for user SQL skill templates.
+- The memory ceiling is a setting, and hitting it says why. A nine-table run
+  with pre-cleaning on used to stop in 0.19s behind one sentence ("Resource
+  preflight stopped this run before data ingestion.") while the job read
+  *completed*. Settings → Analysis behavior now carries two limits in the units
+  a person uses — memory for one analysis (GB, default 2) and the largest table
+  (million rows, default 10) — remembered in this browser so a raised ceiling
+  survives a server restart; they resolve into the run's `EdaResourcePolicy`
+  and nothing else about the policy is settable from a browser. A stopped run
+  now publishes structured numbers (`EdaResourceLimitGuidance`: estimate vs
+  ceiling, how far over, the largest table, and a suggested ceiling) on both
+  `GET /sessions/{id}` and the `job.completed` event, and the Data Map and the
+  job strip render them as the estimate, the biggest table, and the ways out.
+  "Turn the clean off" is offered only when the working set is re-estimated
+  without pre-cleaning and actually fits.
+- Cleanup: `WorkflowEvalEnvironment` now carries real build identity (git
+  revision, tool-registry and sandbox-policy digests, prompt digest) so
+  `trial_environment_mismatch` can actually fire; the narrative-reviewer stub
+  and its dead switch are deleted (it fabricated an audit note if ever
+  enabled); orphan fields dropped or wired (`handoff.completed_at` is now
+  written); `nl2sql_eval` moved out of `src/`.
+
+Still closed to users: E4a release certificate remains unissued — exploration
+stays hidden until the three-tier live-provider admission trials run on
+current code. The stale "Still residual" list in the 2026-08-02 entry below is
+superseded by this pass; `docs/exploration-remaining-issues.md` carries the
+authoritative per-item status.
+
+Gates: backend `tests/unit` 2871 passed, 4 failed pre-existing — 2 in
+`test_upload_hardening` (the venv lacks `httpx2`, breaking starlette's
+TestClient, same root as the 345 baseline collection errors) and 2 in
+`test_report_llm_settings` (`load_*_from_env_file(path=None)` reads the real
+repo-root `.env`, whose values leak into assertions — independent of httpx2);
+`tests/golden` + `tests/evals` 198 passed, 1 skipped; frontend vitest 647/647;
+`tsc --noEmit` clean; ruff clean.
+
+Follow-up (same day): both environment debts are paid. `uv sync --extra dev`
+installs the already-declared `httpx2`, clearing the 345 collection errors and
+`test_upload_hardening`; `test_report_llm_settings` isolates the repo-root
+`.env` behind an autouse `DEFAULT_ENV_PATH` monkeypatch. Un-masking the API
+tests exposed three files of drift from this same iteration, all
+test-expectation updates (report view's `degraded` fields, mutation count
+69→64 after the investigation retirement net of three new mutations, custom
+charts' profile fixture missing now-required `DatasetProfile` fields). Full
+backend suite: 3990 passed, 1 skipped, 0 failed.
+
+Follow-up (2026-08-26): the artifact detail read now resolves one hop down the
+lineage. Chat's tool context includes derived-session result artifacts, so an
+answer can cite an id that lives in a `qsess_` partition while the UI fetches
+it under the run the user has open — which 404'd and degraded to "could not be
+loaded". `ArtifactService.get_artifact` falls back to
+`artifact_index_rows_in_children` when the named partition misses: same project
+only, direct children only, internal runs still hidden even when an internal
+sibling holds the newer copy of the same content-derived id. The partition key
+is unchanged and the served detail names the run that actually owns the
+artifact. Full backend suite: 3996 passed, 1 skipped, 0 failed.
+
+## Unreleased: injected claims stop buying LLM repair rounds - 2026-08-20
+
+Compare run `sess_1787201833042_9n7rig` validated the report three times with
+byte-identical results: the same 5 critical findings, 4 of them on `qfind_q_*`
+claims. Those claims are injected from executed question findings, so the plan
+LLM cannot rewrite them — both repair rounds were a full m2 call spent on a
+guaranteed no-op, and the hard gate pruned the claims anyway.
+
+`_repair_mode_for_code` is now claim-aware: a numeric_mismatch,
+currency_unit_mismatch or causal_overclaim on a platform-authored claim id
+(`qfind_`/`qbg_`/`qbiz_`/`qfocus_`/`dataset_overview_`/`exec_summary_` and the
+deterministic inventory prefixes) routes to `prune` instead of `llm`, so
+`_requires_llm_retry` only fires when the plan LLM actually authored something
+broken. Published output is unchanged — the hard gate already pruned these.
+
+Gates: `eda_platform/tests/unit` 2951 passed (353 errors and 4 failures are
+pre-existing: the venv lacks `httpx2` for starlette's TestClient; both counts
+are identical with the change reverted).
+
+## Unreleased: the report override now writes the whole report - 2026-08-13
+
+Forensics on two runs' empty Business Recommendations: the LLM plan proposed
+them every time, the causal-language gate killed them ("driven by", "due to"),
+and the LLM repair that should rephrase them died of reasoning-token
+truncation. Two changes:
+
+- `EDA_REPORT_LLM_*` now routes the m2 claim plan (and its cap raise/restore)
+  through the override client, not just the narration — pointing the report at
+  a non-reasoning model is otherwise ineffective against plan truncation.
+- The plan instructions tell the model that recommendations pair a cited
+  observation with an action without asserting causation, and that numbers are
+  copied verbatim (0.78 stays a ratio; the 78.3446% unit-conversion mismatch
+  was the third pruned claim). Effectiveness is judged by the next live run.
+
+Gates: ruff clean; full offline suite 4090 passed, 1 skipped.
+
 ## Unreleased: pre-commit codex sweep — seven cross-file gaps closed - 2026-08-13
 
 A whole-tree codex review before committing the 2026-08-12 iteration surfaced

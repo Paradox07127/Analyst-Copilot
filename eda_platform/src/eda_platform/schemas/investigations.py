@@ -23,7 +23,9 @@ GateStatus = Literal["passed", "warning", "failed"]
 ClaimClass = Literal["observed", "predictive", "causal_supported", "inconclusive"]
 ReliabilityRating = Literal["high", "medium", "low"]
 ReportReadiness = Literal["eligible", "eligible_with_limitations", "not_eligible"]
-ApprovalDecision = Literal["approved", "rejected"]
+# Exploration took over ValidatedFinding production; the default keeps
+# artifacts persisted by the legacy investigation branch valid.
+FindingOrigin = Literal["investigation", "exploration"]
 
 
 class InvestigationGate(BaseModel):
@@ -68,7 +70,6 @@ class InvestigationPlan(BaseModel):
     feasibility: FeasibilityStatus
     status: InvestigationPlanStatus
     status_reason: str
-    user_approval_required: bool = True
 
     @field_validator(
         "investigation_id",
@@ -107,35 +108,17 @@ class InvestigationPlan(BaseModel):
         raise ValueError("field must contain at least one non-empty item.")
 
 
-class InvestigationApproval(BaseModel):
-    """Persisted user decision bound to the exact approved plan content."""
-
-    schema_version: int = 1
-    approval_id: str
-    investigation_id: str
-    plan_fingerprint: str = Field(
-        description="SHA-256 over the canonical JSON of the approved plan",
-    )
-    decision: ApprovalDecision
-    reason: str = ""
-    decided_at: str = Field(description="ISO-8601 timestamp of the user decision")
-
-    @field_validator("approval_id", "investigation_id", "plan_fingerprint", "decided_at")
-    @classmethod
-    def _required_strings_are_non_empty(cls, value: str) -> str:
-        if value.strip():
-            return value
-        raise ValueError("field must be non-empty.")
-
-
 class ValidatedFinding(BaseModel):
     """A validated finding with explicit evidence and hypothesis context."""
 
     schema_version: int = 1
     finding_id: str
+    # For origin="exploration" this carries the exploration id; the field name
+    # is kept so persisted artifacts and consumers stay compatible.
     investigation_id: str
     question_id: str
     question: str
+    origin: FindingOrigin = "investigation"
     value_hypothesis: str = Field(
         default="",
         description="LLM/template hypothesis context; never a claim source",

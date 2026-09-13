@@ -5,10 +5,6 @@ from typing import Any
 
 from eda_platform.schemas.sessions import TraceEvent
 
-# Investigation-loop anti-repetition events.
-PROBE_REPEATED_REJECTED = "probe_repeated_rejected"
-LOOP_FAILURE_HISTORY_INJECTED = "loop_failure_history_injected"
-
 # Finding-cluster deduplication event.
 FINDINGS_DEDUPLICATED = "findings_deduplicated"
 

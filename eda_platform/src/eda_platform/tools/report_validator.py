@@ -541,6 +541,30 @@ def _value_supports_token(token: _NumericToken, value: float, policy: str) -> bo
     return abs(value - token.value) <= 0.5 * 10.0 ** (-token.decimals) * (1 + 1e-9)
 
 
+def gate_safe_number(value: float) -> str:
+    """Fixed-point text for a cited value; never scientific notation.
+
+    The counterpart of ``value_supports_token``: ``{value:g}`` and ``{value:.4g}``
+    drop to a mantissa past six (resp. four) significant digits, and the token
+    that reads back — 1.35916e+07 for a GMV of 13591643.7 — misses the half-ULP
+    window by four orders of magnitude, so the claim is pruned as a numeric
+    mismatch (2026-08-26 Compare run). Rounding to four decimals always lands
+    inside the window of the digits it leaves behind.
+
+    Deliberately NOT the exporter's magnitude-scaled policy: this composes text
+    persisted as an artifact, and rounding here would rewrite stored evidence.
+    The exporter re-renders at display time, so a stored "12.4973" still reads
+    "12.5" in the report.
+    """
+    if not math.isfinite(value):
+        # int(nan) raises; the `:g` this replaced printed "nan" and kept going.
+        return str(value)
+    if value == int(value) and abs(value) < 1e15:
+        return str(int(value))
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _satisfies_threshold(token: _NumericToken, values: Iterable[float]) -> bool:
     compare = _THRESHOLD_OPS[token.threshold_op or "<"]
     return any(compare(value, token.value) for value in values)
@@ -762,7 +786,38 @@ def _resolve_evidence_numbers(
         return _table_numbers(evidence, evidence_pack)
     if summary.artifact_type == ArtifactType.QUALITY_ISSUE_SET.value:
         return _quality_issue_numbers(evidence, evidence_pack)
+    if summary.artifact_type == ArtifactType.EVIDENCE_RECEIPT.value:
+        return _receipt_numbers(evidence, evidence_pack)
     return []
+
+
+def _receipt_numbers(
+    evidence: EvidenceRef,
+    evidence_pack: EvidencePack,
+) -> list[tuple[float, str, str, str | None]]:
+    """Resolve an evidence receipt's verifiable numbers (deep-dive claims).
+
+    Only explicit locators resolve: "numbers" selects every value the receipt
+    verifies (facts, recomputed derivations, statistics); a per-value locator
+    ("facts.<id>", "statistics.<field>") selects that value. The empty locator
+    deliberately resolves nothing, so legacy whole-artifact citations of
+    receipts keep their pre-existing unverified status.
+    """
+    receipt = next(
+        (item for item in evidence_pack.receipts if item.artifact_id == evidence.artifact_id),
+        None,
+    )
+    if receipt is None:
+        return []
+    locator = evidence.locator.strip()
+    if locator == "numbers":
+        selected = receipt.values
+    else:
+        selected = [value for value in receipt.values if value.locator == locator]
+    return [
+        (value.value, value.unit, value.policy, value.threshold_subject)
+        for value in selected
+    ]
 
 
 def _sql_result_numbers_with_policy(
@@ -1020,18 +1075,56 @@ def _quality_issue_numbers(
     locator = evidence.locator.strip()
     if locator in {"", "issues"}:
         return [(float(len(issues)), "raw", "exact", None)]
-    code, separator, column = locator.removeprefix("quality_issue:").partition(":")
-    if not separator:
+    selector = _quality_issue_selector(locator)
+    if selector is None:
         return []
+    code, column, field = selector
     values: list[tuple[float, str, str, str | None]] = []
     for issue in structured:
         if issue.code != code or (issue.column or "") != column:
             continue
-        if issue.metric_value is not None:
+        if issue.metric_value is not None and field in {None, "metric_value"}:
             values.append((issue.metric_value, issue.metric_unit, "rounded", None))
-        if issue.affected_count is not None:
+        if issue.affected_count is not None and field in {None, "affected_count"}:
             values.append((float(issue.affected_count), "raw", "exact", None))
     return values
+
+
+# The grammar the plan model actually writes. Three correct quality figures were
+# printed as "[Unverified figures]" because only the colon form below parsed
+# (2026-08-26 Compare run, claim c2).
+_QUALITY_PREDICATE_PATTERN = re.compile(
+    r"quality_issues\[(?P<predicates>[^\]]*)\]"
+    r"(?:\.(?P<field>metric_value|affected_count))?"
+)
+
+
+def _quality_issue_selector(locator: str) -> tuple[str, str, str | None] | None:
+    """Parse a quality-issue locator into (code, column, field).
+
+    Two grammars: the emitted "quality_issue:{code}:{column}" and the
+    bracket-predicate "quality_issues[code=X,column=Y].metric_value". An
+    absent column predicate selects dataset-level issues only, so neither form
+    can borrow a figure belonging to another column.
+    """
+    match = _QUALITY_PREDICATE_PATTERN.fullmatch(locator)
+    if match is not None:
+        predicates: dict[str, str] = {}
+        for part in match.group("predicates").split(","):
+            key, separator, value = part.partition("=")
+            if not separator:
+                return None
+            predicates[key.strip()] = value.strip().strip("'\"")
+        if not predicates or set(predicates) - {"code", "column"}:
+            return None
+        code = predicates.get("code")
+        if not code:
+            return None
+        return code, predicates.get("column", ""), match.group("field")
+    code, separator, column = locator.removeprefix("quality_issue:").partition(":")
+    if not separator:
+        return None
+    return code, column, None
 
 
 def _select_table_locator(rows: list[dict[str, Any]], locator: str) -> Any:
@@ -1191,16 +1284,28 @@ def _critical(
         message=message,
         section_title=section_title,
         claim_id=claim_id,
-        repair_mode=_repair_mode_for_code(code),
+        repair_mode=_repair_mode_for_code(code, claim_id),
         numeric_details=numeric_details or [],
     )
 
 
-def _repair_mode_for_code(code: str) -> Literal["deterministic", "llm", "prune"]:
+def _repair_mode_for_code(
+    code: str, claim_id: str | None = None
+) -> Literal["deterministic", "llm", "prune"]:
     if code in {"missing_quality_warning", "unsupported_section_body"}:
         return "deterministic"
-    if code in {"numeric_mismatch", "currency_unit_mismatch", "causal_overclaim"}:
-        return "llm"
+    if code == "causal_overclaim":
+        # Rewriting the wording keeps the observation. The LLM round this used
+        # to take returned c3/c7 verbatim three times and both were deleted,
+        # emptying Key EDA Insights and Business Recommendations (2026-08-26
+        # Compare run sess_1787771303025_kojblh).
+        return "deterministic"
+    if code in {"numeric_mismatch", "currency_unit_mismatch"}:
+        # An injected claim's text comes from question findings, not from the
+        # plan LLM, so a rewrite round cannot touch it: 2026-08-20 Compare run
+        # sess_1787201833042_9n7rig burned two m2 calls on four qfind_ claims
+        # and validated identically all three times before pruning them.
+        return "prune" if is_platform_authored_claim(claim_id) else "llm"
     return "prune"
 
 
@@ -1237,6 +1342,29 @@ _FALLBACK_INVENTORY_PREFIXES = (
     "model_card_available",
     "chart_available",
 )
+# Claim id families reporting.py builds itself: question findings
+# (_inject_question_claims / _apply_business_findings_fallback), the dataset
+# overview and executive-summary fallbacks, and the deterministic inventory.
+_PLATFORM_CLAIM_PREFIXES = (
+    "qfind_",
+    "qbg_",
+    "qbiz_",
+    # Per-question interpretations (_inject_question_claims): validated at
+    # question-exec time, transcribed verbatim — a rewrite round cannot fix one.
+    "qintp_",
+    # Deep-dive exploration claims (_apply_exploration_deep_dive): their text
+    # is transcribed from gate-passed exploration claims, never LLM-authored.
+    "xplf_",
+    _LEGACY_QFOCUS_PREFIX,
+    _INJECTED_OVERVIEW_PREFIX,
+    _EXEC_SUMMARY_COPY_PREFIX,
+    *_FALLBACK_INVENTORY_PREFIXES,
+)
+
+
+def is_platform_authored_claim(claim_id: str | None) -> bool:
+    """True when the platform, not the plan LLM, wrote this claim's text."""
+    return bool(claim_id) and claim_id.startswith(_PLATFORM_CLAIM_PREFIXES)
 
 # F6 evidence-strength tiers (claim-level confidence_label; the numeric
 # verification axis above is separate and keeps its own vocabulary).

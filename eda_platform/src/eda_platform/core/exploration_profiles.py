@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
 from typing import Literal
 
 from eda_platform.core.exploration_journal import sealed_policy
 from eda_platform.core.exploration_tiers import ExplorationTier
+from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.exploration import ExplorationPolicy, InsightFamily
 from eda_platform.schemas.exploration_budget import (
     ExplorationBudgetPolicy,
@@ -16,6 +19,7 @@ from eda_platform.schemas.exploration_budget import (
 
 EXPLORATION_PROFILE_VERSION = "e4a-experimental-v1"
 EXPLORATION_STATISTICAL_POLICY_VERSION = "claim-gates-v1"
+EXPLORATION_TIERS: tuple[ExplorationTier, ...] = ("quick", "standard", "deep")
 
 # Every entry must be able to emit an EvidenceReceipt: the probe executor
 # refuses a successful tool call without one, so a receipt-less capability here
@@ -147,6 +151,50 @@ def build_exploration_policy(
             statistical_policy_version=EXPLORATION_STATISTICAL_POLICY_VERSION,
             tool_capability_digest=tool_capability_digest,
         )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ExplorationHardCaps:
+    """Per-run ceilings no exploration policy or amendment may exceed."""
+
+    max_wall_seconds: Decimal
+    max_llm_requests: int
+    max_total_tokens: int
+    max_cost_usd: Decimal
+    max_tool_calls: int
+    max_rows_scanned: int
+    max_cells_scanned: int
+
+
+@lru_cache(maxsize=1)
+def exploration_hard_caps() -> ExplorationHardCaps:
+    """Ceiling over every tier profile: a smaller cap would reject that tier."""
+    budgets = [exploration_budget_profile(tier) for tier in EXPLORATION_TIERS]
+    return ExplorationHardCaps(
+        max_wall_seconds=max(Decimal(str(b.llm.max_wall_seconds or 0)) for b in budgets),
+        max_llm_requests=max(int(b.llm.max_requests or 0) for b in budgets),
+        max_total_tokens=max(int(b.llm.max_total_tokens or 0) for b in budgets),
+        max_cost_usd=max(Decimal(str(b.llm.max_cost_usd or 0)) for b in budgets),
+        max_tool_calls=max(int(b.max_successful_tool_calls or 0) for b in budgets),
+        max_rows_scanned=max(int(b.max_rows_scanned or 0) for b in budgets),
+        max_cells_scanned=max(int(b.max_result_cells or 0) for b in budgets),
+    )
+
+
+def exploration_code_fingerprint(tool_capability_digest: str) -> str:
+    """Journal identity for the exploration implementation this build exposes.
+
+    Not a source-tree hash: it covers the tool contracts and the two policy
+    versions, which is exactly what a resume must find unchanged.
+    """
+    return "xplcode_" + stable_hash(
+        {
+            "tool_capability_digest": tool_capability_digest,
+            "scoring_policy_version": EXPLORATION_PROFILE_VERSION,
+            "statistical_policy_version": EXPLORATION_STATISTICAL_POLICY_VERSION,
+        },
+        length=32,
     )
 
 

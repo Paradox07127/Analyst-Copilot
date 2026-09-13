@@ -3,31 +3,24 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from exploration_test_helpers import (
-    TEST_BINDINGS,
-    TEST_CAPS,
-    TEST_RUNTIME_IDENTITY,
-    TEST_TRUSTED_RELEASE_PUBLIC_KEYS,
-    release_certificate,
-)
 
 from eda_platform.application.ports import JobCommand, JobRef
-from eda_platform.application.services.approval_service import ApprovalService
+from eda_platform.application.services.approval_service import (
+    ApprovalNotFoundError,
+    ApprovalService,
+)
 from eda_platform.application.services.exploration_service import (
-    EXPLORATION_RELEASE_CERTIFICATE_ENV,
-    EXPLORATION_RELEASE_TRUSTED_KEYS_ENV,
-    ExplorationReleaseUnavailableError,
+    ExplorationConflictError,
     ExplorationService,
     ExplorationSourceChangedError,
     ExplorationSourceSnapshot,
-    assert_certificate_matches_runtime,
-    load_configured_release_certificate,
-    operator_pinned_release_public_keys,
-    resolve_configured_release_trust,
+    ExplorationValidationError,
+    assert_policy_matches_runtime,
+    exploration_runtime_identity,
 )
 from eda_platform.application.services.job_service import JobService
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
@@ -92,9 +85,6 @@ def exploration(tmp_path: Path) -> _Fixture:
         store,
         ApprovalService(store),
         JobService(store, backend),
-        release_certificate=release_certificate(),
-        trusted_release_public_keys=TEST_TRUSTED_RELEASE_PUBLIC_KEYS,
-        trusted_runtime_identity=TEST_RUNTIME_IDENTITY,
         source_snapshot_resolver=source,
     )
     return _Fixture(store=store, backend=backend, source=source, service=service)
@@ -135,20 +125,66 @@ def _settle_job(fixture: _Fixture, job_id: str) -> None:
     )
 
 
-def test_prepare_start_and_get_are_certificate_bound_and_journal_authoritative(
+def test_deep_dive_runs_on_a_bare_install_with_no_certificate_and_no_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh machine: no certificate file, no trust keys, no env at all."""
+    for name in (
+        "EDA_EXPLORATION_RELEASE_CERTIFICATE_PATH",
+        "EDA_EXPLORATION_RELEASE_TRUSTED_KEYS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    store = ArtifactStore(tmp_path)
+    store.ensure_project(PROJECT_ID, name="Demo")
+    backend = _RecordingBackend(store)
+    service = ExplorationService(
+        store,
+        ApprovalService(store),
+        JobService(store, backend),
+        source_snapshot_resolver=_MutableSource(),
+    )
+    prepared = service.prepare(
+        SOURCE_SESSION_ID,
+        mode="open",
+        goal=None,
+        dataset_ids=DATASET_IDS,
+        thinking_level="quick",
+        provider="openai",
+    )
+    assert prepared.cost_range.maximum_usd == prepared.policy.budget.llm.max_cost_usd
+    started = service.start(
+        SOURCE_SESSION_ID,
+        action_hash=prepared.action_hash,
+        approval_token=prepared.approval_token,
+        provider="openai",
+        payload_policy="schema+aggregates",
+        llm_env=None,
+        idempotency_key="bare-install",
+    )
+    assert started.exploration.status == "running"
+    assert service.get(SOURCE_SESSION_ID, prepared.exploration_id).status == "running"
+    assert service.list_for_session(SOURCE_SESSION_ID)[0].exploration_id == (
+        prepared.exploration_id
+    )
+    assert service.pause(SOURCE_SESSION_ID, prepared.exploration_id).status == (
+        "pause_requested"
+    )
+    assert service.cancel(SOURCE_SESSION_ID, prepared.exploration_id).status == "stopped"
+
+
+def test_prepare_start_and_get_are_journal_authoritative(
     exploration: _Fixture,
 ) -> None:
     prepared, started = _prepare_and_start(exploration)
 
     assert prepared.policy.thinking_level == "quick"
     assert prepared.cost_range.maximum_usd == prepared.policy.budget.llm.max_cost_usd
-    assert prepared.release_certificate_digest == release_certificate().certificate_digest
     assert started.exploration.status == "running"
     assert started.exploration.last_seq == 0
     assert started.job.job_id == exploration.backend.commands[0].job_id
     assert exploration.backend.commands[0].kind == "exploration_run"
     params = json.loads(exploration.backend.commands[0].params_json)
-    assert params["release_certificate_digest"] == prepared.release_certificate_digest
+    assert params["code_fingerprint"] == exploration_runtime_identity().code_fingerprint
     assert "secret-never-in-params" not in exploration.backend.commands[0].params_json
 
     # A job projection can fail without rewriting exploration state.
@@ -170,18 +206,19 @@ def test_prepare_start_and_get_are_certificate_bound_and_journal_authoritative(
     assert len(exploration.backend.commands) == 1
 
 
-def test_budget_amendment_cannot_exceed_the_release_certificate(
+def test_budget_amendment_cannot_exceed_the_build_hard_caps(
     exploration: _Fixture,
 ) -> None:
+    """The pre-run budget confirmation still has a ceiling behind it."""
     prepared, _started = _prepare_and_start(exploration)
 
-    with pytest.raises(ExplorationReleaseUnavailableError, match="llm requests"):
+    with pytest.raises(ExplorationValidationError, match="llm requests"):
         exploration.service.extend_budget(
             SOURCE_SESSION_ID,
             prepared.exploration_id,
             increase=BudgetCapIncrease(max_requests=29),
-            reason="attempt to exceed certified hard cap",
-            idempotency_key="over-certificate",
+            reason="attempt to exceed the build hard cap",
+            idempotency_key="over-cap",
         )
 
     assert all(
@@ -190,149 +227,42 @@ def test_budget_amendment_cannot_exceed_the_release_certificate(
     )
 
 
-def test_missing_tampered_or_wrong_provider_certificate_fails_closed(
+def test_execution_still_requires_the_users_budget_approval(
     exploration: _Fixture,
 ) -> None:
-    closed = ExplorationService(
-        exploration.store,
-        ApprovalService(exploration.store),
-        JobService(exploration.store, exploration.backend),
-        release_certificate=None,
-        trusted_release_public_keys=TEST_TRUSTED_RELEASE_PUBLIC_KEYS,
-        trusted_runtime_identity=TEST_RUNTIME_IDENTITY,
-        source_snapshot_resolver=exploration.source,
+    """Removing the release gate must not remove the spend confirmation."""
+    prepared = exploration.service.prepare(
+        SOURCE_SESSION_ID,
+        mode="open",
+        goal=None,
+        dataset_ids=DATASET_IDS,
+        thinking_level="quick",
+        provider="openai",
     )
-    with pytest.raises(ExplorationReleaseUnavailableError):
-        closed.prepare(
+    with pytest.raises(ApprovalNotFoundError):
+        exploration.service.start(
             SOURCE_SESSION_ID,
-            mode="open",
-            goal=None,
-            dataset_ids=DATASET_IDS,
-            thinking_level="quick",
+            action_hash=prepared.action_hash,
+            approval_token="not-the-issued-token",
             provider="openai",
+            payload_policy="schema+aggregates",
+            llm_env=None,
+            idempotency_key="forged-token",
         )
-
-    untrusted = ExplorationService(
-        exploration.store,
-        ApprovalService(exploration.store),
-        JobService(exploration.store, exploration.backend),
-        release_certificate=release_certificate(),
-        trusted_release_public_keys={},
-        trusted_runtime_identity=TEST_RUNTIME_IDENTITY,
-        source_snapshot_resolver=exploration.source,
-    )
-    with pytest.raises(ExplorationReleaseUnavailableError, match="integrity"):
-        untrusted.require_release_certificate()
-
-    tampered = release_certificate().model_copy(update={"providers": ("anthropic",)})
-    invalid = ExplorationService(
-        exploration.store,
-        ApprovalService(exploration.store),
-        JobService(exploration.store, exploration.backend),
-        release_certificate=tampered,
-        trusted_release_public_keys=TEST_TRUSTED_RELEASE_PUBLIC_KEYS,
-        trusted_runtime_identity=TEST_RUNTIME_IDENTITY,
-        source_snapshot_resolver=exploration.source,
-    )
-    with pytest.raises(ExplorationReleaseUnavailableError, match="integrity"):
-        invalid.require_release_certificate()
-    with pytest.raises(ExplorationReleaseUnavailableError, match="not covered"):
-        exploration.service.require_release_certificate(provider="anthropic")
-
-
-def test_configured_certificate_loader_requires_a_pinned_release_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    certificate = release_certificate()
-    path = tmp_path / "release-certificate.json"
-    path.write_text(certificate.model_dump_json(), encoding="utf-8")
-    monkeypatch.setenv(EXPLORATION_RELEASE_CERTIFICATE_ENV, str(path))
-
-    assert load_configured_release_certificate() is None
-    loaded = load_configured_release_certificate(
-        trusted_release_public_keys=TEST_TRUSTED_RELEASE_PUBLIC_KEYS,
-        trusted_runtime_identity=TEST_RUNTIME_IDENTITY,
-    )
-    assert loaded == certificate
-
-
-def _pinned_keys_value(key_id: str = "test-release-v1") -> str:
-    return f"{key_id}:{TEST_TRUSTED_RELEASE_PUBLIC_KEYS[key_id].hex()}"
-
-
-def test_operator_pinned_key_opens_the_gate_and_derives_the_runtime_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    certificate = release_certificate()
-    path = tmp_path / "release-certificate.json"
-    path.write_text(certificate.model_dump_json(), encoding="utf-8")
-    monkeypatch.setenv(EXPLORATION_RELEASE_CERTIFICATE_ENV, str(path))
-
-    monkeypatch.delenv(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, raising=False)
-    closed = resolve_configured_release_trust()
-    assert closed.certificate is None
-    assert closed.runtime_identity is None
-
-    monkeypatch.setenv(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, _pinned_keys_value())
-    opened = resolve_configured_release_trust()
-    assert opened.certificate == certificate
-    assert opened.runtime_identity == TEST_RUNTIME_IDENTITY
-
-
-def test_operator_pinned_key_must_match_the_certificate_signature(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    certificate = release_certificate()
-    path = tmp_path / "release-certificate.json"
-    path.write_text(certificate.model_dump_json(), encoding="utf-8")
-    monkeypatch.setenv(EXPLORATION_RELEASE_CERTIFICATE_ENV, str(path))
-    monkeypatch.setenv(
-        EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, "test-release-v1:" + "00" * 32
-    )
-
-    assert resolve_configured_release_trust().certificate is None
+    assert exploration.backend.commands == []
 
 
 @pytest.mark.parametrize(
-    "value",
-    ["not-a-pair", ":" + "00" * 32, "k:zz", "k:" + "00" * 31],
+    "drift",
+    ["tool_capability_digest", "scoring_policy_version", "statistical_policy_version"],
 )
-def test_malformed_pinned_trust_keys_raise_instead_of_downgrading(
-    value: str, monkeypatch: pytest.MonkeyPatch
+def test_a_policy_from_another_build_is_refused(
+    exploration: _Fixture, drift: str
 ) -> None:
-    monkeypatch.setenv(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, value)
-    with pytest.raises(ValueError, match=EXPLORATION_RELEASE_TRUSTED_KEYS_ENV):
-        operator_pinned_release_public_keys()
-
-
-@pytest.mark.parametrize(
-    "runtime",
-    [
-        replace(
-            TEST_RUNTIME_IDENTITY,
-            bindings=TEST_BINDINGS.model_copy(update={"checker_version": "other"}),
-        ),
-        replace(
-            TEST_RUNTIME_IDENTITY,
-            bindings=TEST_BINDINGS.model_copy(update={"code_fingerprint": "other"}),
-        ),
-        replace(
-            TEST_RUNTIME_IDENTITY,
-            bindings=TEST_BINDINGS.model_copy(
-                update={"tool_capability_digest": "other"}
-            ),
-        ),
-        replace(
-            TEST_RUNTIME_IDENTITY,
-            hard_caps=TEST_CAPS.model_copy(update={"max_llm_requests": 35}),
-        ),
-        replace(TEST_RUNTIME_IDENTITY, scoring_policy_version="other"),
-        replace(TEST_RUNTIME_IDENTITY, statistical_policy_version="other"),
-    ],
-)
-def test_certificate_must_match_every_trusted_runtime_identity(runtime) -> None:
-    with pytest.raises(ValueError):
-        assert_certificate_matches_runtime(release_certificate(), runtime)
+    prepared, _started = _prepare_and_start(exploration)
+    stale = prepared.policy.model_copy(update={drift: "from-another-build"})
+    with pytest.raises(ExplorationConflictError):
+        assert_policy_matches_runtime(stale, exploration.service.runtime_identity)
 
 
 def test_pause_is_not_stop_and_resume_witness_mismatch_stops_fail_closed(

@@ -24,6 +24,14 @@ const existing = {
 };
 
 describe("Launchpad", () => {
+  it("always offers the deep dive field", async () => {
+    renderAppAt("/projects/p1/new-session");
+    expect(await screen.findByLabelText("Deep dive goal")).toBeEnabled();
+    expect(
+      screen.queryByText(/Deep dives are unavailable/),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps required data primary and launch confirmation visible", async () => {
     renderAppAt("/projects/p1/new-session");
 
@@ -672,5 +680,72 @@ describe("Reusing project data", () => {
     });
     expect(second).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Run analysis" })).toBeDisabled();
+  });
+});
+
+describe("Upload size limit", () => {
+  const GIB = 1 << 30;
+
+  const oversizeCsv = () => {
+    const file = new File(["id\n1\n"], "huge.csv", { type: "text/csv" });
+    Object.defineProperty(file, "size", { value: GIB + 1 });
+    return file;
+  };
+
+  it("states the per-file limit next to the file picker", async () => {
+    renderAppAt("/projects/p1/new-session");
+    await screen.findByRole("button", { name: "Choose CSV files" });
+    expect(screen.getByText("CSV files up to 1 GB each")).toBeInTheDocument();
+  });
+
+  it("rejects an oversize file before any upload starts", async () => {
+    let uploadRequests = 0;
+    server.use(
+      http.post("/api/v1/projects/:projectId/uploads", () => {
+        uploadRequests += 1;
+        return HttpResponse.json({}, { status: 500 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/new-session");
+
+    await user.upload(
+      await screen.findByLabelText("Data files (.csv)"),
+      oversizeCsv(),
+    );
+
+    expect(
+      await screen.findByText(/huge\.csv is larger than the 1 GB per-file limit/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("huge.csv")).not.toBeInTheDocument();
+    expect(uploadRequests).toBe(0);
+  });
+
+  it("translates the server's byte-limit rejection into plain language", async () => {
+    server.use(
+      http.post("/api/v1/projects/:projectId/uploads", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "request_too_large",
+              message: "Request body exceeds the 1074790400 byte limit.",
+            },
+          },
+          { status: 413 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/new-session");
+
+    await user.upload(
+      await screen.findByLabelText("Data files (.csv)"),
+      csvFile(),
+    );
+
+    expect(
+      await screen.findByText(/larger than the 1 GB upload limit/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/1074790400 byte/)).not.toBeInTheDocument();
   });
 });

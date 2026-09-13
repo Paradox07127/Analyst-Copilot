@@ -11,9 +11,9 @@ from eda_platform.agents.evidence_interleave import (
     EvidenceInterleaveSession,
     InMemoryEvidenceResolver,
 )
-from eda_platform.agents.narrative_reviewer import review_narrative
 from eda_platform.agents.narrator import narrate_report
 from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.claim_language import rewrite_causal_language
 from eda_platform.core.column_roles import ColumnRoleSet
 from eda_platform.core.llm import LLMClient, LLMResultMetadata, is_offline_client
 from eda_platform.schemas.artifacts import (
@@ -22,6 +22,7 @@ from eda_platform.schemas.artifacts import (
     EvidenceRef,
     SqlResult,
 )
+from eda_platform.schemas.exploration import ExplorationFindingSet
 from eda_platform.schemas.questions import QuestionExecutionResult
 from eda_platform.schemas.reports import (
     EvidenceRequest,
@@ -64,6 +65,7 @@ _REPAIRABLE_QUALITY_CODES = {"high_missing", "mixed_type_string", "outlier_detec
 _SELECTED_FOCUS_SECTION = "Selected Analysis Focus"
 _AGENT_ANALYSIS_SECTION = "Agent-Performed Analysis"
 _BUSINESS_FINDINGS_SECTION = "Business Findings"
+_DEEP_DIVE_SECTION = "Deep-Dive Exploration"
 # Bound the model-facing digest size.
 _MAX_DIGEST_QUESTIONS = 12
 _MAX_DIGEST_FINDINGS_PER_QUESTION = 4
@@ -134,6 +136,9 @@ class AgenticReportResult:
     interleave_transcript: InterleaveTranscript | None = None
     # Evidence requests issued automatically for numeric repair.
     forced_evidence_requests: int = 0
+    # Narrative drafts the narrator silently discarded (section + reason), so
+    # the driver can put one trace event where there used to be nothing.
+    narration_discards: list[dict[str, str]] = field(default_factory=list)
 
 
 def _forced_interleave_note(exchanges: list[InterleaveExchange]) -> str | None:
@@ -160,19 +165,22 @@ def generate_agentic_report(
     business_context: str,
     llm: LLMClient,
     payload_policy: PayloadPolicy = "schema+aggregates",
-    enable_semantic_audit: bool = False,
     narrator_llm: LLMClient | None = None,
 ) -> AgenticReportResult:
     evidence_pack = build_evidence_pack(artifacts, payload_policy=payload_policy)
     question_results, sql_results = _extract_question_evidence(artifacts)
     _register_question_artifacts(evidence_pack, question_results, sql_results)
+    # The report override (EDA_REPORT_LLM_*) writes the report: the claim plan
+    # is the task that truncates on reasoning-heavy providers, so it must run
+    # on the override client, not just the narration.
+    report_llm = narrator_llm or llm
     llm_calls: list[LLMResultMetadata] = []
     llm_events: list[LLMTraceEvent] = []
     validation_events: list[ReportValidationTraceEvent] = []
     # Both sessions read only persisted artifacts and never run computation.
     interleave_session: EvidenceInterleaveSession | None = None
     forced_session: EvidenceInterleaveSession | None = None
-    if not is_offline_client(llm):
+    if not is_offline_client(report_llm):
         resolver = InMemoryEvidenceResolver(artifacts)
         interleave_session = EvidenceInterleaveSession(
             resolver,
@@ -188,14 +196,14 @@ def generate_agentic_report(
     # Plan generation may raise the completion cap (wide-run pre-raise or the
     # truncation retry); the narration and session-title calls on this same
     # client must not inherit the inflated worst-case reservation.
-    initial_completion_cap = _completion_cap(llm)
+    initial_completion_cap = _completion_cap(report_llm)
     try:
         bundle, audit, used_fallback = _generate_with_repair(
             evidence_pack,
             project_id=project_id,
             session_id=session_id,
             business_context=business_context,
-            llm=llm,
+            llm=report_llm,
             question_results=question_results,
             sql_results=sql_results,
             llm_calls=llm_calls,
@@ -207,14 +215,19 @@ def generate_agentic_report(
     finally:
         if (
             initial_completion_cap is not None
-            and _completion_cap(llm) != initial_completion_cap
+            and _completion_cap(report_llm) != initial_completion_cap
         ):
-            _set_completion_budget(llm, initial_completion_cap)
+            _set_completion_budget(report_llm, initial_completion_cap)
 
     business_injected = _apply_business_findings_fallback(bundle, question_results)
     dataset_injected = _apply_dataset_overview_fallback(bundle, evidence_pack)
+    # Deep-dive claims land before the executive-summary fallback so a report
+    # without question claims can still lead with an exploration conclusion.
+    exploration_injected = _apply_exploration_deep_dive(
+        bundle, _extract_exploration_finding_sets(artifacts)
+    )
     executive_injected = _apply_executive_summary_fallback(bundle, question_results)
-    if business_injected or dataset_injected or executive_injected:
+    if business_injected or dataset_injected or executive_injected or exploration_injected:
         existing_semantic_notes = list(audit.semantic_notes)
         audit = validate_report_bundle(bundle, evidence_pack, sql_results=sql_results)
         bundle, audit = _apply_hard_gate(
@@ -243,6 +256,13 @@ def generate_agentic_report(
             for claim in _section(bundle, "Executive Summary").claims
             if claim.id.startswith("exec_summary_")
         )
+        exploration_injected = sum(
+            1
+            for section in bundle.sections
+            if section.title == _DEEP_DIVE_SECTION
+            for claim in section.claims
+            if claim.id.startswith("xplf_")
+        )
         bundle.status = audit.status
 
     semantic_notes = list(audit.semantic_notes)
@@ -261,6 +281,11 @@ def generate_agentic_report(
         semantic_notes.append(
             f"Injected {executive_injected} surviving claim(s) into Executive Summary."
         )
+    if exploration_injected:
+        semantic_notes.append(
+            f"Injected {exploration_injected} deep-dive claim(s) from autonomous "
+            "exploration (numbers verified against evidence receipts)."
+        )
     dropped_focus_claims = sum(
         event.dropped_focus_claim_count for event in validation_events
     )
@@ -278,14 +303,6 @@ def generate_agentic_report(
         semantic_notes.append(forced_note)
     audit.semantic_notes = semantic_notes
     _apply_section_coverage(bundle)
-    if enable_semantic_audit:
-        bundle = _apply_narrative_review(
-            bundle,
-            evidence_pack=evidence_pack,
-            sql_results=sql_results,
-            llm=llm,
-            audit=audit,
-        )
     # The final semantic gate grades surviving claims without pruning them.
     apply_semantic_gate(
         bundle,
@@ -298,7 +315,7 @@ def generate_agentic_report(
     bundle.status = audit.status
     # Narration runs last, over claims that already cleared every gate, and may
     # only reuse their figures. A narrator failure costs prose, never a claim.
-    narration = narrate_report(bundle, llm=narrator_llm or llm)
+    narration = narrate_report(bundle, llm=report_llm)
     if narration.attempted:
         note = (
             f"Wrote a connective narrative for {narration.written} of "
@@ -339,6 +356,7 @@ def generate_agentic_report(
         used_fallback=used_fallback,
         interleave_transcript=interleave_transcript,
         forced_evidence_requests=forced_evidence_requests,
+        narration_discards=list(narration.discards),
     )
 
 
@@ -660,6 +678,23 @@ def _report_repair_signature(
     return bundle.model_dump(mode="json"), critical_findings
 
 
+def _share_denominator_instruction() -> str:
+    """Ban restating a share against a denominator the evidence never gave.
+
+    The numeric gate verifies the figure, never the "of ..." phrase after it:
+    "freight represents 14.2% of order-item GMV of 13,591,643.7" passed while
+    the query divided by price + freight, where the share is 16.6%
+    (2026-08-26 Compare run, claim c6).
+    """
+    return (
+        "When a claim states a share, a percentage or a ratio, describe the "
+        "denominator exactly as the evidence describes it and do not substitute "
+        "another total: a share of price plus freight is not a share of GMV, "
+        "and a share of matched rows is not a share of all rows. If the "
+        "evidence does not name the denominator, write the share without one."
+    )
+
+
 def _request_plan(
     evidence_pack: EvidencePack,
     *,
@@ -700,7 +735,13 @@ def _request_plan(
         instructions += (
             " question_results lists executed analyses; propose 'Business Findings' and "
             "'Business Recommendations' claims from them, citing each finding's "
-            "sql_result_artifact_id (kind table) or the qexec artifact_id (kind artifact)."
+            "sql_result_artifact_id (kind table) or the qexec artifact_id (kind artifact). "
+            "A recommendation pairs a cited observation with a proposed action and must "
+            "not assert causation: never write 'because of', 'due to', 'driven by', "
+            "'leads to' or similar unless causal evidence is cited. Copy every number "
+            "exactly as the evidence states it, keeping its unit and scale; never "
+            "convert a ratio like 0.78 into a percentage like 78%. "
+            + _share_denominator_instruction()
         )
     payload: dict[str, Any] = {
         "business_context": business_context,
@@ -1023,8 +1064,14 @@ def _apply_deterministic_repairs(
     for finding in audit.findings:
         if finding.claim_id is None and finding.code in {
             "unsupported_section_body",
+            "causal_overclaim",
         }:
             repair_count += _clear_section_body(bundle, finding.section_title)
+            continue
+        if finding.code == "causal_overclaim":
+            claim = _find_claim(bundle, finding.section_title, finding.claim_id)
+            if claim is not None:
+                repair_count += _downgrade_causal_claim(claim)
             continue
         if finding.code != "missing_quality_warning":
             continue
@@ -1033,6 +1080,20 @@ def _apply_deterministic_repairs(
             continue
         repair_count += _attach_quality_warnings(claim, evidence_pack)
     return repair_count
+
+
+def _downgrade_causal_claim(claim: ReportClaim) -> int:
+    """Rewrite causal wording into association wording, in place.
+
+    The re-validation that follows re-runs every gate on the new text, so a
+    rewrite that fails to remove the causal phrase — or that no longer matches
+    its evidence — is pruned exactly as before.
+    """
+    rewritten = rewrite_causal_language(claim.text)
+    if rewritten is None or rewritten == claim.text:
+        return 0
+    claim.text = rewritten
+    return 1
 
 
 def _clear_section_body(bundle: ReportBundle, section_title: str | None) -> int:
@@ -1229,36 +1290,6 @@ def _claim_count(bundle: ReportBundle) -> int:
 def _apply_section_coverage(bundle: ReportBundle) -> None:
     for section in bundle.sections:
         section.body = section.structural_body()
-
-
-def _apply_narrative_review(
-    bundle: ReportBundle,
-    *,
-    evidence_pack: EvidencePack,
-    sql_results: dict[str, SqlResult],
-    llm: LLMClient,
-    audit: ReportAudit,
-) -> ReportBundle:
-    """Review business prose after the hard gate without changing structured claims."""
-    if is_offline_client(llm):
-        audit.semantic_notes.append(
-            "Narrative review skipped: LLM unavailable; hard validator remains release gate."
-        )
-        return bundle
-    result = review_narrative(
-        bundle,
-        evidence_pack=evidence_pack,
-        llm=llm,
-        sql_results=sql_results,
-    )
-    reviewed = sum(1 for event in result.events if event.status == "reviewed")
-    reverted = sum(1 for event in result.events if event.status == "reverted")
-    skipped = sum(1 for event in result.events if event.status == "skipped")
-    audit.semantic_notes.append(
-        f"Narrative review: {reviewed} deepened, {reverted} reverted, {skipped} skipped; "
-        "hard validator remains release gate."
-    )
-    return result.bundle
 
 
 def _rendered_section_coverage(bundle: ReportBundle) -> float:
@@ -1558,18 +1589,187 @@ def _inject_question_claims(
             )
         target = _section(bundle, background) if background else analysis_section
         prefix = "qbg" if background else "qfind"
-        for f_index, finding in enumerate(question.findings):
-            if finding.dedup_role == "supporting":
-                continue
+        interpretation = question.interpretation.strip()
+        publishable = [
+            finding
+            for finding in question.findings
+            if finding.dedup_role != "supporting"
+        ]
+        # One question, one bullet. The interpretation restates its finding's
+        # figures before adding anything, so a separate claim printed the same
+        # number twice in a row (2026-08-26 Compare run, report lines 65-66).
+        merged = (
+            background is None
+            and question.interpretation_status == "validated"
+            and bool(interpretation)
+            and len(publishable) == 1
+        )
+        for f_index, finding in enumerate(publishable):
+            text = finding.text
+            evidence = list(finding.evidence)
+            if merged:
+                addition = _interpretation_addition(interpretation, finding.text)
+                if addition:
+                    text = f"{text} {addition}"
+                evidence = _question_evidence_union(question) or evidence
             _upsert_claim(
                 target,
                 ReportClaim(
                     id=f"{prefix}_{question.question_id}_{f_index}",
-                    text=finding.text,
-                    evidence=list(finding.evidence),
+                    text=text,
+                    evidence=evidence,
                     confidence="low" if question.exploratory else "high",
                 ),
             )
+        # The exec-time interpretation lands right after its question's finding
+        # claims, citing the same evidence union it was validated against, so
+        # the hard gate re-verifies its figures and prunes on mismatch.
+        # Background metrics stay out: a `qintp_` claim in an app-owned section
+        # would count as "authored" and suppress that section's fallback.
+        if (
+            not merged
+            and background is None
+            and question.interpretation_status == "validated"
+            and interpretation
+        ):
+            evidence = _question_evidence_union(question)
+            if evidence:
+                _upsert_claim(
+                    target,
+                    ReportClaim(
+                        id=f"qintp_{question.question_id}",
+                        text=interpretation,
+                        evidence=evidence,
+                        confidence="low" if question.exploratory else "medium",
+                    ),
+                )
+
+
+_SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+")
+# Scientific branch first: the finding builder renders large magnitudes as
+# "1.35916e+07", and reading that as 1.35916 and 7 made the restatement look
+# like new information.
+_CLAIM_NUMBER_PATTERN = re.compile(
+    r"-?\d+(?:\.\d+)?[eE][-+]?\d+|-?\d[\d,]*(?:\.\d+)?"
+)
+
+
+def _claim_numbers(text: str) -> list[float]:
+    numbers: list[float] = []
+    for match in _CLAIM_NUMBER_PATTERN.finditer(text):
+        try:
+            numbers.append(float(match.group(0).replace(",", "")))
+        except ValueError:
+            continue
+    return numbers
+
+
+def _interpretation_addition(interpretation: str, finding_text: str) -> str:
+    """What the interpretation adds once its restatement of the finding is cut.
+
+    Rounding differs between the two producers (137.7541 vs 137.754), so the
+    match is relative, not exact. A sentence carrying no figure always survives:
+    that is where the interpretation says what the number means.
+    """
+    known = _claim_numbers(finding_text)
+
+    def _already_stated(number: float) -> bool:
+        return any(
+            abs(number - other) <= max(abs(other), abs(number)) * 1e-3
+            for other in known
+        )
+
+    sentences = _SENTENCE_SPLIT_PATTERN.split(interpretation.strip())
+    kept = 0
+    for sentence in sentences:
+        numbers = _claim_numbers(sentence)
+        if not numbers or not all(_already_stated(number) for number in numbers):
+            break
+        kept += 1
+    return " ".join(sentences[kept:]).strip()
+
+
+def _question_evidence_union(
+    question: QuestionExecutionResult,
+) -> list[EvidenceRef]:
+    """Deduplicated evidence refs across all findings, supporting ones included
+    — interpretation numbers may come from any of them."""
+    refs: list[EvidenceRef] = []
+    seen: set[tuple[str | None, str, str]] = set()
+    for finding in question.findings:
+        for ref in finding.evidence:
+            key = (ref.artifact_id, ref.locator, f"{ref.value}|{ref.unit}")
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(ref)
+    return refs
+
+
+def _extract_exploration_finding_sets(
+    artifacts: list[Artifact],
+) -> list[ExplorationFindingSet]:
+    finding_sets: list[ExplorationFindingSet] = []
+    for artifact in artifacts:
+        if artifact.type is not ArtifactType.EXPLORATION_FINDING_SET:
+            continue
+        try:
+            finding_sets.append(ExplorationFindingSet.model_validate(artifact.payload))
+        except (ValidationError, TypeError):
+            continue
+    return finding_sets
+
+
+def _apply_exploration_deep_dive(
+    bundle: ReportBundle,
+    finding_sets: list[ExplorationFindingSet],
+) -> int:
+    """Inject gate-passed exploration conclusions as a deep-dive section.
+
+    Claims cite the persisted receipt artifacts (locator "numbers"), so the
+    same hard validator that gates every other claim verifies their figures.
+    """
+    claims: list[ReportClaim] = []
+    for finding_set in finding_sets:
+        for finding in finding_set.findings:
+            if finding.status == "inconclusive" or finding.trust_level not in {
+                "supported",
+                "refuted",
+            }:
+                continue
+            for index, finding_claim in enumerate(finding.claims):
+                evidence = [
+                    EvidenceRef(kind="artifact", artifact_id=artifact_id, locator="numbers")
+                    for artifact_id in finding_claim.receipt_artifact_ids
+                ]
+                if not evidence:
+                    continue
+                claims.append(
+                    ReportClaim(
+                        id=f"xplf_{finding_set.exploration_id}_{finding.insight_id}_{index}",
+                        text=finding_claim.text,
+                        evidence=evidence,
+                        confidence="high" if finding.trust_level == "supported" else "medium",
+                    )
+                )
+    if not claims:
+        return 0
+    section = next(
+        (section for section in bundle.sections if section.title == _DEEP_DIVE_SECTION),
+        None,
+    )
+    if section is None:
+        section = ReportSection(title=_DEEP_DIVE_SECTION)
+        titles = [item.title for item in bundle.sections]
+        position = (
+            titles.index("Limitations and Risks")
+            if "Limitations and Risks" in titles
+            else len(bundle.sections)
+        )
+        bundle.sections.insert(position, section)
+    for claim in claims:
+        _upsert_claim(section, claim)
+    return len(claims)
 
 
 def _upsert_claim(section: ReportSection, claim: ReportClaim) -> None:

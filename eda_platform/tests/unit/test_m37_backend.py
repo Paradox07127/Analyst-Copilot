@@ -21,10 +21,10 @@ from eda_platform.schemas.artifacts import (
 from eda_platform.schemas.plans import AnalysisPlan, Intent
 from eda_platform.tools import pii as pii_tools
 from eda_platform.tools.loader import load_csv
-from eda_platform.tools.nl2sql_eval import NL2SQLEvalCase, run_nl2sql_eval_case
 from eda_platform.tools.profiler import profile_dataset
 from eda_platform.tools.sql_runner import build_catalog
 from eda_platform.tools.value_profile import top_n_values
+from nl2sql_eval import NL2SQLEvalCase, run_nl2sql_eval_case
 
 T = TypeVar("T", bound=BaseModel)
 

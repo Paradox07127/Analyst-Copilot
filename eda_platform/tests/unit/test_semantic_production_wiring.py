@@ -77,7 +77,6 @@ def test_runtime_seed_consumers_use_the_unified_safe_loader() -> None:
         _SRC / "drivers" / "auto_eda.py",
         _SRC / "drivers" / "question_exec.py",
         _SRC / "drivers" / "chat.py",
-        _SRC / "drivers" / "investigation_orchestrator.py",
     )
     for path in readers:
         source = path.read_text(encoding="utf-8")

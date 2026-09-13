@@ -4,8 +4,11 @@ import pytest
 
 from eda_platform.core.exploration_journal import assert_policy_sealed
 from eda_platform.core.exploration_profiles import (
+    EXPLORATION_TIERS,
     build_exploration_policy,
     exploration_budget_profile,
+    exploration_code_fingerprint,
+    exploration_hard_caps,
 )
 from eda_platform.schemas.exploration import InsightFamily
 
@@ -62,3 +65,24 @@ def test_returned_profiles_do_not_share_mutable_tool_cap_maps() -> None:
     second = exploration_budget_profile("quick")
     first.max_tool_calls_by_kind["run_stat_test"] = 999
     assert second.max_tool_calls_by_kind["run_stat_test"] != 999
+
+
+def test_hard_caps_cover_every_tier_profile() -> None:
+    """A ceiling below any shipped tier would reject that tier's own budget."""
+    caps = exploration_hard_caps()
+    for tier in EXPLORATION_TIERS:
+        budget = exploration_budget_profile(tier)
+        assert budget.llm.max_requests <= caps.max_llm_requests
+        assert budget.llm.max_total_tokens <= caps.max_total_tokens
+        assert budget.llm.max_cost_usd <= caps.max_cost_usd
+        assert budget.llm.max_wall_seconds <= caps.max_wall_seconds
+        assert budget.max_successful_tool_calls <= caps.max_tool_calls
+        assert budget.max_rows_scanned <= caps.max_rows_scanned
+        assert budget.max_result_cells <= caps.max_cells_scanned
+
+
+def test_code_fingerprint_moves_with_the_tool_surface() -> None:
+    assert exploration_code_fingerprint("tools_a") != exploration_code_fingerprint(
+        "tools_b"
+    )
+    assert exploration_code_fingerprint("tools_a").startswith("xplcode_")

@@ -11,6 +11,7 @@ from eda_platform.agents.data_tools import DataToolContext, build_data_tools
 from eda_platform.agents.interpretation import validate_agent_answer
 from eda_platform.agents.runtime import AgentRunResult, AgentRuntime
 from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.ids import stable_hash
 from eda_platform.core.llm import ToolCallingLLM, ToolCallingUnsupportedError
 from eda_platform.core.method_skills import method_skill_guidance
 from eda_platform.core.sandbox import ExecutionBackend
@@ -37,6 +38,9 @@ state what is missing. Finish with a concise answer that names the artifact ids 
 Do not reveal hidden chain-of-thought; report only the conclusion, method, evidence, and material
 limitations."""
 
+# Content-derived so an edited prompt changes the recorded eval environment.
+QUESTION_AGENT_PROMPT_DIGEST = stable_hash(_SYSTEM_PROMPT, length=16)
+
 
 def run_question_agent(
     question: str,
@@ -51,6 +55,7 @@ def run_question_agent(
     payload_policy: PayloadPolicy = "schema+aggregates",
     code_backend: ExecutionBackend | None = None,
     timeout_seconds: float = 10.0,
+    source_session_id: str | None = None,
 ) -> AgentRunResult:
     """Let the model choose a bounded sequence of local analysis tools."""
 
@@ -80,6 +85,9 @@ def run_question_agent(
         payload_policy=payload_policy,
         artifacts=available_artifacts,
         open_analysis=open_analysis,
+        # Credentials (e.g. randomized-design confirmations) are registered on
+        # the source session while the batch executes under a derived one.
+        source_session_id=source_session_id,
     )
 
     def emit(event_type: str, name: str, summary: dict[str, Any]) -> None:

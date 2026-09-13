@@ -7,10 +7,13 @@ import type {
 import {
   useDatasets,
   useEdaHandoff,
+  usePrimaryRunFailure,
   useQuality,
   useSessionDetail,
+  type PrimaryRunFailure,
 } from "../../api/hooks";
 import { useJobActivity } from "../../app/job-activity";
+import { RunAgainButton } from "../../components/run-again";
 import {
   EmptyState,
   ErrorState,
@@ -18,6 +21,7 @@ import {
   PartialState,
 } from "../../components/async-states";
 import { qualityCodeLabel } from "../../api/quality-codes";
+import { ResourceLimitNotice } from "../../components/resource-limit-notice";
 import { DataWorkspacePage } from "../../components/data-workspace";
 import {
   Badge,
@@ -37,11 +41,14 @@ import {
 } from "./mini-charts";
 import "./data-map.css";
 
+/* "limited" belongs here: a run the resource gate stopped is over, and leaving
+ * it out kept this page polling for tables that were never going to arrive. */
 const TERMINAL_SESSION_STATUSES = new Set([
   "complete",
   "completed",
   "failed",
   "cancelled",
+  "limited",
 ]);
 
 function formatBytes(bytes: number): string {
@@ -174,6 +181,50 @@ function SessionSummary({
         value={totalBytes == null || totalBytes === 0 ? "—" : formatBytes(totalBytes)}
       />
     </MetricStrip>
+  );
+}
+
+/* The failed counterpart of the empty state: sending the user off to upload
+ * data would hide that the analysis stopped, and why. */
+function FailedRunState({
+  failure,
+  cancelled,
+  projectId,
+  sessionId,
+}: {
+  /** Null when the job history no longer names the failed run. */
+  failure: PrimaryRunFailure | null;
+  cancelled: boolean;
+  projectId: string;
+  sessionId: string;
+}) {
+  return (
+    <Card role="alert" className="flex flex-col gap-2 border-status-critical/40 p-4">
+      <p className="text-sm font-semibold text-status-critical">
+        {(failure?.cancelled ?? cancelled)
+          ? "The analysis was stopped before data was ready"
+          : "The analysis failed before data was ready"}
+      </p>
+      {failure?.reason && (
+        <p className="text-sm text-status-neutral">{failure.reason}</p>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        {failure && (
+          <RunAgainButton
+            jobId={failure.job.job_id}
+            sessionId={sessionId}
+            projectId={projectId}
+            sourceSessionId={failure.job.source_session_id}
+          />
+        )}
+        <Link
+          to={sessionSectionPath(projectId, sessionId, "trace")}
+          className="text-sm font-medium text-primary hover:underline"
+        >
+          See what happened on the Trace page
+        </Link>
+      </div>
+    </Card>
   );
 }
 
@@ -384,6 +435,10 @@ export function Component() {
   const datasets = useDatasets(sessionId);
   const quality = useQuality(sessionId);
   const handoff = useEdaHandoff(sessionId);
+  const stopped =
+    run.data?.status === "failed" || run.data?.status === "cancelled";
+  const failure = usePrimaryRunFailure(sessionId, stopped);
+  const resourceLimit = run.data?.resource_limit ?? null;
 
   useEffect(() => {
     if (!sessionLive && !run.data?.status) return;
@@ -432,6 +487,7 @@ export function Component() {
         />
       )}
       {sessionLive && <RunInputs names={inputNames} />}
+      {resourceLimit && <ResourceLimitNotice limit={resourceLimit} />}
       {run.data && (run.data.warnings ?? []).length > 0 && (
         <Card className="flex flex-col gap-1 border-status-warn/40 p-4">
           <span className="font-semibold">Session warnings</span>
@@ -442,7 +498,18 @@ export function Component() {
       {datasets.isError && <ErrorState error={datasets.error} onRetry={() => datasets.refetch()} />}
       {quality.isError && <PartialState error={quality.error} onRetry={() => quality.refetch()} />}
       {datasets.data && (datasets.data.length === 0 ? (
-        sessionStillBuilding ? null : <EmptyState title="No datasets in this session" description="Upload data and start a session to see its datasets here." />
+        sessionStillBuilding ? null : stopped ? (
+          <FailedRunState
+            failure={failure}
+            cancelled={run.data?.status === "cancelled"}
+            projectId={projectId}
+            sessionId={sessionId}
+          />
+        ) : resourceLimit ? null : (
+          /* The stop is already explained above; "upload data to see datasets"
+           * would send the user to fix a problem they do not have. */
+          <EmptyState title="No datasets in this session" description="Upload data and start a session to see its datasets here." />
+        )
       ) : (
         <DatasetOverview
           datasets={datasets.data}

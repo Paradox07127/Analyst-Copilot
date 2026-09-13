@@ -14,8 +14,10 @@ import {
   type SkillReplayStarted,
   type SkillSummary,
   type SkillTargetDataset,
+  type SkillTemplateBound,
+  type SkillTemplateView,
 } from "../../api/client";
-import { queryKeys, useSkills } from "../../api/hooks";
+import { queryKeys, useSkills, useSkillTemplates } from "../../api/hooks";
 import {
   approvalGuidance,
   type ApprovalGuidance,
@@ -368,6 +370,470 @@ function SaveSkillForm({
           </button>
           {save.isError && <ErrorState error={save.error} />}
         </form>
+      )}
+    </Card>
+  );
+}
+
+/* The server requires every field and at least one {placeholder} param, so the
+ * "minimal" form is exactly that contract — nothing invented client-side. */
+const PARAM_ROLES = ["measure", "dimension", "timestamp", "identifier", "any"] as const;
+
+function NewTemplateForm({ projectId }: { projectId: string }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [question, setQuestion] = useState("");
+  const [sql, setSql] = useState("");
+  const [method, setMethod] = useState("");
+  const [rationale, setRationale] = useState("");
+  const [params, setParams] = useState<{ name: string; role: string }[]>([
+    { name: "", role: "any" },
+  ]);
+
+  const create = useMutation({
+    mutationFn: (idempotencyKey: string) =>
+      api.createSkillTemplate(
+        projectId,
+        {
+          name: name.trim(),
+          question: question.trim(),
+          sql: sql.trim(),
+          method: method.trim(),
+          rationale: rationale.trim(),
+          params: params.map((param) => ({
+            name: param.name.trim(),
+            role: param.role as (typeof PARAM_ROLES)[number],
+            description: "",
+          })),
+          when_to_use: "",
+          when_not_to_use: "",
+        },
+        idempotencyKey,
+      ),
+    onSuccess: () => {
+      setName("");
+      setQuestion("");
+      setSql("");
+      setMethod("");
+      setRationale("");
+      setParams([{ name: "", role: "any" }]);
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.skillTemplates(projectId),
+      });
+    },
+  });
+
+  const ready =
+    [name, question, sql, method, rationale].every((value) => value.trim()) &&
+    params.length > 0 &&
+    params.every((param) => param.name.trim());
+  const fieldClass =
+    "rounded-base border border-border bg-surface px-2 py-1 text-sm text-text";
+
+  return (
+    <form
+      className="flex flex-col gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        create.mutate(crypto.randomUUID());
+      }}
+    >
+      <div className="flex flex-wrap gap-3">
+        <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-status-neutral">
+          Template name
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="Revenue by segment"
+            maxLength={120}
+            className={fieldClass}
+          />
+        </label>
+        <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-status-neutral">
+          Question it answers
+          <input
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            placeholder="What does each {group_col} contribute?"
+            maxLength={2000}
+            className={fieldClass}
+          />
+        </label>
+      </div>
+      <label className="flex flex-col gap-1 text-xs text-status-neutral">
+        {"SQL — use {dataset} for the table and {param} placeholders for columns"}
+        <textarea
+          value={sql}
+          onChange={(event) => setSql(event.target.value)}
+          placeholder={
+            "SELECT {group_col}, SUM({value_col}) AS total\nFROM {dataset}\nGROUP BY {group_col}"
+          }
+          rows={3}
+          maxLength={8000}
+          className={`${fieldClass} font-mono`}
+        />
+      </label>
+      <div className="flex flex-wrap gap-3">
+        <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-status-neutral">
+          Method
+          <input
+            value={method}
+            onChange={(event) => setMethod(event.target.value)}
+            placeholder="grouped aggregation"
+            maxLength={200}
+            className={fieldClass}
+          />
+        </label>
+        <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-status-neutral">
+          Why this method
+          <input
+            value={rationale}
+            onChange={(event) => setRationale(event.target.value)}
+            placeholder="Totals per category answer contribution questions directly."
+            maxLength={2000}
+            className={fieldClass}
+          />
+        </label>
+      </div>
+      <fieldset className="flex flex-col gap-1 text-xs text-status-neutral">
+        <legend>Placeholders — each one binds to a column at import</legend>
+        <div className="flex flex-col gap-1.5">
+          {params.map((param, index) => (
+            <div key={index} className="flex flex-wrap items-center gap-2">
+              <input
+                value={param.name}
+                onChange={(event) =>
+                  setParams((current) =>
+                    current.map((item, at) =>
+                      at === index ? { ...item, name: event.target.value } : item,
+                    ),
+                  )
+                }
+                placeholder="group_col"
+                aria-label={`Placeholder ${index + 1} name`}
+                maxLength={128}
+                className={fieldClass}
+              />
+              <select
+                value={param.role}
+                onChange={(event) =>
+                  setParams((current) =>
+                    current.map((item, at) =>
+                      at === index ? { ...item, role: event.target.value } : item,
+                    ),
+                  )
+                }
+                aria-label={`Placeholder ${index + 1} role`}
+                className={fieldClass}
+              >
+                {PARAM_ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {role}
+                  </option>
+                ))}
+              </select>
+              {params.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setParams((current) => current.filter((_, at) => at !== index))
+                  }
+                  className="rounded-base border border-border px-2 py-0.5 text-xs hover:bg-surface"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() =>
+            setParams((current) => [...current, { name: "", role: "any" }])
+          }
+          className="self-start rounded-base border border-border px-2 py-0.5 text-xs hover:bg-surface"
+        >
+          Add placeholder
+        </button>
+      </fieldset>
+      <button
+        type="submit"
+        disabled={!ready || create.isPending}
+        className="self-start rounded-base bg-primary px-3 py-1.5 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
+      >
+        {create.isPending ? "Saving…" : "Save template"}
+      </button>
+      {create.isSuccess && (
+        <p className="text-xs text-status-ok">
+          {`Saved template “${create.data.name}”.`}
+        </p>
+      )}
+      {create.isError && <ErrorState error={create.error} />}
+    </form>
+  );
+}
+
+function TemplateImportPreview({ bound }: { bound: SkillTemplateBound }) {
+  const columns = bound.columns ?? [];
+  const rows = bound.rows_preview ?? [];
+  return (
+    <div className="flex flex-col gap-1 text-xs">
+      <p className="text-status-ok">
+        {`Imported “${bound.skill.name}” into the skill library. Trial run returned ` +
+          `${bound.row_count} row(s)${bound.truncated ? " (preview truncated)" : ""}.`}
+      </p>
+      {rows.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="text-left font-mono">
+            <thead>
+              <tr>
+                {columns.map((column) => (
+                  <th key={column} className="border-b border-border px-2 py-1">
+                    {column}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={index}>
+                  {columns.map((column) => (
+                    <td key={column} className="px-2 py-1">
+                      {String(row[column] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TemplateCard({
+  projectId,
+  sessionId,
+  template,
+  datasets,
+}: {
+  projectId: string;
+  sessionId: string;
+  template: SkillTemplateView;
+  datasets: SkillTargetDataset[];
+}) {
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const [datasetId, setDatasetId] = useState(datasets[0]?.dataset_id ?? "");
+  const [bindings, setBindings] = useState<Record<string, string>>({});
+
+  const remove = useMutation({
+    mutationFn: (idempotencyKey: string) =>
+      api.deleteSkillTemplate(projectId, template.template_id, idempotencyKey),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.skillTemplates(projectId),
+      }),
+  });
+
+  const importTemplate = useMutation({
+    mutationFn: (idempotencyKey: string) =>
+      api.importSkillTemplate(
+        sessionId,
+        template.template_id,
+        { dataset_ids: [datasetId], bindings, name: template.name },
+        idempotencyKey,
+      ),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: queryKeys.skills(sessionId) }),
+  });
+
+  const columns = selectedColumns(datasets, datasetId ? [datasetId] : []);
+  const unbound = (template.params ?? []).filter((param) => !bindings[param.name]);
+  const canImport = Boolean(datasetId) && unbound.length === 0;
+
+  return (
+    <Card as="li" className="flex flex-col gap-2 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone="brand">Your template</Badge>
+        {template.method && <Badge>{template.method}</Badge>}
+        <span className="text-sm font-medium">{template.name}</span>
+        <span className="ml-auto">
+          {confirming ? (
+            <span className="flex flex-wrap items-center justify-end gap-2 text-xs">
+              <span className="text-status-neutral">
+                Delete “{template.name}”?
+              </span>
+              <button
+                type="button"
+                onClick={() => remove.mutate(crypto.randomUUID())}
+                disabled={remove.isPending}
+                className="rounded-base border border-status-critical/50 px-2 py-0.5 text-status-critical hover:bg-surface disabled:opacity-50"
+              >
+                {remove.isPending ? "Deleting…" : "Delete"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                className="rounded-base border border-border px-2 py-0.5 hover:bg-surface"
+              >
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className="rounded-base border border-border px-2 py-0.5 text-xs hover:bg-surface"
+            >
+              Delete
+            </button>
+          )}
+        </span>
+      </div>
+      {remove.isError && (
+        <p role="alert" className="text-xs text-status-critical">
+          {remove.error instanceof Error
+            ? remove.error.message
+            : "Could not delete this template."}
+        </p>
+      )}
+      <p className="text-sm">{template.question}</p>
+      <Disclosure
+        summary="SQL"
+        meta={<span className="font-mono">{shortSql(template.sql, 48)}</span>}
+      >
+        <pre className="overflow-x-auto rounded-base bg-code-bg p-2 font-mono text-xs">
+          {template.sql}
+        </pre>
+      </Disclosure>
+      {datasets.length === 0 ? (
+        <p className="text-xs text-status-neutral">
+          This session has no dataset to try this template on.
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs text-status-neutral">
+            Import onto dataset
+            <select
+              value={datasetId}
+              onChange={(event) => setDatasetId(event.target.value)}
+              className="rounded-base border border-border bg-surface px-2 py-1 text-sm text-text"
+            >
+              {datasets.map((dataset) => (
+                <option key={dataset.dataset_id} value={dataset.dataset_id}>
+                  {dataset.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {(template.params ?? []).map((param) => (
+            <label
+              key={param.name}
+              className="flex flex-col gap-1 text-xs text-status-neutral"
+            >
+              {`{${param.name}} — ${param.role}`}
+              <select
+                value={bindings[param.name] ?? ""}
+                onChange={(event) =>
+                  setBindings((current) => ({
+                    ...current,
+                    [param.name]: event.target.value,
+                  }))
+                }
+                className="rounded-base border border-border bg-surface px-2 py-1 text-sm text-text"
+              >
+                <option value="">Select a column…</option>
+                {columns.map((column) => (
+                  <option
+                    key={column.name}
+                    value={column.name}
+                    disabled={!column.bindable}
+                  >
+                    {column.bindable
+                      ? column.name
+                      : `${column.name} — not a plain identifier`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+          <button
+            type="button"
+            onClick={() => importTemplate.mutate(crypto.randomUUID())}
+            disabled={!canImport || importTemplate.isPending}
+            className="rounded-base border border-border px-3 py-1.5 text-sm hover:bg-surface disabled:opacity-50"
+          >
+            {importTemplate.isPending
+              ? "Importing…"
+              : "Import & trial-run on this session"}
+          </button>
+        </div>
+      )}
+      {unbound.length > 0 && datasets.length > 0 && (
+        <p className="text-xs text-status-neutral">
+          Bind {unbound.map((param) => `{${param.name}}`).join(", ")} to a column
+          first.
+        </p>
+      )}
+      {importTemplate.isSuccess && (
+        <TemplateImportPreview bound={importTemplate.data} />
+      )}
+      {importTemplate.isError && (
+        <ErrorState
+          error={importTemplate.error}
+          onRetry={() => importTemplate.reset()}
+        />
+      )}
+    </Card>
+  );
+}
+
+function TemplatesSection({
+  projectId,
+  sessionId,
+  datasets,
+}: {
+  projectId: string;
+  sessionId: string;
+  datasets: SkillTargetDataset[];
+}) {
+  const templates = useSkillTemplates(projectId);
+  /* Builtin seeds already render as "Built-in templates" cards below; this
+   * section owns only what the user wrote. */
+  const userTemplates = (templates.data?.templates ?? []).filter(
+    (template) => template.source === "user",
+  );
+
+  return (
+    <Card as="section" className="flex flex-col gap-3 p-4">
+      <SectionHeader
+        level={3}
+        title="Your SQL templates"
+        description="Write a parameterized query once, then import it into any session: the import binds your placeholders to real columns and trial-runs the SQL before saving it as a skill."
+      />
+      <NewTemplateForm projectId={projectId} />
+      {templates.isPending ? (
+        <LoadingSkeleton lines={2} label="Loading templates" />
+      ) : templates.isError ? (
+        <ErrorState error={templates.error} onRetry={() => templates.refetch()} />
+      ) : userTemplates.length === 0 ? (
+        <p className="text-xs text-status-neutral">
+          No template of your own yet. Built-in ones are listed below.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-3">
+          {userTemplates.map((template) => (
+            <TemplateCard
+              key={template.template_id}
+              projectId={projectId}
+              sessionId={sessionId}
+              template={template}
+              datasets={datasets}
+            />
+          ))}
+        </ul>
       )}
     </Card>
   );
@@ -811,6 +1277,11 @@ export function Component() {
         </Card>
       )}
       <SaveSkillForm sessionId={sessionId} plans={plans} />
+      <TemplatesSection
+        projectId={projectId}
+        sessionId={sessionId}
+        datasets={datasets}
+      />
       {items.length === 0 ? (
         <EmptyState
           title="No skills available"

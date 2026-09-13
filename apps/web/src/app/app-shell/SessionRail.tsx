@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { useDraggable } from "@dnd-kit/core";
 import { NavLink, useNavigate, useParams } from "react-router";
 import type { ProjectSummary, SessionSummary } from "../../api/client";
@@ -418,6 +418,7 @@ function ProjectRunGroup({
   onToggle,
   active,
   dragging,
+  showDerived,
   onDragStart,
   onDragOver,
   onDrop,
@@ -428,12 +429,13 @@ function ProjectRunGroup({
   onToggle: () => void;
   active: boolean;
   dragging: boolean;
+  showDerived: boolean;
   onDragStart: (event: DragEvent<HTMLDivElement>) => void;
   onDragOver: (event: DragEvent<HTMLElement>) => void;
   onDrop: (event: DragEvent<HTMLElement>) => void;
   onDragEnd: () => void;
 }) {
-  const runs = useSessions(project.project_id, "", !collapsed);
+  const runs = useSessions(project.project_id, "", !collapsed, showDerived);
   const [menuOpen, setMenuOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -585,13 +587,15 @@ function SessionGroupBody({
 function StandaloneSessionGroup({
   collapsed,
   onToggle,
+  showDerived,
 }: {
   collapsed: boolean;
   onToggle: () => void;
+  showDerived: boolean;
 }) {
   /* Fetched even while collapsed: the group hides itself when empty, and it
    * cannot know it is empty without asking. */
-  const runs = useSessions(UNFILED_PROJECT_ID);
+  const runs = useSessions(UNFILED_PROJECT_ID, "", true, showDerived);
   const count = runs.data?.pages.reduce((n, page) => n + page.items.length, 0) ?? 0;
   /* Nothing at all until there is something to show — rendering the header
    * while the request is in flight flashed an empty "Recent" heading into
@@ -694,15 +698,25 @@ function SessionSearchResults({
   label,
   query,
   onChoose,
+  onResults,
 }: {
   projectId: string;
   label: string;
   query: string;
   onChoose: () => void;
+  /** Each bucket queries on its own, so the dialog cannot see an empty result
+   *  without being told; this is what lets it say "no matches" instead of
+   *  rendering silence. */
+  onResults: (projectId: string, state: BucketSearchState) => void;
 }) {
   const runs = useSessions(projectId, query);
   const items = runs.data?.pages.flatMap((page) => page.items) ?? [];
-  if (runs.isPending) return null;
+  const pending = runs.isPending;
+  const count = items.length;
+  useEffect(() => {
+    onResults(projectId, { pending, count });
+  }, [onResults, projectId, pending, count]);
+  if (pending) return null;
   return items.map((run) => (
     <SessionSearchResult
       key={`${projectId}-${run.session_id}`}
@@ -711,6 +725,11 @@ function SessionSearchResults({
       onChoose={onChoose}
     />
   ));
+}
+
+interface BucketSearchState {
+  pending: boolean;
+  count: number;
 }
 
 function SessionSearchResult({
@@ -761,6 +780,39 @@ function SessionSearchDialog({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
   const debounced = useDebounced(query.trim(), SEARCH_DEBOUNCE_MS);
   const { dialogRef, onKeyDown } = useDialogFocus(onClose);
+  const [bucketStates, setBucketStates] = useState<
+    Record<string, BucketSearchState>
+  >({});
+  const reportResults = useCallback(
+    (projectId: string, state: BucketSearchState) => {
+      setBucketStates((current) => {
+        const previous = current[projectId];
+        if (
+          previous &&
+          previous.pending === state.pending &&
+          previous.count === state.count
+        ) {
+          return current;
+        }
+        return { ...current, [projectId]: state };
+      });
+    },
+    [],
+  );
+  useEffect(() => {
+    setBucketStates({});
+  }, [debounced]);
+  const bucketIds = [
+    ...(projects.data ?? []).map((project) => project.project_id),
+    UNFILED_PROJECT_ID,
+  ];
+  const allSettled =
+    !projects.isPending &&
+    bucketIds.every((id) => bucketStates[id] && !bucketStates[id].pending);
+  const totalMatches = bucketIds.reduce(
+    (total, id) => total + (bucketStates[id]?.count ?? 0),
+    0,
+  );
 
   return (
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Session search" onKeyDown={onKeyDown} className="animate-fade fixed inset-0 z-50 flex items-start justify-center bg-scrim p-4 pt-[10vh]">
@@ -802,6 +854,7 @@ function SessionSearchDialog({ onClose }: { onClose: () => void }) {
                   label={project.name}
                   query={debounced}
                   onChoose={onClose}
+                  onResults={reportResults}
                 />
               ))}
               {/* "across all projects" has to include the sessions that are in
@@ -811,7 +864,13 @@ function SessionSearchDialog({ onClose }: { onClose: () => void }) {
                 label={UNFILED_ROW_LABEL}
                 query={debounced}
                 onChoose={onClose}
+                onResults={reportResults}
               />
+              {allSettled && totalMatches === 0 && (
+                <p role="status" className="px-3 py-2 text-sm text-status-neutral">
+                  No sessions match “{debounced}”.
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -820,7 +879,7 @@ function SessionSearchDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function SessionList() {
+function SessionList({ showDerived }: { showDerived: boolean }) {
   const projects = useProjects();
   const reorder = useReorderProjects();
   const [collapsed, setCollapsed] = useState(getCollapsedProjects);
@@ -890,6 +949,7 @@ function SessionList() {
         <StandaloneSessionGroup
           collapsed={collapsed.has(UNFILED_PROJECT_ID)}
           onToggle={() => toggleProject(UNFILED_PROJECT_ID)}
+          showDerived={showDerived}
         />
       </div>
     );
@@ -910,6 +970,7 @@ function SessionList() {
           onToggle={() => toggleProject(project.project_id)}
           active={project.project_id === activeProjectId}
           dragging={draggingProjectId === project.project_id}
+          showDerived={showDerived}
           onDragStart={(event) => {
             if (event.dataTransfer) {
               event.dataTransfer.effectAllowed = "move";
@@ -936,6 +997,7 @@ function SessionList() {
       <StandaloneSessionGroup
         collapsed={collapsed.has(UNFILED_PROJECT_ID)}
         onToggle={() => toggleProject(UNFILED_PROJECT_ID)}
+        showDerived={showDerived}
       />
     </div>
   );
@@ -962,6 +1024,9 @@ function useDebounced(value: string, delayMs: number): string {
  * there is exactly one of each in the app rather than one per surface. */
 export function SessionRail() {
   const [searchOpen, setSearchOpen] = useState(false);
+  /* Default off: derived runs (question batches, chart builds, skill replays)
+   * outnumber the sessions people start themselves and drown them out. */
+  const [showDerived, setShowDerived] = useState(false);
 
   return (
     <aside
@@ -1002,9 +1067,20 @@ export function SessionRail() {
           <HomeGlyph />
           Home
         </NavLink>
+        <label
+          className="flex items-center gap-1.5 px-2 pt-0.5 text-xs text-status-neutral"
+          title="Also list the runs the agent started from another session — question batches, chart builds and skill replays."
+        >
+          <input
+            type="checkbox"
+            checked={showDerived}
+            onChange={(event) => setShowDerived(event.target.checked)}
+          />
+          Show derived runs
+        </label>
       </nav>
       <div className="min-h-0 flex-1 overflow-y-auto pb-2">
-        <SessionList />
+        <SessionList showDerived={showDerived} />
       </div>
       {searchOpen && <SessionSearchDialog onClose={() => setSearchOpen(false)} />}
     </aside>

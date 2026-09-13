@@ -9,11 +9,6 @@ from typing import Any
 
 import pandas as pd
 import pytest
-from exploration_test_helpers import (
-    TEST_EVIDENCE_KEY_ID,
-    release_certificate,
-    runtime_identity,
-)
 from pydantic import BaseModel
 
 from eda_platform.agents.exploration.candidates import candidate_seed
@@ -30,13 +25,18 @@ from eda_platform.agents.exploration.workflow import ExplorationWorkflowState
 from eda_platform.agents.receipts import build_receipt
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
 from eda_platform.application.services.exploration_service import (
-    ExplorationReleaseTrust,
     ExplorationRunMetadata,
+    ExplorationRuntimeIdentity,
     ExplorationSourceSnapshot,
 )
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
-from eda_platform.core.exploration_profiles import build_exploration_policy
-from eda_platform.core.exploration_release_gate import E4aEvidenceBindings
+from eda_platform.core.exploration_profiles import (
+    EXPLORATION_PROFILE_VERSION,
+    EXPLORATION_STATISTICAL_POLICY_VERSION,
+    build_exploration_policy,
+    exploration_code_fingerprint,
+    exploration_hard_caps,
+)
 from eda_platform.core.exploration_shadow_store import shadow_run_root
 from eda_platform.core.llm import LLMSettings, LLMToolCall
 from eda_platform.core.provider_registry import LLMProvider
@@ -72,6 +72,16 @@ def _tool() -> AgentTool:
         description="Profile an approved slice.",
         args_schema=_ToolArgs,
         execute=lambda _args: AgentToolResult(content={"ok": True}),
+    )
+
+
+def _identity(tool_digest: str) -> ExplorationRuntimeIdentity:
+    return ExplorationRuntimeIdentity(
+        tool_capability_digest=tool_digest,
+        code_fingerprint=exploration_code_fingerprint(tool_digest),
+        hard_caps=exploration_hard_caps(),
+        scoring_policy_version=EXPLORATION_PROFILE_VERSION,
+        statistical_policy_version=EXPLORATION_STATISTICAL_POLICY_VERSION,
     )
 
 
@@ -265,13 +275,7 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
     store.ensure_project("demo", name="Demo")
     tool = _tool()
     tool_digest = exploration_tool_capability_digest((tool,))
-    bindings = E4aEvidenceBindings(
-        checker_version="checker-v1",
-        code_fingerprint="code-v1",
-        tool_capability_digest=tool_digest,
-        evidence_key_id=TEST_EVIDENCE_KEY_ID,
-    )
-    certificate = release_certificate(bindings=bindings)
+    identity = _identity(tool_digest)
     policy = build_exploration_policy(
         tier="quick",
         dataset_scope=("ds_orders",),
@@ -285,7 +289,6 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
         project_id="demo",
         policy=policy,
         data_state_witness=witness,
-        release_certificate_digest=certificate.certificate_digest,
         approval_action_hash="approval_hash",
         created_at=datetime.now(UTC),
     )
@@ -295,7 +298,7 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
     journal.initialize(
         exploration_id=exploration_id,
         policy=policy,
-        code_fingerprint=bindings.code_fingerprint,
+        code_fingerprint=identity.code_fingerprint,
         data_state_witness=witness,
     )
     selected = _dataset(tmp_path)
@@ -311,15 +314,7 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
         logical_step_id="step_failed_stat",
     )
 
-    monkeypatch.setattr(
-        worker,
-        "resolve_configured_release_trust",
-        lambda: ExplorationReleaseTrust(
-            certificate=certificate,
-            public_keys={},
-            runtime_identity=runtime_identity(bindings=bindings),
-        ),
-    )
+    monkeypatch.setattr(worker, "exploration_runtime_identity", lambda: identity)
     monkeypatch.setattr(worker, "_load_and_verify_metadata", lambda *_args: metadata)
     monkeypatch.setattr(worker, "_verify_consumed_approval", lambda *_args: None)
     monkeypatch.setattr(worker, "build_data_tools", lambda _context: [tool])
@@ -356,8 +351,7 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
         "exploration_id": exploration_id,
         "policy": policy.model_dump(mode="json"),
         "data_state_witness": witness,
-        "code_fingerprint": bindings.code_fingerprint,
-        "release_certificate_digest": certificate.certificate_digest,
+        "code_fingerprint": identity.code_fingerprint,
         "provider": "openai",
         "payload_policy": "schema+aggregates",
         "operation": "start",
@@ -375,7 +369,7 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
     assert isinstance(captured["usage_meter"], worker.DatasetToolUsageMeter)
     assert captured["stat_attempt_counts"]() == {"fam_orders_amount": 1}
     assert captured["policy"] == policy
-    assert captured["code_fingerprint"] == bindings.code_fingerprint
+    assert captured["code_fingerprint"] == identity.code_fingerprint
     assert captured["data_state_witness"] == witness
     facts = captured["dataset_facts"]["ds_orders"]
     assert facts.row_count == 3
@@ -387,9 +381,10 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
     assert by_name["amount"].example_values == ()
 
 
-def test_worker_refuses_to_enter_composition_without_release_certificate(
+def test_worker_refuses_to_run_when_the_implementation_changed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A resume whose build no longer matches the approved one must not start."""
     tool_digest = exploration_tool_capability_digest((_tool(),))
     policy = build_exploration_policy(
         tier="quick",
@@ -404,25 +399,20 @@ def test_worker_refuses_to_enter_composition_without_release_certificate(
         return SimpleNamespace(result=SimpleNamespace(status="paused"))
 
     monkeypatch.setattr(
-        worker,
-        "resolve_configured_release_trust",
-        lambda: ExplorationReleaseTrust(
-            certificate=None, public_keys={}, runtime_identity=None
-        ),
+        worker, "exploration_runtime_identity", lambda: _identity(tool_digest)
     )
     monkeypatch.setattr(worker, "run_composed_shadow_exploration", fake_composition)
-    with pytest.raises(RuntimeError, match="certificate is unavailable"):
+    with pytest.raises(RuntimeError, match="implementation changed"):
         worker.run_exploration_worker(
             ArtifactStore(tmp_path),
             tmp_path,
             {"project_id": "demo", "request_scope": "run_source"},
             {
                 "source_session_id": "run_source",
-                "exploration_id": "expl_closed",
+                "exploration_id": "expl_stale",
                 "policy": policy.model_dump(mode="json"),
                 "data_state_witness": "dsw1_" + "a" * 32,
-                "code_fingerprint": "code-v1",
-                "release_certificate_digest": "cert_missing",
+                "code_fingerprint": "xplcode_from_an_older_build",
                 "provider": "openai",
                 "payload_policy": "schema+aggregates",
                 "operation": "start",

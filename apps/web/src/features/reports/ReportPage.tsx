@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from "react";
-import { useParams } from "react-router";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router";
 import {
   ApiError,
   type DecisionReportView,
@@ -10,6 +10,7 @@ import {
   useDecisionReport,
   useDownloadReport,
   useGenerateReport,
+  usePrimaryRunFailure,
   useReport,
 } from "../../api/hooks";
 import { useJobActivity } from "../../app/job-activity";
@@ -19,6 +20,7 @@ import {
   ErrorState,
   LoadingSkeleton,
 } from "../../components/async-states";
+import { RunAgainButton } from "../../components/run-again";
 import {
   Badge,
   Button,
@@ -32,6 +34,7 @@ import { DecisionStoryPanel } from "./DecisionStoryPanel";
 import { EvidenceInspector } from "./EvidenceInspector";
 import { ReportBody } from "./ReportBody";
 import { ReportContents } from "./ReportContents";
+import { ReportStaleNotice } from "./ReportStaleNotice";
 import {
   citationsFor,
   readReportOutline,
@@ -435,6 +438,67 @@ function GenerateReportControl({
   );
 }
 
+/* Shown when a stored report exists but came from the deterministic fallback:
+ * the numbers are still evidence-checked, only the prose was not written by
+ * the model — a difference the reader should know before quoting the text. */
+function DegradedReportNotice() {
+  return (
+    <Card
+      role="status"
+      tone="warn"
+      className="flex flex-col gap-1 p-4"
+    >
+      <p className="text-sm font-medium text-status-warn">
+        This report was written without the language model
+      </p>
+      <p className="text-sm text-status-neutral">
+        The model was unavailable or kept failing validation, so the report was
+        assembled deterministically from verified evidence. Every figure is
+        still evidence-checked; only the narrative prose is templated.
+      </p>
+    </Card>
+  );
+}
+
+/* The failed counterpart of the "generate one" empty state: after a failed
+ * run, offering only generation hides that the analysis itself stopped. */
+function FailedRunReportState({
+  failure,
+  projectId,
+  sessionId,
+}: {
+  failure: NonNullable<ReturnType<typeof usePrimaryRunFailure>>;
+  projectId: string;
+  sessionId: string;
+}) {
+  return (
+    <Card role="alert" className="flex flex-col gap-2 border-status-critical/40 p-4">
+      <p className="text-sm font-semibold text-status-critical">
+        {failure.cancelled
+          ? "The analysis was stopped before a report was written"
+          : "The analysis failed before a report was written"}
+      </p>
+      {failure.reason && (
+        <p className="text-sm text-status-neutral">{failure.reason}</p>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <RunAgainButton
+          jobId={failure.job.job_id}
+          sessionId={sessionId}
+          projectId={projectId}
+          sourceSessionId={failure.job.source_session_id}
+        />
+        <Link
+          to={sessionSectionPath(projectId, sessionId, "trace")}
+          className="text-sm font-medium text-primary hover:underline"
+        >
+          See the full error on the Trace page
+        </Link>
+      </div>
+    </Card>
+  );
+}
+
 export function Component() {
   const { projectId = "", sessionId = "" } = useParams();
   const report = useReport(sessionId);
@@ -443,10 +507,39 @@ export function Component() {
   const decisionReport = useDecisionReport(sessionId);
   const generatedAt = formatGeneratedAt(report.data?.generated_at);
   const hasReport = Boolean(report.data && report.data.status !== "none");
+  /* Only consulted when there is no report at all: the empty state must then
+   * distinguish "never generated" from "the analysis failed". */
+  const runFailure = usePrimaryRunFailure(
+    sessionId,
+    report.data?.status === "none",
+  );
   const [inspecting, setInspecting] = useState<{
     artifactId: string;
     sessionId: string;
   } | null>(null);
+  const navigate = useNavigate();
+
+  /* Stable identities: ReportBody's markdown DOM remounts whenever its
+   * component map changes, so handlers passed into it must not be re-created
+   * on unrelated re-renders (a background query resolving detached every
+   * rendered node mid-test). */
+  const inspect = useCallback(
+    (artifactId: string) => setInspecting({ artifactId, sessionId }),
+    [sessionId],
+  );
+  /* Chat opens with the question prefilled, not sent: the reader refines it.
+   * The section title is enough for the agent to find the report passage. */
+  const askAboutSection = useCallback(
+    (sectionTitle: string) =>
+      void navigate(sessionSectionPath(projectId, sessionId, "chat"), {
+        state: {
+          chatDraft:
+            `About the "${sectionTitle}" section of this run's report: ` +
+            "what evidence backs its findings, and how were the figures computed?",
+        },
+      }),
+    [navigate, projectId, sessionId],
+  );
 
   const outline = useMemo(
     () => (report.data ? readReportOutline(report.data.markdown) : null),
@@ -494,6 +587,10 @@ export function Component() {
           by the decision story and by the report body opens in one place. */}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
         <div className="flex min-w-0 flex-1 flex-col gap-8">
+          {/* Unconditional: the notice hides itself while there is no report.
+            * Mounting it later would add a second report fetch after the
+            * page's own resolves (a fresh observer refetches a stale query). */}
+          <ReportStaleNotice projectId={projectId} sessionId={sessionId} />
           {decisionReport.isError && (
             <DecisionReportReadError
               error={decisionReport.error}
@@ -540,12 +637,23 @@ export function Component() {
             {report.isError && (
               <ErrorState error={report.error} onRetry={() => report.refetch()} />
             )}
+            {report.data && report.data.degraded && hasReport && (
+              <DegradedReportNotice />
+            )}
             {report.data &&
               (report.data.status === "none" ? (
-                <EmptyState
-                  title="No technical report yet"
-                  description="Generate one to re-read this run’s evidence and write an evidence-checked report."
-                />
+                runFailure ? (
+                  <FailedRunReportState
+                    failure={runFailure}
+                    projectId={projectId}
+                    sessionId={sessionId}
+                  />
+                ) : (
+                  <EmptyState
+                    title="No technical report yet"
+                    description="Generate one to re-read this run’s evidence and write an evidence-checked report."
+                  />
+                )
               ) : (
                 outline && (
                   <>
@@ -567,9 +675,8 @@ export function Component() {
                             ? inspecting.artifactId
                             : null
                         }
-                        onInspect={(artifactId) =>
-                          setInspecting({ artifactId, sessionId })
-                        }
+                        onInspect={inspect}
+                        onAskSection={askAboutSection}
                       />
                     </Card>
                     {outline.reference && (
@@ -582,9 +689,7 @@ export function Component() {
                             ? inspecting.artifactId
                             : null
                         }
-                        onInspect={(artifactId) =>
-                          setInspecting({ artifactId, sessionId })
-                        }
+                        onInspect={inspect}
                       />
                     )}
                   </>

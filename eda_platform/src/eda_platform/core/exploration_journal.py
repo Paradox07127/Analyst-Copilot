@@ -1,6 +1,6 @@
 """Exploration event journal: policy fingerprint, reducer, and JSONL shell.
 
-Reducer semantics are isomorphic to the investigation loop journal (seq is
+Reducer semantics follow the append-only event journal pattern (seq is
 monotonic, attempt epochs fence executors, pending operations are exclusive,
 budget counters decrease with events), with two exploration-specific rules:
 pause is a resumable status rather than a stop, and an uncertain LLM call

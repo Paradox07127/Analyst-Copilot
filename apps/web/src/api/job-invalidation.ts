@@ -10,9 +10,6 @@ export const JOB_KINDS = [
   "report_generate",
   "session_fork",
   "question_draft",
-  "investigation_plan",
-  "investigation_execute",
-  "macro_loop",
   "synthesis_brief_create",
   "decision_report_generate",
   "cleaning_preview",
@@ -28,19 +25,22 @@ export interface JobInvalidationContext {
   sessionId: string;
   sourceSessionId: string;
   /** Session that owns result artifacts when it differs from both source and
-   * lifecycle runs (for example an investigation plan run). */
+   * lifecycle runs (for example a fork's new run). */
   resultSessionId?: string;
 }
 
 type KeyFactory = (context: JobInvalidationContext) => readonly QueryKey[];
 
-const baseKeys: KeyFactory = ({ projectId, sessionId }) => [
+const baseKeys: KeyFactory = ({ projectId, sessionId, sourceSessionId }) => [
   queryKeys.session(sessionId),
   queryKeys.sessions(projectId),
   queryKeys.projects,
   queryKeys.workspaceUsageRoot,
   queryKeys.sessionMetrics(sessionId),
   queryKeys.traceRoot(sessionId),
+  /* A settled job is a new row in its launching session's job history — the
+   * report-staleness banner reads that history. */
+  queryKeys.sessionJobs(sourceSessionId),
 ];
 
 const JOB_RESULT_KEYS: Record<JobKind, KeyFactory> = {
@@ -90,19 +90,6 @@ const JOB_RESULT_KEYS: Record<JobKind, KeyFactory> = {
   question_draft: ({ sourceSessionId }) => [
     queryKeys.questions(sourceSessionId),
     queryKeys.artifactsRoot(sourceSessionId),
-  ],
-  investigation_plan: ({ sourceSessionId }) => [
-    queryKeys.investigations(sourceSessionId),
-  ],
-  investigation_execute: ({ sourceSessionId, resultSessionId }) => [
-    queryKeys.investigations(sourceSessionId),
-    queryKeys.artifactsRoot(resultSessionId ?? sourceSessionId),
-    queryKeys.findings(resultSessionId ?? sourceSessionId),
-  ],
-  macro_loop: ({ sourceSessionId, resultSessionId }) => [
-    queryKeys.investigations(sourceSessionId),
-    queryKeys.artifactsRoot(resultSessionId ?? sourceSessionId),
-    queryKeys.findings(resultSessionId ?? sourceSessionId),
   ],
   synthesis_brief_create: ({ sourceSessionId }) => [
     queryKeys.decisionStory(sourceSessionId),

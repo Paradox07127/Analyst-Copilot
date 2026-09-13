@@ -18,7 +18,6 @@ from eda_platform.core.session_fence import session_key_lock
 from eda_platform.core.session_loader import load_run
 from eda_platform.core.store import ArtifactStore, session_dir_path
 from eda_platform.drivers.auto_eda import run_auto_eda
-from eda_platform.drivers.investigation_orchestrator import create_investigation_plans
 from eda_platform.drivers.question_exec import run_question_batch
 from eda_platform.drivers.synthesis_orchestrator import create_synthesis_brief
 from eda_platform.drivers.workflow_eval import run_fresh_workflow_eval_case
@@ -89,15 +88,6 @@ def _relative_boundary_calls(
         (
             "auto EDA",
             lambda: run_auto_eda([], workspace="relative-workspace"),
-        ),
-        (
-            "investigation planning",
-            lambda: create_investigation_plans(
-                project_id="project",
-                source_session_id="source",
-                question_ids=[],
-                workspace="relative-workspace",
-            ),
         ),
         (
             "question execution",

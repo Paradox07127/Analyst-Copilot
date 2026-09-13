@@ -138,3 +138,55 @@ def test_wide_run_cap_raise_is_restored_after_plan_generation(tmp_path) -> None:
     assert llm.caps_seen and llm.caps_seen[0] == _COMPLETION_BUDGET_CEILING
     # ...and the client left the function at its configured cap.
     assert llm.settings.max_tokens == 4_000
+
+
+def test_report_override_client_drives_the_claim_plan(tmp_path) -> None:
+    """The EDA_REPORT_LLM_* override exists because m2 is the task that
+    truncates on reasoning-heavy providers; routing only the narration through
+    it (2026-08-13 finding) left the truncating call on the workflow client."""
+    from typing import Any, TypeVar, cast
+
+    from pydantic import BaseModel
+
+    from eda_platform.agents.reporting import generate_agentic_report
+    from eda_platform.schemas.reports import ReportPlanDraft
+    from eda_platform.tools.loader import load_csv
+    from eda_platform.tools.profiler import profile_dataset
+
+    T = TypeVar("T", bound=BaseModel)
+
+    csv_path = tmp_path / "sales.csv"
+    csv_path.write_text("region,revenue\nEast,10\nWest,20\n", encoding="utf-8")
+    profile = profile_dataset(
+        load_csv(csv_path, dataset_id="ds_sales"), project_id="p", session_id="r"
+    )
+
+    class RecordingLLM:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.settings = _Settings(4_000)
+            self.structured_tasks: list[str] = []
+
+        def structured(self, *, task: str, schema: type[T], payload: dict[str, Any]) -> T:
+            self.structured_tasks.append(task)
+            return cast(T, ReportPlanDraft(claims=[]))
+
+        def text(self, *, task: str, payload: dict[str, Any]) -> str:
+            return "fake"
+
+        def last_usage(self) -> None:
+            return None
+
+    workflow = RecordingLLM("workflow")
+    report = RecordingLLM("report")
+    generate_agentic_report(
+        [profile],
+        project_id="p",
+        session_id="r",
+        business_context="Revenue analysis",
+        llm=workflow,
+        narrator_llm=report,
+    )
+
+    assert any("claim_plan" in task for task in report.structured_tasks)
+    assert not workflow.structured_tasks

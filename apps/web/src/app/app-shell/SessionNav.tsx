@@ -1,6 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router";
-import { useDatasets, useEdaHandoff, useSessionDetail } from "../../api/hooks";
+import {
+  useDatasets,
+  useEdaHandoff,
+  usePrimaryRunFailure,
+  useSessionDetail,
+} from "../../api/hooks";
 import { readBaseline } from "../../features/compare/baseline-storage";
 import {
   sessionBasePath,
@@ -19,12 +24,9 @@ interface NavPage {
 interface NavGroup {
   title: string;
   pages: NavPage[];
-  /** Routes that belong to this stage but render no link — a capability-gated
-   *  page still has to resolve to its own stage when opened directly. */
-  alsoOwns?: string[];
 }
 
-type StageState = "ready" | "running" | "waiting";
+type StageState = "ready" | "running" | "waiting" | "failed";
 
 /* "limited" is a resource-preflight run that stopped before ingest: terminal,
  * so the nav must stop polling, but not a completed analysis. */
@@ -88,17 +90,17 @@ function buildNavGroups(
     },
     {
       title: "Investigate with the agent",
-      /* Explore renders no link: every other page in this stage shows what the
-       * finished run produced, and a launcher among them read as a second agent
-       * to start. It is entered from Findings instead, where the user has just
-       * seen what is worth chasing. The route still has to resolve here — the
-       * stage matcher otherwise falls back to stage 1 and the bar claims the
-       * open page belongs to "Understand the data". */
-      alsoOwns: [at("explorations")],
       pages: [
         { label: "Questions", icon: "quiz", to: at("questions") },
         { label: "Deep analysis", icon: "analytics", to: at("deep-analysis") },
         { label: "Findings", icon: "factCheck", to: at("findings") },
+        {
+          /* Explore is a real nav item: a launcher reachable only from one bar
+           * on the Findings page was effectively hidden. */
+          label: "Explore",
+          icon: "rocket",
+          to: at("explorations"),
+        },
         {
           label: "Compare",
           icon: "compare",
@@ -124,18 +126,32 @@ function buildNavGroups(
   ];
 }
 
+interface SessionFailure {
+  cancelled: boolean;
+  /** The failed job's human sentence, when the job history still has it. */
+  reason: string | null;
+}
+
+interface PipelineReadiness {
+  data: StageState;
+  agent: StageState;
+  failure: SessionFailure | null;
+}
+
 /* A handoff is more trustworthy than a session's coarse lifecycle status:
  * auto-EDA publishes it when the data surfaces are safe to browse, while the
  * agent can still be drafting questions and the report afterwards. */
-function usePipelineReadiness(sessionId: string, hasDatasets: boolean): {
-  data: StageState;
-  agent: StageState;
-} {
+function usePipelineReadiness(
+  sessionId: string,
+  hasDatasets: boolean,
+): PipelineReadiness {
   const session = useSessionDetail(sessionId);
   const edaHandoff = useEdaHandoff(sessionId);
   const status = session.data?.status?.toLowerCase();
   const finished = status ? FINISHED_SESSION_STATUSES.has(status) : false;
   const completed = status === "complete" || status === "completed";
+  const stopped = status === "failed" || status === "cancelled";
+  const failedJob = usePrimaryRunFailure(sessionId, stopped);
   /* A failed or cancelled run can still leave a complete, browseable dataset
    * workspace behind. The data itself is stronger evidence than the coarse
    * session status, so do not lock users out of partial EDA results. */
@@ -151,9 +167,23 @@ function usePipelineReadiness(sessionId: string, hasDatasets: boolean): {
     return () => window.clearInterval(timer);
   }, [active, edaHandoff.refetch, session.refetch]);
 
+  const failure: SessionFailure | null = stopped
+    ? {
+        cancelled: status === "cancelled",
+        reason: failedJob?.reason ?? null,
+      }
+    : null;
+
   return {
-    data: dataReady ? "ready" : active ? "running" : "waiting",
-    agent: completed ? "ready" : dataReady && active ? "running" : "waiting",
+    data: dataReady ? "ready" : failure ? "failed" : active ? "running" : "waiting",
+    agent: completed
+      ? "ready"
+      : failure
+        ? "failed"
+        : dataReady && active
+          ? "running"
+          : "waiting",
+    failure,
   };
 }
 
@@ -179,15 +209,27 @@ function pageMatches(pathname: string, page: NavPage): boolean {
   return matchesPath(pathname, page.activePath ?? page.to);
 }
 
+function failureReason(failure: SessionFailure): string {
+  const headline = failure.cancelled
+    ? "The analysis was stopped before it finished."
+    : "The analysis failed.";
+  return failure.reason ? `${headline} ${failure.reason}` : headline;
+}
+
 function unavailableReason(
   groupTitle: string,
-  readiness: { data: StageState; agent: StageState },
+  readiness: PipelineReadiness,
 ): string | undefined {
   if (groupTitle === "Understand the data" && readiness.data !== "ready") {
-    return "EDA is still preparing this workspace.";
+    return readiness.data === "failed" && readiness.failure
+      ? failureReason(readiness.failure)
+      : "EDA is still preparing this workspace.";
   }
   if (groupTitle !== "Investigate with the agent" || readiness.agent === "ready") {
     return undefined;
+  }
+  if (readiness.agent === "failed" && readiness.failure) {
+    return failureReason(readiness.failure);
   }
   return readiness.agent === "waiting"
     ? "Agent work begins after EDA publishes the data workspace."
@@ -268,10 +310,8 @@ function SessionNavGroups({
   );
 
   const currentGroup =
-    groups.find(
-      (group) =>
-        group.pages.some((page) => pageMatches(pathname, page)) ||
-        (group.alsoOwns ?? []).some((path) => matchesPath(pathname, path)),
+    groups.find((group) =>
+      group.pages.some((page) => pageMatches(pathname, page)),
     ) ?? groups[0]!;
   const lookahead = browsing?.pathname === pathname ? browsing.title : null;
   const selected =
@@ -329,6 +369,17 @@ function SessionNavGroups({
           </svg>
         </button>
         <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
+        {readiness.failure && (
+          /* A visible marker, not only hover text on the greyed pages: a
+           * failed run must not read as one that is still preparing. */
+          <span
+            title={failureReason(readiness.failure)}
+            className="flex shrink-0 items-center gap-1.5 rounded-full bg-status-critical/10 px-2 py-0.5 text-xs font-medium text-status-critical"
+          >
+            <span aria-hidden className="size-1.5 rounded-full bg-status-critical" />
+            {readiness.failure.cancelled ? "Analysis stopped" : "Analysis failed"}
+          </span>
+        )}
         <ul
           id={panelId}
           aria-label={selected.title}

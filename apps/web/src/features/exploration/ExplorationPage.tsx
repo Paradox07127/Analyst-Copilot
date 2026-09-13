@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import type {
   ExplorationBudgetIncrease,
@@ -7,6 +7,7 @@ import type {
   ExplorationPreparedDto,
   ExplorationTierDto,
 } from "../../api/client";
+import type { ExplorationListItemDto } from "../../api/exploration-types";
 import { useExplorationEvents } from "../../api/exploration-events";
 import {
   queryKeys,
@@ -14,19 +15,24 @@ import {
   useDatasets,
   useExploration,
   useExplorationReport,
+  useExplorations,
   useExtendExplorationBudget,
+  useGenerateReport,
   usePauseExploration,
   usePrepareExploration,
   useResumeExploration,
   useStartExploration,
 } from "../../api/hooks";
-import { explorationRunPath } from "../../app/paths";
+import { useJobActivity } from "../../app/job-activity";
+import { explorationRunPath, sessionSectionPath } from "../../app/paths";
 import {
   ErrorState,
   LoadingSkeleton,
   formatUnknownError,
 } from "../../components/async-states";
-import { Badge, Card, MetricStrip, MetricTile, SectionHeader } from "../../components/ui";
+import { Badge, Card, MetricStrip, MetricTile, SectionHeader, type Tone } from "../../components/ui";
+import { ReportBody } from "../reports/ReportBody";
+import "../reports/report-markdown.css";
 import { explorationRunFromDto } from "./exploration-adapter";
 import {
   readExplorationGoal,
@@ -59,6 +65,53 @@ function HardCaps({ prepared }: { prepared: ExplorationPreparedDto }) {
         />
       </MetricStrip>
     </section>
+  );
+}
+
+const STATUS_TONES: Record<ExplorationListItemDto["status"], Tone> = {
+  running: "info",
+  pause_requested: "warn",
+  paused: "warn",
+  stopped: "neutral",
+};
+
+const STATUS_LABELS: Record<ExplorationListItemDto["status"], string> = {
+  running: "Running",
+  pause_requested: "Pause requested",
+  paused: "Paused",
+  stopped: "Finished",
+};
+
+/* The server-side listing, not localStorage, is how runs are found back: a
+ * cleared cache or another device still sees every deep dive of the session. */
+function PastExplorations({ projectId, sessionId }: { projectId: string; sessionId: string }) {
+  const runs = useExplorations(sessionId);
+  const items = runs.data?.explorations ?? [];
+  if (items.length === 0) return null;
+  return (
+    <Card as="section" aria-label="Deep dives in this session" className="flex flex-col gap-2 p-4">
+      <SectionHeader
+        level={3}
+        title="Deep dives in this session"
+        description="Open one to see its live status, evidence and report."
+      />
+      <ul className="flex flex-col gap-2">
+        {items.map((item) => (
+          <li key={item.exploration_id} className="flex flex-wrap items-center gap-2">
+            <Badge tone={STATUS_TONES[item.status]}>{STATUS_LABELS[item.status]}</Badge>
+            <Link
+              to={explorationRunPath(projectId, sessionId, item.exploration_id)}
+              className="min-w-0 flex-1 truncate text-sm text-primary hover:underline"
+            >
+              {item.goal}
+            </Link>
+            <span className="text-xs text-status-neutral">
+              {item.thinking_level} · {new Date(item.created_at).toLocaleString()}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 
@@ -132,6 +185,7 @@ function ExplorationLaunch({ projectId, sessionId }: { projectId: string; sessio
         title="Read-only exploration"
         description="Explore freely or investigate a goal without modifying source datasets."
       />
+      <PastExplorations projectId={projectId} sessionId={sessionId} />
       <Card as="section" className="flex flex-col gap-4 p-4">
         <fieldset className="flex flex-col gap-2">
           <legend className="text-sm font-medium">Mode</legend>
@@ -313,6 +367,8 @@ function BudgetExtension({ sessionId, explorationId }: { sessionId: string; expl
   );
 }
 
+const NO_INSPECTABLE_IDS = new Set<string>();
+
 /** The report is a file in the run directory, so it is fetched and shown here
  *  rather than linked as an artifact that never existed. */
 function FinalReport({ sessionId, explorationId }: { sessionId: string; explorationId: string }) {
@@ -329,15 +385,125 @@ function FinalReport({ sessionId, explorationId }: { sessionId: string; explorat
         <ErrorState error={report.error} onRetry={() => void report.refetch()} />
       )}
       {report.data !== undefined && (
-        <pre className="max-h-[32rem] overflow-auto rounded-base bg-code-bg p-3 font-mono text-xs whitespace-pre-wrap text-code-text">
-          {report.data}
-        </pre>
+        <div className="max-h-[40rem] min-w-0 overflow-auto">
+          <ReportBody
+            markdown={report.data}
+            inspectableIds={NO_INSPECTABLE_IDS}
+            selectedId={null}
+            onInspect={() => {}}
+          />
+        </div>
       )}
     </Card>
   );
 }
 
-function ExplorationRun({ sessionId, explorationId }: { sessionId: string; explorationId: string }) {
+/* Where the results go next: the findings feed and the main report. Without
+ * these the deep dive is a dead end that only this page ever shows. */
+function NextSteps({
+  projectId,
+  sessionId,
+}: {
+  projectId: string;
+  sessionId: string;
+}) {
+  const generate = useGenerateReport(sessionId);
+  const { startTracking } = useJobActivity();
+  const [confirming, setConfirming] = useState(false);
+  const [started, setStarted] = useState(false);
+  const keyRef = useRef<string | null>(null);
+
+  const regenerate = () => {
+    keyRef.current ??= crypto.randomUUID();
+    generate.mutate(
+      { llm: "env", idempotencyKey: keyRef.current },
+      {
+        onSuccess: (result) => {
+          keyRef.current = null;
+          setConfirming(false);
+          setStarted(true);
+          startTracking({
+            jobId: result.job.job_id,
+            sessionId: result.job.session_id,
+            sourceSessionId: sessionId,
+            projectId,
+            eventsUrl: result.job.events_url,
+          });
+        },
+        onError: () => {
+          keyRef.current = null;
+        },
+      },
+    );
+  };
+
+  return (
+    <Card as="section" aria-label="Use these results" className="flex flex-col gap-3 p-4">
+      <SectionHeader
+        level={3}
+        title="Use these results"
+        description="Gate-passed findings are already in this session's findings feed."
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <Link
+          to={sessionSectionPath(projectId, sessionId, "findings")}
+          className="rounded-base border border-primary px-3 py-1.5 text-sm font-medium text-primary"
+        >
+          View in Findings
+        </Link>
+        {!confirming && !started && (
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className="rounded-base border border-border px-3 py-1.5 text-sm"
+          >
+            Regenerate main report with these conclusions
+          </button>
+        )}
+        {confirming && (
+          <>
+            <span className="text-xs text-status-warn">
+              Regenerating replaces the current report — the run keeps only the newest one.
+            </span>
+            <button
+              type="button"
+              onClick={regenerate}
+              disabled={generate.isPending}
+              className="rounded-base bg-primary px-3 py-1.5 text-sm font-medium text-bg disabled:opacity-50"
+            >
+              {generate.isPending ? "Starting…" : "Replace report"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              className="rounded-base border border-border px-3 py-1.5 text-sm"
+            >
+              Keep current
+            </button>
+          </>
+        )}
+        {started && (
+          <span role="status" className="text-sm text-status-neutral">
+            Report generation started.{" "}
+            <Link
+              to={sessionSectionPath(projectId, sessionId, "report")}
+              className="text-primary hover:underline"
+            >
+              Open the Report page
+            </Link>
+          </span>
+        )}
+      </div>
+      {generate.isError && (
+        <p role="alert" className="text-sm text-status-critical">
+          {formatUnknownError(generate.error)}
+        </p>
+      )}
+    </Card>
+  );
+}
+
+function ExplorationRun({ projectId, sessionId, explorationId }: { projectId: string; sessionId: string; explorationId: string }) {
   const queryClient = useQueryClient();
   const exploration = useExploration(sessionId, explorationId);
   const pause = usePauseExploration(sessionId, explorationId);
@@ -394,6 +560,9 @@ function ExplorationRun({ sessionId, explorationId }: { sessionId: string; explo
       {run.report?.available && (
         <FinalReport sessionId={sessionId} explorationId={explorationId} />
       )}
+      {run.status === "stopped" && (
+        <NextSteps projectId={projectId} sessionId={sessionId} />
+      )}
       <ExplorationReport run={run} />
     </main>
   );
@@ -402,6 +571,6 @@ function ExplorationRun({ sessionId, explorationId }: { sessionId: string; explo
 export function Component() {
   const { projectId = "", sessionId = "", explorationId } = useParams();
   return explorationId
-    ? <ExplorationRun sessionId={sessionId} explorationId={explorationId} />
+    ? <ExplorationRun projectId={projectId} sessionId={sessionId} explorationId={explorationId} />
     : <ExplorationLaunch projectId={projectId} sessionId={sessionId} />;
 }

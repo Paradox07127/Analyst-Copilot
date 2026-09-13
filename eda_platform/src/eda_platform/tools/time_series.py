@@ -97,18 +97,31 @@ class TimeSeriesDiagnostics:
     table: AnalysisTable | None = None
 
 
-def analyze_series(
+@dataclass(slots=True)
+class RegularSeries:
+    """Shared front end result: one time/value pair on a regular, gap-accounted grid."""
+
+    series: pd.Series
+    n_periods: int
+    gap_count: int
+    freq: str
+    period: int | None
+    parse_loss_count: int
+    duplicate_timestamp_count: int
+    notes: list[str]
+
+
+def prepare_regular_series(
     frame: pd.DataFrame,
     *,
-    dataset_id: str,
     dataset_name: str,
     time_column: str,
     value_column: str,
     freq: str | None = None,
     period: int | None = None,
     agg: TimeSeriesAgg = "sum",
-) -> TimeSeriesDiagnostics:
-    """Aggregate one time/value pair into a regular series and diagnose it."""
+) -> RegularSeries:
+    """Parse, aggregate and interpolate one time/value pair onto a regular grid."""
     for column in (time_column, value_column):
         if column not in frame.columns:
             raise ValueError(f"Column `{column}` is not in dataset `{dataset_name}`.")
@@ -163,6 +176,47 @@ def analyze_series(
             f"Seasonal period was not supplied; defaulted to {resolved_period} "
             f"for frequency `{freq}`."
         )
+    return RegularSeries(
+        series=series,
+        n_periods=n_periods,
+        gap_count=gap_count,
+        freq=str(freq),
+        period=resolved_period,
+        parse_loss_count=parse_loss_count,
+        duplicate_timestamp_count=duplicate_timestamp_count,
+        notes=notes,
+    )
+
+
+def analyze_series(
+    frame: pd.DataFrame,
+    *,
+    dataset_id: str,
+    dataset_name: str,
+    time_column: str,
+    value_column: str,
+    freq: str | None = None,
+    period: int | None = None,
+    agg: TimeSeriesAgg = "sum",
+) -> TimeSeriesDiagnostics:
+    """Aggregate one time/value pair into a regular series and diagnose it."""
+    prepared = prepare_regular_series(
+        frame,
+        dataset_name=dataset_name,
+        time_column=time_column,
+        value_column=value_column,
+        freq=freq,
+        period=period,
+        agg=agg,
+    )
+    notes = prepared.notes
+    series = prepared.series
+    freq = prepared.freq
+    n_periods = prepared.n_periods
+    gap_count = prepared.gap_count
+    parse_loss_count = prepared.parse_loss_count
+    duplicate_timestamp_count = prepared.duplicate_timestamp_count
+    resolved_period = prepared.period
 
     values_now = series.to_numpy(dtype="float64")
     spike_detected, spike_period, spike_value, spike_score = _localized_spike(series)

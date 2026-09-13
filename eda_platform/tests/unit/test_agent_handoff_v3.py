@@ -89,6 +89,7 @@ def test_large_chart_inventory_is_bounded_and_order_independent() -> None:
             )
         )
     fixed = datetime(2026, 7, 31, tzinfo=UTC)
+    started = datetime(2026, 7, 30, tzinfo=UTC)
     first = create_agent_handoff_artifact(
         artifacts,
         project_id="p",
@@ -97,6 +98,7 @@ def test_large_chart_inventory_is_bounded_and_order_independent() -> None:
         execution_fingerprint="fingerprint",
         input_hashes={"one.csv": "1", "two.csv": "2"},
         generated_at=fixed,
+        started_at=started,
         external_artifacts=external,
         fetch_session_id="s",
     )
@@ -112,6 +114,7 @@ def test_large_chart_inventory_is_bounded_and_order_independent() -> None:
         execution_fingerprint="fingerprint",
         input_hashes={"one.csv": "1", "two.csv": "2"},
         generated_at=fixed,
+        started_at=started,
         external_artifacts=shuffled_external,
         fetch_session_id="s",
     )
@@ -123,6 +126,8 @@ def test_large_chart_inventory_is_bounded_and_order_independent() -> None:
     assert handoff.run.artifact_counts["ChartSpec"] == 10_000
     assert handoff.run.referenced_external_artifact_count == 5_000
     assert handoff.run.source_inventory_count == len(artifacts)
+    assert handoff.run.started_at == started
+    assert handoff.run.completed_at == fixed
     assert len(handoff.run.source_inventory_digest) == 64
     assert len(handoff.run.external_inventory_digest) == 64
     assert len([item for item in handoff.artifact_catalog if item.type == "ChartSpec"]) == 5

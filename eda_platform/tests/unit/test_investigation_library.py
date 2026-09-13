@@ -1,65 +1,89 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from eda_platform.core.store import ArtifactStore
-from eda_platform.drivers.auto_eda import AutoEDAResult, run_auto_eda
 from eda_platform.drivers.investigation_library import load_investigation_library
-from eda_platform.drivers.investigation_orchestrator import (
-    approve_plan,
-    create_investigation_plans,
-    execute_investigation_plans,
-)
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
-from eda_platform.schemas.investigations import InvestigationRecord
-from eda_platform.schemas.questions import QuestionCandidate, QuestionCandidateSet
+from eda_platform.schemas.investigations import (
+    InvestigationPlan,
+    InvestigationRecord,
+    ValidatedFinding,
+)
+from eda_platform.schemas.questions import QuestionFinding
 
-GOLDEN_DATA = Path(__file__).parents[1] / "golden" / "data"
+PROJECT = "project_demo"
+SOURCE_RUN = "source_run"
+PLAN_RUN = "plan_run"
+QUESTION_ID = "q_orders"
+QUESTION_TEXT = "Which product category drives revenue?"
 
 
-def _validated_source(tmp_path: Path) -> tuple[AutoEDAResult, str, QuestionCandidate]:
-    source = run_auto_eda(
-        [GOLDEN_DATA / "ecommerce_orders.csv"],
-        workspace=tmp_path / "workspace",
-        project_id="project_demo",
-        session_id="source_run",
+def _validated_source(tmp_path: Path) -> tuple[SimpleNamespace, str, SimpleNamespace]:
+    """A validated finding, its record, and its plan, built directly in the store."""
+    store = ArtifactStore(tmp_path / "workspace")
+    store.ensure_project(PROJECT, PROJECT)
+    store.start_session(PROJECT, SOURCE_RUN)
+    store.start_session(PROJECT, PLAN_RUN)
+    plan = InvestigationPlan(
+        investigation_id="inv_orders",
+        source_session_id=SOURCE_RUN,
+        question_id=QUESTION_ID,
+        card_version=1,
+        candidate_fingerprint="fingerprint_orders",
+        question=QUESTION_TEXT,
+        target_datasets=["orders.csv"],
+        method_family="descriptive",
+        method_recipe="compare values",
+        allowed_tools=["sql"],
+        feasibility="ready",
+        status="planned",
+        status_reason="Ready.",
     )
-    candidate_artifact = next(
-        item
-        for item in source.artifacts
-        if item.type is ArtifactType.QUESTION_CANDIDATE_SET
+    finding = ValidatedFinding(
+        finding_id="finding_orders",
+        investigation_id="inv_orders",
+        question_id=QUESTION_ID,
+        question=QUESTION_TEXT,
+        claim_class="observed",
+        findings=[QuestionFinding(text="Electronics leads revenue across the year.")],
+        evidence_support="high",
+        analytical_reliability="high",
+        decision_readiness="medium",
+        report_eligible=True,
+        report_readiness="eligible",
+        report_readiness_reason="The deterministic test fixture is eligible.",
     )
-    candidates = QuestionCandidateSet.model_validate(candidate_artifact.payload)
-    candidate = next(
-        item
-        for item in candidates.candidates
-        if item.origin == "template" and item.sql_template is not None
+    record = InvestigationRecord(
+        record_id="irec_orders",
+        investigation_id="inv_orders",
+        question_id=QUESTION_ID,
+        status="validated",
+        reason_code="finding_validated",
+        reason="Validated.",
+        next_action="none",
+        finding_artifact_id="finding_1",
     )
-    planned = create_investigation_plans(
-        project_id=source.project_id,
-        source_session_id=source.session_id,
-        question_ids=[candidate.question_id],
-        workspace=source.workspace,
-        session_id="plan_run",
+    for artifact_id, artifact_type, payload in (
+        ("plan_1", ArtifactType.INVESTIGATION_PLAN, plan.model_dump(mode="json")),
+        ("finding_1", ArtifactType.VALIDATED_FINDING, finding.model_dump(mode="json")),
+        ("record_1", ArtifactType.INVESTIGATION_RECORD, record.model_dump(mode="json")),
+    ):
+        store.save_artifact(
+            Artifact(
+                id=artifact_id,
+                type=artifact_type,
+                project_id=PROJECT,
+                session_id=PLAN_RUN,
+                payload=payload,
+            )
+        )
+    source = SimpleNamespace(
+        workspace=store.root, project_id=PROJECT, session_id=SOURCE_RUN
     )
-    plan_artifact = next(
-        item
-        for item in planned.artifacts
-        if item.type is ArtifactType.INVESTIGATION_PLAN
-    )
-    approve_plan(
-        project_id=source.project_id,
-        plan_session_id=planned.session_id,
-        plan_id=plan_artifact.id,
-        workspace=source.workspace,
-    )
-    execute_investigation_plans(
-        project_id=source.project_id,
-        plan_session_id=planned.session_id,
-        plan_ids=[plan_artifact.id],
-        workspace=source.workspace,
-    )
-    return source, planned.session_id, candidate
+    candidate = SimpleNamespace(question_id=QUESTION_ID, question_en=QUESTION_TEXT)
+    return source, PLAN_RUN, candidate
 
 
 def test_library_uses_only_validated_findings_and_records(tmp_path: Path) -> None:

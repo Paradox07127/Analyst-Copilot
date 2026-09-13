@@ -787,13 +787,21 @@ def _verify_stat_registry(
             if invocation is None
             else invocation.canonical_arguments.get("test_type")
         )
-        if (
-            requested_test_type is None
-            and invocation is not None
-            and receipt.tool_name == "analyze_time_series"
-        ):
-            # The tool has no test_type argument; its registered test is fixed.
-            requested_test_type = "ljung_box"
+        if requested_test_type is None and invocation is not None:
+            # These tools have no test_type argument; their registered test is
+            # fixed per tool.
+            if receipt.tool_name == "analyze_time_series":
+                requested_test_type = "ljung_box"
+            elif receipt.tool_name == "diagnose_missingness":
+                requested_test_type = "missingness_target_association"
+            elif receipt.tool_name == "run_causal_experiment":
+                # The registered type follows the effective tier, which the
+                # statistics block states durably via its test name.
+                requested_test_type = (
+                    "two_sample_ate"
+                    if statistics.test_name == "two_sample_ate"
+                    else "causal_design_check"
+                )
         expected_family_id = None
         if invocation is not None:
             dataset_id = invocation.canonical_arguments.get("dataset_id")
@@ -805,6 +813,11 @@ def _verify_stat_registry(
                     "category_column",
                     "pair_column",
                     "time_column",
+                    # diagnose_missingness families are keyed by their target.
+                    "target_column",
+                    # run_causal_experiment families are keyed by the pair.
+                    "treatment_column",
+                    "outcome_column",
                 )
                 if isinstance(
                     value := invocation.canonical_arguments.get(key), str

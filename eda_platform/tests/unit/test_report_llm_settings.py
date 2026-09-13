@@ -8,11 +8,21 @@ never a silent switch.
 
 from __future__ import annotations
 
+import pytest
+
+from eda_platform.core import env
 from eda_platform.core.env import (
     load_llm_settings_from_env_file,
     load_report_llm_settings_from_env_file,
 )
 from eda_platform.core.llm import LLMProvider
+
+
+@pytest.fixture(autouse=True)
+def _isolate_repo_env_file(monkeypatch, tmp_path):
+    # path=None falls back to the repo-root .env; real EDA_REPORT_LLM_* values
+    # there would leak into these assertions.
+    monkeypatch.setattr(env, "DEFAULT_ENV_PATH", tmp_path / "absent.env")
 
 
 def _env(**overrides: str) -> dict[str, str]:

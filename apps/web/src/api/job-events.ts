@@ -3,6 +3,7 @@
  * named `event:` type, so we register a listener per known type. */
 
 import { useEffect, useReducer } from "react";
+import type { ResourceLimitGuidance } from "./client";
 
 export interface JobEvent {
   event_id: number;
@@ -80,7 +81,7 @@ export const JOB_PHASES = [
 
 export type JobPhaseKey = (typeof JOB_PHASES)[number]["key"];
 
-/* Only auto_eda walks the phases above; the other twelve kinds worker/runner.py
+/* Only auto_eda walks the phases above; the other kinds worker/runner.py
  * dispatches are single-purpose jobs. They get a sentence instead of a phase
  * strip, because rendering six greyed-out EDA phases for a question execution
  * says nothing true about it. Keys match runner.py's dispatch. */
@@ -88,9 +89,6 @@ export const JOB_KIND_ACTIVITY: Record<string, string> = {
   auto_eda: "Running the full analysis pipeline",
   question_exec: "Answering one approved question",
   question_draft: "Drafting a question card from your text",
-  investigation_plan: "Building investigation plans for the selected questions",
-  investigation_execute: "Working through an approved investigation plan",
-  macro_loop: "Running the investigation loop until its gates are met",
   relationship_validate: "Validating a candidate join against the data",
   relationship_discover: "Searching for candidate joins between tables",
   report_generate: "Regenerating the report and revalidating its claims",
@@ -136,18 +134,16 @@ export const SSE_EVENT_TYPES = [
   "cleaning_applied",
   "code_agent_attempt",
   "domain_metrics_skipped",
-  "investigation_completed",
-  "investigation_plans_created",
-  "investigation_started",
   "join_authorization_freshness",
   "join_candidates_proposed",
   "join_whitelist_unreadable",
   "llm_call",
   "llm_error",
-  "loop_started",
   "ml_baseline_skipped",
+  "narration_discarded",
   "precleaning_applied",
   "report.generated",
+  "report_degraded",
   "session.forked",
   "question_auto_execution",
   "question_auto_execution_selected",
@@ -283,6 +279,57 @@ export function phaseProgress(job: JobEventsState): PhaseProgress[] {
           : null,
     };
   });
+}
+
+/* A run the resource gate stopped carries its own numbers on the completed
+ * frame, so the strip explains the stop without a second request. Shape-checked
+ * rather than cast: the frame is JSON off the wire, and a half-written summary
+ * must render nothing instead of "undefined GB". */
+export function jobResourceLimit(
+  state: JobEventsState,
+): ResourceLimitGuidance | null {
+  for (let index = state.events.length - 1; index >= 0; index--) {
+    const event = state.events[index]!;
+    if (event.type !== "job.completed") continue;
+    const limit = event.summary["resource_limit"];
+    if (typeof limit !== "object" || limit === null) return null;
+    const record = limit as Record<string, unknown>;
+    if (
+      !Array.isArray(record["reason_codes"]) ||
+      typeof record["max_working_set_bytes"] !== "number"
+    ) {
+      return null;
+    }
+    return limit as ResourceLimitGuidance;
+  }
+  return null;
+}
+
+export interface JobFailure {
+  cancelled: boolean;
+  /** The worker's human failure sentence; raw detail stays on the Trace page. */
+  message: string;
+}
+
+/* The terminal frame's human reason (worker error_translation writes
+ * `error_message`); null while the job is alive or when it settled cleanly. */
+export function jobFailure(state: JobEventsState): JobFailure | null {
+  for (let index = state.events.length - 1; index >= 0; index--) {
+    const event = state.events[index]!;
+    if (event.type !== "job.failed" && event.type !== "job.cancelled") continue;
+    const cancelled = event.type === "job.cancelled";
+    const message = event.summary["error_message"];
+    return {
+      cancelled,
+      message:
+        typeof message === "string" && message.trim()
+          ? message
+          : cancelled
+            ? "This run was stopped before it finished."
+            : "The run failed before finishing. The Trace page has the details.",
+    };
+  }
+  return null;
 }
 
 type Action =

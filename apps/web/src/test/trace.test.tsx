@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { defaultSettings, llmDebugPage, runDebugView } from "./msw/handlers";
+import {
+  defaultSettings,
+  llmDebugPage,
+  runDebugView,
+  runMetricsView,
+} from "./msw/handlers";
 import { server } from "./msw/server";
 import { renderAppAt } from "./render";
 import { objectUrls } from "./setup";
@@ -113,6 +118,33 @@ describe("Trace & cost page", () => {
     expect(screen.getByText("3 of 3 shown")).toBeInTheDocument();
   });
 
+  it("shows deep-dive spend as its own card only when a deep dive ran", async () => {
+    renderAppAt(PATH);
+    await screen.findByRole("main");
+    expect(screen.queryByText("Deep dive cost")).not.toBeInTheDocument();
+
+    cleanup();
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/metrics", ({ params }) =>
+        HttpResponse.json({
+          ...runMetricsView(String(params["sessionId"])),
+          exploration_runs: 1,
+          exploration_llm_calls: 6,
+          exploration_total_tokens: 2100,
+          exploration_est_cost_usd: 0.011,
+        }),
+      ),
+    );
+    renderAppAt(PATH);
+    const kpi = (await screen.findByText("Deep dive cost")).closest(
+      "div",
+    ) as HTMLElement;
+    expect(within(kpi).getByText("$0.0110")).toBeInTheDocument();
+    expect(
+      within(kpi).getByText("6 call(s) · 2,100 tokens · 1 run(s)"),
+    ).toBeInTheDocument();
+  });
+
   it("renders a handled React failure as failure_recorded", async () => {
     server.use(
       http.get("/api/v1/sessions/:sessionId/trace", ({ params }) =>
@@ -188,9 +220,9 @@ describe("Trace & cost page", () => {
       ),
     );
     renderAppAt(PATH);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Request failed (invalid_cursor)",
-    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Request failed");
+    expect(alert).toHaveTextContent("invalid_cursor");
     expect(
       within(screen.getByRole("main")).getByText("$0.0122"),
     ).toBeInTheDocument();

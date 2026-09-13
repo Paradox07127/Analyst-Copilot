@@ -104,10 +104,6 @@ class SessionMetrics(BaseModel):
     findings_dedup_merged: int = 0
     domain_metric_questions: int = 0
     domain_metrics_skipped: int = 0
-    # Macro-loop round rollup derived from the run's LOOP_LEDGER artifact.
-    macro_loop_rounds: int = 0
-    macro_loop_new_findings: int = 0
-    macro_loop_discard_rounds: int = 0
     # Result-quality outcomes derived from typed execution artifacts.
     question_answered: int = 0
     question_abstained: int = 0

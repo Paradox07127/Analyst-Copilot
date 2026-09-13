@@ -258,6 +258,44 @@ def test_a_cancelled_tool_stops_the_loop() -> None:
         runtime.run(system_prompt="Use tools.", user_message="Inspect it.")
 
 
+def test_a_stop_request_halts_the_loop_before_the_next_step() -> None:
+    """A cancel flag set during step 1's tool call must prevent step 2's model
+    call entirely: the loop checks between steps, not after the cap."""
+    cancelled = False
+
+    def _inspect(_args: BaseModel) -> AgentToolResult:
+        nonlocal cancelled
+        cancelled = True
+        return AgentToolResult(content={"datasets": 1})
+
+    llm = _CountingToolLLM(
+        [
+            LLMToolResponse(
+                tool_calls=[LLMToolCall(call_id="call_1", name="inspect", arguments={})]
+            ),
+            LLMToolResponse(content="This second step must never run."),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm=llm,  # type: ignore[arg-type]
+        tools=[
+            AgentTool(
+                name="inspect",
+                description="Inspect the catalog.",
+                args_schema=_NoArgs,
+                execute=_inspect,
+            )
+        ],
+        cancel_check=lambda: cancelled,
+    )
+
+    result = runtime.run(system_prompt="Use tools.", user_message="Inspect it.")
+
+    assert result.status == "cancelled"
+    assert result.tool_calls == 1
+    assert len(llm.messages) == 1  # the second model call never happened
+
+
 def test_a_rejected_answer_is_returned_to_the_model_once() -> None:
     """The rewrite feedback carries the reason, never the rejected answer itself."""
     llm = _CountingToolLLM(

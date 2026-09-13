@@ -136,6 +136,20 @@ describe("Routing", () => {
     expect(screen.getByText("sales#2026")).toBeInTheDocument();
   });
 
+  it("resolves the explorations routes inside a split pane instead of a blank pane", async () => {
+    renderAppAt(
+      "/split?left=%2Fprojects%2Fp1%2Fsessions%2Fr1%2Fexplorations&right=%2Fprojects%2Fp1%2Fsessions%2Fr1%2Ffindings&active=left",
+    );
+    const pane = await screen.findByRole("region", {
+      name: "Left workspace pane",
+    });
+    // The default capability is off, so the page renders its explanation —
+    // the point is that the pane router resolves the route at all.
+    expect(
+      await within(pane).findByRole("heading", { name: "Read-only exploration" }),
+    ).toBeInTheDocument();
+  });
+
   it("upgrades a legacy session split URL to the shell-level workspace", async () => {
     const { router } = renderAppWithRouterAt(
       "/projects/p1/sessions/r1/compare?right=r2&mode=split&leftSection=questions&rightSection=report",

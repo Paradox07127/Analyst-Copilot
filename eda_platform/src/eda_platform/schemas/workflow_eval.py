@@ -377,7 +377,6 @@ class WorkflowEvalGraderCertificate(BaseModel):
     """Meta-eval certificate proving clean acceptance and mutation recall."""
 
     schema_version: int = 1
-    grader_id: str = "workflow-eval-hard-gates"
     protocol_digest: str
     clean_oracle_passed: bool
     mutation_recall: float = Field(ge=0.0, le=1.0)

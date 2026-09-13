@@ -24,7 +24,11 @@ from eda_platform.core.llm import (
     MalformedProviderResponseError,
     is_offline_client,
 )
-from eda_platform.core.methods import MethodGateContext, evaluate_feasibility
+from eda_platform.core.methods import (
+    MethodGateContext,
+    causal_treatment_candidate_exists,
+    evaluate_feasibility,
+)
 from eda_platform.core.semantic import SemanticSeeds, pinned_context_block
 from eda_platform.core.tool_guard import (
     GuardViolation,
@@ -702,14 +706,13 @@ def propose_llm_question_candidates(
             column_role_sets=role_sets,
             confirmed_relations=confirmed_joins,
         )
-        feasibility = evaluate_feasibility(
-            MethodGateContext(
-                profiles=profiles,
-                target_datasets=targets,
-                analysis_mode=proposal.analysis_mode,
-                target_column=proposal.target_column,
-            )
+        gate_ctx = MethodGateContext(
+            profiles=profiles,
+            target_datasets=targets,
+            analysis_mode=proposal.analysis_mode,
+            target_column=proposal.target_column,
         )
+        feasibility = evaluate_feasibility(gate_ctx)
         candidates.append(
             QuestionCandidate(
                 question_id=make_question_id(
@@ -742,8 +745,16 @@ def propose_llm_question_candidates(
                 value_category=proposal.value_category,
                 data_signal=proposal.data_signal,
                 priority_rationale=proposal.priority_rationale,
+                # A causal card runs the tier-A design check when the data has
+                # a candidate two-valued assignment column; otherwise there is
+                # nothing to contrast yet and the experiment must be designed.
                 proposed_action=(
-                    "design_experiment"
+                    (
+                        "run_analysis"
+                        if feasibility.status == "constrained"
+                        and causal_treatment_candidate_exists(gate_ctx)
+                        else "design_experiment"
+                    )
                     if proposal.analysis_mode == "causal_experiment"
                     else "collect_data"
                     if feasibility.status in {"needs_data", "unsuitable"}

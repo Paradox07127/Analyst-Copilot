@@ -327,6 +327,43 @@ describe("Questions page", () => {
     ).toBeInTheDocument();
   });
 
+  it("lets the user confirm a randomized design on causal cards only", async () => {
+    const user = userEvent.setup();
+    renderAppAt(PAGE_PATH);
+
+    await screen.findByRole("heading", { name: "Questions" });
+    const cards = screen.getAllByRole("listitem");
+    const causalCard = cards.find((card) =>
+      within(card).queryByText("Does the promo assignment raise spend?"),
+    )!;
+    const trendCard = cards.find((card) =>
+      within(card).queryByText("How is value trending over time?"),
+    )!;
+    /* The confirm surface exists exactly on the causal card. */
+    expect(
+      within(trendCard).queryByText("Randomized experiment"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(causalCard).getByText(/observational design check/),
+    ).toBeInTheDocument();
+
+    const confirmButton = within(causalCard).getByRole("button", {
+      name: "Confirm randomized assignment",
+    });
+    /* The single dataset is preselected; the column is still required. */
+    expect(confirmButton).toBeDisabled();
+    await user.type(
+      within(causalCard).getByRole("textbox", { name: "Assignment column" }),
+      "test_group",
+    );
+    await user.click(confirmButton);
+
+    const status = await within(causalCard).findByRole("status");
+    expect(status).toHaveTextContent(
+      "Randomized assignment confirmed for test_group",
+    );
+  });
+
   it("keeps free-text question drafting available when there are no suggestions", async () => {
     server.use(
       http.get("/api/v1/sessions/:sessionId/questions", ({ params }) =>

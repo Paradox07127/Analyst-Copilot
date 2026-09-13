@@ -2,7 +2,19 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, screen, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "./msw/server";
+import userEvent from "@testing-library/user-event";
 import { renderAppAt, renderAppWithRouterAt } from "./render";
+import { objectUrls } from "./setup";
+
+/* jsdom's Blob only exposes FileReader. */
+function readBlob(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(blob);
+  });
+}
 import { decisionCoverageView, findingsView } from "./msw/handlers";
 
 const PAGE_PATH = "/projects/p1/sessions/r1/findings";
@@ -541,5 +553,43 @@ describe("Decision coverage", () => {
     expect(
       screen.queryByText("Report-ready coverage"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("Findings CSV export", () => {
+  it("downloads the filtered findings list as CSV", async () => {
+    const user = userEvent.setup();
+    renderAppAt(PAGE_PATH);
+    await screen.findByRole("heading", { name: "Validated result library" });
+
+    const priorDownloads = objectUrls.created.length;
+    await user.click(
+      screen.getByRole("button", { name: "Export findings (CSV)" }),
+    );
+
+    expect(objectUrls.created.length).toBe(priorDownloads + 1);
+    const csv = await readBlob(objectUrls.created.at(-1)!);
+    const lines = csv.split(/\r?\n/);
+    expect(lines[0]).toContain("Question");
+    expect(csv).toContain("What was average order value?");
+    expect(csv).toContain("Do regions differ in revenue?");
+  });
+
+  it("exports only the findings matching the reliability filter", async () => {
+    const user = userEvent.setup();
+    renderAppAt(PAGE_PATH);
+    await screen.findByRole("heading", { name: "Validated result library" });
+    fireEvent.change(screen.getByLabelText("Analytical reliability"), {
+      target: { value: "high" },
+    });
+
+    const priorDownloads = objectUrls.created.length;
+    await user.click(
+      screen.getByRole("button", { name: "Export findings (CSV)" }),
+    );
+    const csv = await readBlob(objectUrls.created.at(-1)!);
+    expect(objectUrls.created.length).toBe(priorDownloads + 1);
+    expect(csv).toContain("What was average order value?");
+    expect(csv).not.toContain("Do regions differ in revenue?");
   });
 });

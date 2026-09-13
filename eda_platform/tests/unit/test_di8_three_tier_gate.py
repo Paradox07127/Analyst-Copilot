@@ -43,7 +43,6 @@ from eda_platform.schemas.reports import (
     ReportSeverity,
     ReportStatus,
 )
-from eda_platform.schemas.stats import StatTestResult
 from eda_platform.schemas.synthesis import SynthesisBrief, SynthesisStoryBeat
 from eda_platform.tools.evidence import (
     EvidenceAnalysisTable,
@@ -52,7 +51,6 @@ from eda_platform.tools.evidence import (
     EvidencePack,
 )
 from eda_platform.tools.loader import load_csv
-from eda_platform.tools.method_findings import stat_findings
 from eda_platform.tools.profiler import profile_dataset
 from eda_platform.tools.report_validator import (
     apply_semantic_gate,
@@ -243,44 +241,6 @@ def test_missing_role_set_defaults_to_full_weight_and_passes() -> None:
     assert claim.confidence_label == "strong"
     assert claim.gate_verdict == "pass"
     assert audit.gate_verdict == "pass"
-
-
-# --------------------------------------------------------------------------- #
-# Insight scoring = impact x significance (three observable components).
-# --------------------------------------------------------------------------- #
-def _stat_result(value_column: str) -> StatTestResult:
-    return StatTestResult(
-        dataset_id="sales.csv",
-        test_type="one_way_anova",
-        group_column="region",
-        value_column=value_column,
-        statistic=8.1,
-        p_value=0.002,
-        effect_size=0.2,
-        sample_size=120,
-    )
-
-
-def test_stat_finding_scores_identifier_column_with_zero_impact() -> None:
-    roles = _roles()
-
-    sunk = stat_findings(_stat_result("order_item_id"), "artifact", role_set=roles)[0]
-    kept = stat_findings(_stat_result("revenue"), "artifact", role_set=roles)[0]
-
-    assert sunk.score is not None and kept.score is not None
-    assert sunk.score.impact == 0.0
-    assert sunk.score.final == 0.0
-    assert kept.score.impact == 1.0
-    assert kept.score.significance == 0.998
-    assert kept.score.final == 0.998
-    # All three components are observable on the finding structure.
-    assert set(sunk.score.model_dump()) == {"impact", "significance", "final"}
-
-
-def test_stat_finding_without_role_set_keeps_full_impact() -> None:
-    finding = stat_findings(_stat_result("order_item_id"), "artifact")[0]
-    assert finding.score is not None
-    assert finding.score.impact == 1.0
 
 
 # --------------------------------------------------------------------------- #

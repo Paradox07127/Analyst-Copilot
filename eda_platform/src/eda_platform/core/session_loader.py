@@ -93,6 +93,39 @@ def load_run(project_id: str, session_id: str, *, workspace: Path | str) -> Load
     )
 
 
+# Structured conclusions only: a derived run's full trace, SQL previews and
+# receipts stay in its own session, so chat context grows by results, not by
+# transcripts.
+DERIVED_RESULT_ARTIFACT_TYPES: tuple[ArtifactType, ...] = (
+    ArtifactType.QUESTION_EXECUTION_RESULT,
+    ArtifactType.VALIDATED_FINDING,
+    ArtifactType.STAT_TEST_RESULT,
+)
+
+
+def load_derived_result_artifacts(
+    store: ArtifactStore, *, project_id: str, session_id: str
+) -> list[Artifact]:
+    """Result artifacts from runs derived from this session (question
+    executions and the like), best-effort: an unreadable derived run is
+    skipped, never fatal to the caller's own session."""
+    collected: list[Artifact] = []
+    for info in store.list_sessions(project_id):
+        if info.session_id == session_id or info.source_session_id != session_id:
+            continue
+        try:
+            collected.extend(
+                store.list_indexed_artifacts(
+                    project_id=project_id,
+                    session_id=info.session_id,
+                    artifact_types=DERIVED_RESULT_ARTIFACT_TYPES,
+                )
+            )
+        except (OSError, ValueError):
+            continue
+    return collected
+
+
 def _report_markdown(artifacts: list[Artifact], session_dir: Path, warnings: list[str]) -> str:
     for artifact in artifacts:
         if artifact.type is ArtifactType.MARKDOWN_REPORT:

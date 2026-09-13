@@ -9,12 +9,15 @@
 import { useEffect, useState } from "react";
 import {
   JOB_KIND_ACTIVITY,
+  jobFailure,
+  jobResourceLimit,
   phaseProgress,
   TERMINAL_PHASES,
   type JobEventsState,
   type PhaseProgress,
   type PhaseState,
 } from "../../api/job-events";
+import { ResourceLimitLine } from "../../components/resource-limit-notice";
 import { Marquee, formatDuration } from "../../components/ui";
 
 const SEGMENT: Record<PhaseState, string> = {
@@ -109,12 +112,9 @@ function SingleStepProgress({
   const activity =
     (kind && JOB_KIND_ACTIVITY[kind]) ?? "Working on this session";
 
-  /* No per-investigation breakdown here on purpose. investigation_started /
-   * _completed are written to `plan_session_id`
-   * (drivers/investigation_orchestrator.py), while the SSE stream is filtered
-   * to the job's own derived run — whose docstring says it "only carries the
-   * lifecycle" (worker/runner.py _run_investigation_execute_job). Those frames
-   * therefore never reach this client, so rendering them would be dead code. */
+  /* No per-step breakdown here on purpose: the SSE stream is filtered to the
+   * job's own derived run, which only carries the lifecycle, so step frames
+   * written to other runs never reach this client. */
   return (
     <div className="flex flex-col gap-1.5">
       <p role="status" className="flex items-center gap-2 text-xs">
@@ -133,8 +133,31 @@ function SingleStepProgress({
           {running ? "…" : ""}
         </span>
       </p>
+      <FailureReason job={job} />
+      <ResourceLimitReason job={job} />
     </div>
   );
+}
+
+/* The worker's human sentence for a run that stopped — the red segment alone
+ * says only that something failed, never what or what to do about it. */
+function FailureReason({ job }: { job: JobEventsState }) {
+  const failure = jobFailure(job);
+  if (!failure) return null;
+  return (
+    <p role="alert" className="text-xs leading-5 text-status-critical">
+      {failure.message}
+    </p>
+  );
+}
+
+/* Separate from FailureReason on purpose: a resource-limited run did not fail.
+ * It finished the job it was given and declined to start the analysis, so it
+ * gets the caution colour and a way forward rather than an error. */
+function ResourceLimitReason({ job }: { job: JobEventsState }) {
+  const limit = jobResourceLimit(job);
+  if (!limit) return null;
+  return <ResourceLimitLine limit={limit} />;
 }
 
 /* Undefined kind means the job-status fetch has not landed yet, and this now
@@ -218,6 +241,8 @@ function PhaseStrip({ job }: { job: JobEventsState }) {
           )}
         </p>
       )}
+      <FailureReason job={job} />
+      <ResourceLimitReason job={job} />
     </div>
   );
 }

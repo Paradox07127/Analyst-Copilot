@@ -312,7 +312,7 @@ def test_exploratory_qexec_claims_labeled_by_evidence_strength(tmp_path: Path) -
     assert analysis.claims
     assert all(claim.confidence_label == "indicative" for claim in analysis.claims)
     markdown = report_bundle_to_markdown(result.bundle, artifacts=artifacts)
-    assert "[Indicative]" in markdown
+    assert "[Suggestive, not conclusive]" in markdown
 
 
 def test_llm_focus_claims_are_dropped_with_trace(

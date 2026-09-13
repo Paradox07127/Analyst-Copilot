@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useParams } from "react-router";
+import { useLocation, useNavigate, useParams } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -432,7 +432,26 @@ export function Component() {
     .filter((name): name is string => Boolean(name));
   const [turn, setTurn] = useState<ChatMessageAccepted | null>(null);
   const [draft, setDraft] = useState("");
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  /* An "Ask about this" jump from the Report or Findings page arrives with a
+   * prefilled draft in route state. Consume it once — the user edits and sends
+   * it themselves — and strip the state so back/refresh does not reseed. */
+  useEffect(() => {
+    const state = location.state as { chatDraft?: string } | null;
+    if (typeof state?.chatDraft === "string" && state.chatDraft) {
+      setDraft(state.chatDraft);
+      void navigate(location.pathname + location.search, {
+        replace: true,
+        state: null,
+      });
+    }
+  }, [location, navigate]);
   const [llmMode, setLlmMode] = useState<"env" | "offline">("env");
+  /* Collapsed by default: choosing the answer engine is a debugging affordance,
+   * not part of asking a question. */
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const sandbox = useSandboxStatus();
   const stream = useChatStream(turn?.message_id ?? null, turn?.stream_url ?? null);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -477,6 +496,13 @@ export function Component() {
     setShowJumpToLatest(!nearLatest);
   }, []);
 
+  /* Cooperative stop: the backend flags the in-flight turn, the tool loop
+   * halts at its next checkpoint, and the stream then delivers the recorded
+   * "stopped" message — which is what re-enables the input. */
+  const stop = useMutation({
+    mutationFn: () => api.cancelChatTurn(sessionId),
+  });
+
   const send = useMutation({
     mutationFn: (text: string) =>
       api.sendChatMessage(sessionId, { text, llm: llmMode }),
@@ -486,6 +512,7 @@ export function Component() {
       setShowJumpToLatest(false);
       setTurn(accepted);
       setDraft("");
+      stop.reset();
       refreshTranscript();
     },
   });
@@ -765,19 +792,41 @@ export function Component() {
           >
             {busy ? "Streaming…" : "Send"}
           </button>
-          <label className="flex items-center gap-1 text-xs text-status-neutral">
-            LLM mode
-            <select
-              value={llmMode}
-              onChange={(event) =>
-                setLlmMode(event.target.value as "env" | "offline")
-              }
-              className="rounded-base border border-border bg-surface px-1.5 py-1 text-xs"
+          {busy && (
+            <button
+              type="button"
+              onClick={() => stop.mutate()}
+              disabled={stop.isPending || stop.isSuccess}
+              className="rounded-base border border-status-critical/50 px-3 py-1.5 text-sm font-medium text-status-critical hover:bg-status-critical/10 disabled:opacity-60"
             >
-              <option value="env">env (live model)</option>
-              <option value="offline">offline</option>
-            </select>
-          </label>
+              {stop.isPending || stop.isSuccess ? "Stopping…" : "Stop"}
+            </button>
+          )}
+          <button
+            type="button"
+            aria-expanded={optionsOpen}
+            onClick={() => setOptionsOpen((current) => !current)}
+            className="ml-auto rounded-base px-2 py-1 text-xs text-status-neutral hover:bg-surface hover:text-text"
+          >
+            Options
+          </button>
+          {optionsOpen && (
+            <label className="flex items-center gap-1 text-xs text-status-neutral">
+              Answers
+              <select
+                aria-label="Answers"
+                value={llmMode}
+                onChange={(event) =>
+                  setLlmMode(event.target.value as "env" | "offline")
+                }
+                title="Offline answers use only deterministic SQL — no model is called and nothing is billed."
+                className="rounded-base border border-border bg-surface px-1.5 py-1 text-xs"
+              >
+                <option value="env">Live model</option>
+                <option value="offline">Offline (no model calls)</option>
+              </select>
+            </label>
+          )}
         </div>
         {/* Open-ended Python analysis needs a safe sandbox backend; without one
          * the agent refuses those requests rather than running them unprotected.

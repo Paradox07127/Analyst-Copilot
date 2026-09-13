@@ -253,3 +253,36 @@ describe("Project list with real API", () => {
     expect(within(recent).queryByText("Recent session 7")).not.toBeInTheDocument();
   });
 });
+
+describe("Projects beyond the visible limit", () => {
+  const manyProjects = [
+    { project_id: "p1", name: "Project p1", session_count: 3 },
+    { project_id: "p2", name: "Project p2", session_count: 2 },
+    { project_id: "p3", name: "Project p3", session_count: 1 },
+    { project_id: "p4", name: "Project p4", session_count: 0 },
+  ];
+
+  it("expands the hidden projects on click and can collapse them again", async () => {
+    server.use(
+      http.get("/api/v1/projects", () => HttpResponse.json(manyProjects)),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects");
+    const aside = within(
+      await screen.findByRole("complementary", {
+        name: "Recent projects and sessions",
+      }),
+    );
+    await aside.findByText("Project p1");
+
+    expect(aside.queryByText("Project p3")).not.toBeInTheDocument();
+    await user.click(
+      aside.getByRole("button", { name: "Show 2 more projects" }),
+    );
+
+    expect(aside.getByText("Project p3")).toBeInTheDocument();
+    expect(aside.getByText("Project p4")).toBeInTheDocument();
+    await user.click(aside.getByRole("button", { name: "Show fewer projects" }));
+    expect(aside.queryByText("Project p3")).not.toBeInTheDocument();
+  });
+});

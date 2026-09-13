@@ -92,6 +92,44 @@ describe("Session rail search", () => {
     expect(queries.filter(Boolean)).toEqual(["churn"]);
   });
 
+  it("hides derived runs by default and requests them when toggled on", async () => {
+    const flags: (string | null)[] = [];
+    server.use(
+      NO_STANDALONE,
+      http.get("/api/v1/projects/:projectId/sessions", ({ request }) => {
+        flags.push(new URL(request.url).searchParams.get("include_derived"));
+        return HttpResponse.json({ items: [], next_cursor: null });
+      }),
+    );
+    renderAppAt("/projects");
+    const toggle = await screen.findByRole("checkbox", {
+      name: "Show derived runs",
+    });
+    expect(toggle).not.toBeChecked();
+    await waitFor(() => expect(flags.length).toBeGreaterThan(0));
+    expect(flags.every((flag) => flag === null)).toBe(true);
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(flags).toContain("true"));
+  });
+
+  it("says when no session matches the search term", async () => {
+    server.use(
+      NO_STANDALONE,
+      http.get("/api/v1/projects/:projectId/sessions", () =>
+        HttpResponse.json({ items: [], next_cursor: null }),
+      ),
+    );
+    renderAppAt("/projects");
+    fireEvent.click(await screen.findByRole("button", { name: "Search sessions" }));
+    const search = await screen.findByRole("searchbox", { name: "Search sessions" });
+    fireEvent.change(search, { target: { value: "zzz-no-such-session" } });
+
+    expect(
+      await screen.findByText(/No sessions match/),
+    ).toBeInTheDocument();
+  });
+
   it("clearing the box restores the unfiltered list", async () => {
     renderAppAt("/projects");
     fireEvent.click(await screen.findByRole("button", { name: "Search sessions" }));

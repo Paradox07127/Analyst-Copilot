@@ -26,6 +26,7 @@ import type {
   SkillReplayPrepared,
   SkillReplayStarted,
   SkillsView,
+  SkillTemplatesView,
   ChartPage,
   ChartSummary,
   ChartView,
@@ -39,9 +40,6 @@ import type {
   ProfilesView,
   ProjectSummary,
   QualityView,
-  InvestigationDecisionPrepared,
-  InvestigationPlanView,
-  InvestigationsView,
   QuestionExecutionPrepared,
   QuestionExecutionStarted,
   QuestionsView,
@@ -428,6 +426,28 @@ export function questionsView(sessionId: string): QuestionsView {
         feasibility_status: "constrained",
         proposed_action: "run_analysis",
         priority: 0.55,
+        exploratory: true,
+        target_datasets: ["sample.csv"],
+        business_decision: "",
+        executable: true,
+        card_version: 1,
+        value_hypothesis: "",
+        success_criterion: "",
+        data_signal: "",
+        priority_rationale: "",
+        risks: [],
+        data_requirements: [],
+        execution: null,
+      },
+      {
+        question_id: "q_causal",
+        question: "Does the promo assignment raise spend?",
+        origin: "llm",
+        analysis_mode: "causal_experiment",
+        value_category: null,
+        feasibility_status: "constrained",
+        proposed_action: "run_analysis",
+        priority: 0.5,
         exploratory: true,
         target_datasets: ["sample.csv"],
         business_decision: "",
@@ -936,6 +956,46 @@ export function skillsView(sessionId: string): SkillsView {
   };
 }
 
+export function skillTemplatesView(projectId: string): SkillTemplatesView {
+  return {
+    project_id: projectId,
+    templates: [
+      {
+        template_id: "group_value_comparison",
+        source: "builtin",
+        name: "Group totals and averages",
+        question: "How does {value_col} vary across {group_col} segments?",
+        sql: "SELECT {group_col}, SUM({value_col}) FROM {dataset} GROUP BY 1",
+        method: "aggregation",
+        rationale: "Totals per segment answer contribution questions.",
+        params: [
+          { name: "group_col", role: "dimension", description: "" },
+          { name: "value_col", role: "measure", description: "" },
+        ],
+        when_to_use: "",
+        when_not_to_use: "",
+      },
+      {
+        template_id: "user_tmpl_1",
+        source: "user",
+        name: "Share per category",
+        question: "What share of {value_col} does each {group_col} hold?",
+        sql:
+          "SELECT {group_col}, SUM({value_col}) * 1.0 / SUM(SUM({value_col})) " +
+          "OVER () AS share FROM {dataset} GROUP BY 1",
+        method: "windowed share",
+        rationale: "A window total turns sums into shares in one pass.",
+        params: [
+          { name: "group_col", role: "dimension", description: "" },
+          { name: "value_col", role: "measure", description: "" },
+        ],
+        when_to_use: "",
+        when_not_to_use: "",
+      },
+    ],
+  };
+}
+
 export function relationshipGraph(sessionId: string): RelationshipGraphView {
   return {
     session_id: sessionId,
@@ -1223,6 +1283,8 @@ export function runMetricsView(sessionId: string): SessionMetricsView {
     source: "artifact",
     llm_calls: 22,
     tool_calls: 4,
+    trace_tool_calls: 4,
+    artifact_tool_calls: 0,
     total_tokens: 68868,
     prompt_tokens: 33625,
     completion_tokens: 35243,
@@ -1251,6 +1313,8 @@ export function runMetricsView(sessionId: string): SessionMetricsView {
     event_count: 194,
     trace_status: "verified",
     failures_count: 0,
+    trace_failures_count: 0,
+    question_failures_count: 0,
     findings_count: 3,
     report_gate_verdict: "pass",
     publication_readiness: "analysis_available",
@@ -1283,9 +1347,6 @@ export function runMetricsView(sessionId: string): SessionMetricsView {
     findings_dedup_merged: 0,
     domain_metric_questions: 0,
     domain_metrics_skipped: 0,
-    macro_loop_rounds: 0,
-    macro_loop_new_findings: 0,
-    macro_loop_discard_rounds: 0,
     question_answered: 0,
     question_abstained: 0,
     question_failed: 0,
@@ -1320,6 +1381,10 @@ export function runMetricsView(sessionId: string): SessionMetricsView {
     ],
     artifact_counts: { ChartSpec: 12 },
     generated_at: "2026-07-25T03:41:00Z",
+    exploration_runs: 0,
+    exploration_llm_calls: 0,
+    exploration_total_tokens: 0,
+    exploration_est_cost_usd: null,
   };
 }
 
@@ -1361,6 +1426,7 @@ export function customChartView(
         ],
       },
     },
+    saved_chart_id: body.save_to_charts ? "chart_saved_1" : null,
   };
 }
 
@@ -1897,6 +1963,8 @@ export function defaultSettings(): SettingsView {
     usd_per_1k_prompt: 0,
     usd_per_1k_completion: 0,
     analysis_depth: 0,
+    max_working_set_bytes: 2 * 1024 ** 3,
+    max_rows_per_dataset: 10_000_000,
     dev_mode: false,
     api_key_set: false,
     api_key_last4: "",
@@ -1931,98 +1999,6 @@ let settingsState: SettingsView = defaultSettings();
 
 export function resetSettingsState(): void {
   settingsState = defaultSettings();
-}
-
-/* Investigation governance fixtures: one plan in each lifecycle state so the
- * panel's pending / approved / outcome sections all render from defaults. */
-export const SAMPLE_PLAN_ID = "invplan_pending";
-export const SAMPLE_PLAN_RUN_ID = "investigation_20260725_000000_000000_abcd1234";
-
-function planView(
-  overrides: Partial<InvestigationPlanView> & { plan_id: string },
-): InvestigationPlanView {
-  return {
-    plan_session_id: SAMPLE_PLAN_RUN_ID,
-    investigation_id: `inv_${overrides.plan_id}`,
-    question_id: "q_trend",
-    question: "How is value trending over time?",
-    method_family: "descriptive_analysis",
-    method_recipe: "read-only aggregate over the approved scope",
-    card_version: 1,
-    status: "pending",
-    plan_status: "planned",
-    execution_ready: true,
-    allowed_tools: ["sql_select"],
-    target_datasets: ["sample.csv"],
-    method_requirements: [],
-    validation_gates: [
-      { name: "scope", status: "passed", reason: "Limited to the named datasets." },
-    ],
-    candidate_fingerprint: "f".repeat(64),
-    deep_investigation: false,
-    decision_reason: "",
-    outcome_status: null,
-    outcome_reason: "",
-    finding_texts: [],
-    report_readiness: null,
-    can_approve: false,
-    can_reject: false,
-    can_execute: false,
-    ...overrides,
-  };
-}
-
-export function investigationsView(
-  sessionId: string,
-  overrides: Partial<InvestigationsView> = {},
-): InvestigationsView {
-  return {
-    session_id: sessionId,
-    project_id: "p1",
-    analysis_depth: 0,
-    deep_investigation_enabled: false,
-    macro_loop_authorized: false,
-    plans: [
-      planView({ plan_id: SAMPLE_PLAN_ID, can_approve: true, can_reject: true }),
-      planView({
-        plan_id: "invplan_approved",
-        question: "What is total value by segment?",
-        status: "approved",
-        decision_reason: "Reviewed by the analyst.",
-        can_execute: true,
-      }),
-      planView({
-        plan_id: "invplan_executed",
-        question: "How large is the seasonal swing?",
-        status: "executed",
-        outcome_status: "validated",
-        outcome_reason: "Gates passed.",
-        finding_texts: ["Q4 value is 18% above the yearly mean."],
-        report_readiness: "eligible_with_limitations",
-      }),
-    ],
-    macro_loops: [],
-    ...overrides,
-  };
-}
-
-export function investigationDecisionPrepared(
-  sessionId: string,
-  planId: string,
-  decision: "approved" | "rejected",
-  reason = "",
-): InvestigationDecisionPrepared {
-  return {
-    session_id: sessionId,
-    plan_id: planId,
-    plan_session_id: SAMPLE_PLAN_RUN_ID,
-    decision,
-    reason,
-    action_hash: SAMPLE_ACTION_HASH,
-    approval_token: SAMPLE_APPROVAL_TOKEN,
-    expires_at: "2026-07-25T12:00:00Z",
-    plan: planView({ plan_id: planId, can_approve: true, can_reject: true }),
-  };
 }
 
 export const defaultHandlers = [
@@ -2313,6 +2289,15 @@ export const defaultHandlers = [
     ),
   ),
 
+  /* Server-side Activity recovery: empty by default so tests opt in to
+   * sessions that actually have background jobs. */
+  http.get("/api/v1/sessions/:sessionId/jobs", ({ params }) =>
+    HttpResponse.json({
+      session_id: String(params["sessionId"]),
+      jobs: [],
+    }),
+  ),
+
   http.get("/api/v1/jobs/:jobId", ({ params }) => {
     const jobId = String(params["jobId"]);
     const failure = dataOperationFailures.get(jobId);
@@ -2381,6 +2366,26 @@ export const defaultHandlers = [
 
   http.get("/api/v1/sessions/:sessionId/questions", ({ params }) =>
     HttpResponse.json(questionsView(String(params["sessionId"]))),
+  ),
+
+  http.post(
+    "/api/v1/sessions/:sessionId/experiment-designs/confirm",
+    async ({ params, request }) => {
+      const body = (await request.json()) as {
+        dataset_id: string;
+        treatment_column: string;
+      };
+      return HttpResponse.json(
+        {
+          session_id: String(params["sessionId"]),
+          dataset_id: body.dataset_id,
+          treatment_column: body.treatment_column,
+          credential_id: "c".repeat(64),
+          expires_at: "2026-08-26T12:00:00Z",
+        },
+        { status: 201 },
+      );
+    },
   ),
 
   http.post(
@@ -2511,6 +2516,79 @@ export const defaultHandlers = [
   http.delete(
     "/api/v1/projects/:projectId/skills/:skillId",
     () => new HttpResponse(null, { status: 204 }),
+  ),
+
+  http.get("/api/v1/projects/:projectId/skill-templates", ({ params }) =>
+    HttpResponse.json(skillTemplatesView(String(params["projectId"]))),
+  ),
+
+  http.post("/api/v1/projects/:projectId/skill-templates", async ({ request }) => {
+    const body = (await request.json()) as {
+      name: string;
+      question: string;
+      sql: string;
+      method: string;
+      rationale: string;
+      params: { name: string; role: string }[];
+    };
+    return HttpResponse.json(
+      {
+        template_id: "user_tmpl_new",
+        source: "user",
+        name: body.name,
+        question: body.question,
+        sql: body.sql,
+        method: body.method,
+        rationale: body.rationale,
+        params: body.params.map((param) => ({ ...param, description: "" })),
+        when_to_use: "",
+        when_not_to_use: "",
+      },
+      { status: 201 },
+    );
+  }),
+
+  http.delete(
+    "/api/v1/projects/:projectId/skill-templates/:templateId",
+    () => new HttpResponse(null, { status: 204 }),
+  ),
+
+  http.post(
+    "/api/v1/sessions/:sessionId/skill-templates/:templateId/import",
+    async ({ request }) => {
+      const body = (await request.json()) as {
+        bindings: Record<string, string>;
+        name?: string;
+      };
+      return HttpResponse.json(
+        {
+          skill: {
+            skill_id: "skill_imported_template",
+            source: "library",
+            name: body.name || "Share per category",
+            description: "From template 'user_tmpl_1' on sample.",
+            question: "What share of value does each name hold?",
+            sql:
+              "SELECT name, SUM(value) * 1.0 / SUM(SUM(value)) OVER () AS share " +
+              "FROM sample GROUP BY 1",
+            method: "windowed share",
+            param_columns: Object.values(body.bindings),
+            expected_datasets: ["sample"],
+            params: [],
+            source_session_id: null,
+            created_at: "2026-08-25T09:00:00Z",
+          },
+          row_count: 2,
+          columns: ["name", "share"],
+          rows_preview: [
+            { name: "alpha", share: 0.75 },
+            { name: "beta", share: 0.25 },
+          ],
+          truncated: false,
+        },
+        { status: 201 },
+      );
+    },
   ),
 
   http.get("/api/v1/sessions/:sessionId/relationships", ({ params }) =>
@@ -2652,6 +2730,14 @@ export const defaultHandlers = [
 
   http.get("/api/v1/sessions/:sessionId/chat/pending-plans", ({ params }) =>
     HttpResponse.json({ session_id: String(params["sessionId"]), plans: [] }),
+  ),
+
+  http.post("/api/v1/sessions/:sessionId/chat/cancel", ({ params }) =>
+    HttpResponse.json({
+      session_id: String(params["sessionId"]),
+      message_id: "msg_1",
+      cancel_requested: true,
+    }),
   ),
 
   http.post("/api/v1/sessions/:sessionId/chat/plans/:planId/approve", ({ params }) =>
@@ -2873,6 +2959,12 @@ export const defaultHandlers = [
         ? { usd_per_1k_completion: patch.usd_per_1k_completion }
         : {}),
       ...(patch.dev_mode != null ? { dev_mode: patch.dev_mode } : {}),
+      ...(patch.max_working_set_bytes != null
+        ? { max_working_set_bytes: patch.max_working_set_bytes }
+        : {}),
+      ...(patch.max_rows_per_dataset != null
+        ? { max_rows_per_dataset: patch.max_rows_per_dataset }
+        : {}),
       ...(key ? { api_key_set: true, api_key_last4: key.slice(-4) } : {}),
       ...(patch.clear_api_key ? { api_key_set: false, api_key_last4: "" } : {}),
       source: "session",
@@ -2934,12 +3026,14 @@ export const defaultHandlers = [
     } satisfies SandboxStatusView),
   ),
 
+  http.get("/api/v1/sessions/:sessionId/explorations", () =>
+    HttpResponse.json({ explorations: [] }),
+  ),
+
   http.get("/api/v1/system/capabilities", () =>
     HttpResponse.json({
       pdf_export_available: true,
       pdf_export_hint: "",
-      exploration_available: false,
-      exploration_hint: "Exploration release is not installed.",
     } satisfies SystemCapabilitiesView),
   ),
 
@@ -2979,146 +3073,6 @@ export const defaultHandlers = [
     supportDocs.splice(index, 1);
     return new HttpResponse(null, { status: 204 });
   }),
-
-  http.get("/api/v1/sessions/:sessionId/investigations", ({ params }) =>
-    HttpResponse.json(investigationsView(String(params["sessionId"]))),
-  ),
-
-  http.post("/api/v1/sessions/:sessionId/investigations/plan", ({ params }) =>
-    HttpResponse.json(
-      {
-        session_id: String(params["sessionId"]),
-        execution_session_id: "ipsess_1",
-        question_ids: ["q_trend"],
-        deep: false,
-        job: {
-          job_id: "job_plan_1",
-          session_id: "ipsess_1",
-          status: "queued",
-          events_url: "/api/v1/jobs/job_plan_1/events",
-        },
-      },
-      { status: 201 },
-    ),
-  ),
-
-  http.post(
-    "/api/v1/sessions/:sessionId/investigations/:planId/prepare-decision",
-    async ({ params, request }) => {
-      const body = (await request.json().catch(() => null)) as {
-        decision?: "approved" | "rejected";
-        reason?: string;
-      } | null;
-      return HttpResponse.json(
-        investigationDecisionPrepared(
-          String(params["sessionId"]),
-          String(params["planId"]),
-          body?.decision ?? "approved",
-          body?.reason ?? "",
-        ),
-      );
-    },
-  ),
-
-  http.post("/api/v1/sessions/:sessionId/investigations/:planId/approve", ({ params }) =>
-    HttpResponse.json({
-      session_id: String(params["sessionId"]),
-      plan_id: String(params["planId"]),
-      decision: "approved",
-      approval_artifact_id: "invappr_1",
-      plan: planView({ plan_id: String(params["planId"]), status: "approved" }),
-    }),
-  ),
-
-  http.post("/api/v1/sessions/:sessionId/investigations/:planId/reject", ({ params }) =>
-    HttpResponse.json({
-      session_id: String(params["sessionId"]),
-      plan_id: String(params["planId"]),
-      decision: "rejected",
-      approval_artifact_id: "invappr_2",
-      plan: planView({ plan_id: String(params["planId"]), status: "rejected" }),
-    }),
-  ),
-
-  http.post(
-    "/api/v1/sessions/:sessionId/investigations/prepare-execute",
-    async ({ params, request }) => {
-      const body = (await request.json().catch(() => null)) as {
-        plan_ids?: string[];
-        llm?: string;
-      } | null;
-      return HttpResponse.json({
-        session_id: String(params["sessionId"]),
-        plan_session_id: SAMPLE_PLAN_RUN_ID,
-        plan_ids: body?.plan_ids ?? [],
-        action_hash: SAMPLE_ACTION_HASH,
-        approval_token: SAMPLE_APPROVAL_TOKEN,
-        expires_at: "2026-07-25T12:00:00Z",
-        llm_mode: body?.llm ?? "env",
-        plans: (body?.plan_ids ?? []).map((planId) =>
-          planView({ plan_id: planId, status: "approved", can_execute: true }),
-        ),
-      });
-    },
-  ),
-
-  http.post("/api/v1/sessions/:sessionId/investigations/execute", ({ params }) =>
-    HttpResponse.json(
-      {
-        session_id: String(params["sessionId"]),
-        plan_session_id: SAMPLE_PLAN_RUN_ID,
-        execution_session_id: "ixsess_1",
-        plan_ids: ["invplan_approved"],
-        job: {
-          job_id: "job_exec_1",
-          session_id: "ixsess_1",
-          status: "queued",
-          events_url: "/api/v1/jobs/job_exec_1/events",
-        },
-      },
-      { status: 201 },
-    ),
-  ),
-
-  http.post(
-    "/api/v1/sessions/:sessionId/investigations/prepare-macro-loop",
-    async ({ params, request }) => {
-      const body = (await request.json().catch(() => null)) as {
-        plan_session_id?: string;
-        llm?: string;
-      } | null;
-      return HttpResponse.json({
-        session_id: String(params["sessionId"]),
-        plan_session_id: body?.plan_session_id ?? SAMPLE_PLAN_RUN_ID,
-        action_hash: SAMPLE_ACTION_HASH,
-        approval_token: SAMPLE_APPROVAL_TOKEN,
-        expires_at: "2026-07-25T12:00:00Z",
-        depth: 2,
-        rounds_cap: 1,
-        questions_per_round: 4,
-        llm_mode: body?.llm ?? "env",
-      });
-    },
-  ),
-
-  http.post("/api/v1/sessions/:sessionId/investigations/macro-loop", ({ params }) =>
-    HttpResponse.json(
-      {
-        session_id: String(params["sessionId"]),
-        plan_session_id: SAMPLE_PLAN_RUN_ID,
-        execution_session_id: "mlsess_1",
-        depth: 2,
-        rounds_cap: 1,
-        job: {
-          job_id: "job_loop_1",
-          session_id: "mlsess_1",
-          status: "queued",
-          events_url: "/api/v1/jobs/job_loop_1/events",
-        },
-      },
-      { status: 201 },
-    ),
-  ),
 
   http.patch(
     "/api/v1/sessions/:sessionId/questions/:questionId",

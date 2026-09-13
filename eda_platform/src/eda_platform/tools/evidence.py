@@ -13,6 +13,7 @@ from eda_platform.schemas.artifacts import (
 )
 from eda_platform.schemas.charts import ChartSpec
 from eda_platform.schemas.model_card import ModelCard
+from eda_platform.schemas.receipts import load_verified_receipt
 from eda_platform.schemas.stats import StatTestResult
 
 PayloadPolicy = Literal["schema_only", "schema+aggregates", "schema+aggregates+sample"]
@@ -89,6 +90,23 @@ class EvidenceStatTest(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class EvidenceReceiptNumber(BaseModel):
+    """One verifiable numeric value carried by a persisted evidence receipt."""
+
+    locator: str
+    value: float
+    unit: Literal["raw", "percent"] = "raw"
+    policy: Literal["exact", "rounded"] = "rounded"
+    threshold_subject: str | None = None
+
+
+class EvidenceReceiptFacts(BaseModel):
+    artifact_id: str
+    receipt_id: str
+    tool_name: str
+    values: list[EvidenceReceiptNumber] = Field(default_factory=list)
+
+
 class EvidenceModelCard(BaseModel):
     artifact_id: str
     dataset_id: str
@@ -110,6 +128,7 @@ class EvidencePack(BaseModel):
     charts: list[EvidenceChart] = Field(default_factory=list)
     stat_tests: list[EvidenceStatTest] = Field(default_factory=list)
     model_cards: list[EvidenceModelCard] = Field(default_factory=list)
+    receipts: list[EvidenceReceiptFacts] = Field(default_factory=list)
 
     @property
     def quality_issue_count(self) -> int:
@@ -225,6 +244,10 @@ def build_evidence_pack(
                     warnings=[warning.code for warning in result.warnings],
                 )
             )
+        elif artifact.type is ArtifactType.EVIDENCE_RECEIPT and payload_policy != "schema_only":
+            receipt_facts = _receipt_facts(artifact)
+            if receipt_facts is not None:
+                pack.receipts.append(receipt_facts)
         elif artifact.type is ArtifactType.MODEL_CARD and payload_policy != "schema_only":
             card = ModelCard.model_validate(artifact.payload)
             pack.model_cards.append(
@@ -241,6 +264,98 @@ def build_evidence_pack(
                 )
             )
     return pack
+
+
+_RECEIPT_THRESHOLD_SUBJECTS = {
+    "p_value": "p_value",
+    "test_statistic": "test_statistic",
+    "effect_size": "effect_size",
+}
+
+
+def _receipt_facts(artifact: Artifact) -> EvidenceReceiptFacts | None:
+    """Pre-resolve a receipt's verifiable numbers; a payload that fails digest
+    verification contributes nothing (claims citing it stay unverified)."""
+    # Function-level import: module-level would close the cycle
+    # evidence -> claim_gates -> report_validator -> evidence.
+    from eda_platform.core.claim_gates import (  # noqa: PLC0415
+        DerivationRecomputeError,
+        recompute_derivation,
+    )
+
+    try:
+        receipt = load_verified_receipt(artifact.payload)
+    except (ValueError, TypeError):
+        return None
+    values: list[EvidenceReceiptNumber] = []
+    facts_by_id = {fact.fact_id: fact for fact in receipt.facts}
+    for fact in receipt.facts:
+        if fact.value_type not in {"number", "count", "percent"}:
+            continue
+        if isinstance(fact.value, bool) or not isinstance(fact.value, int | float):
+            continue
+        values.append(
+            EvidenceReceiptNumber(
+                locator=f"facts.{fact.fact_id}",
+                value=float(fact.value),
+                unit="percent" if fact.value_type == "percent" else "raw",
+                policy=(
+                    "exact"
+                    if fact.value_type == "count" or isinstance(fact.value, int)
+                    else "rounded"
+                ),
+            )
+        )
+    for derivation in receipt.derivations:
+        try:
+            value, is_percent = recompute_derivation(derivation, facts_by_id)
+        except DerivationRecomputeError:
+            continue
+        values.append(
+            EvidenceReceiptNumber(
+                locator=f"derivations.{derivation.derived_fact_id}",
+                value=value,
+                unit="percent" if is_percent else "raw",
+                policy="rounded",
+            )
+        )
+    statistics = receipt.statistics
+    if statistics is not None:
+        for name in (
+            "test_statistic",
+            "p_value",
+            "adjusted_p_value",
+            "effect_size",
+            "ci_low",
+            "ci_high",
+        ):
+            value = getattr(statistics, name)
+            if value is None:
+                continue
+            values.append(
+                EvidenceReceiptNumber(
+                    locator=f"statistics.{name}",
+                    value=float(value),
+                    unit="raw",
+                    policy="rounded",
+                    threshold_subject=_RECEIPT_THRESHOLD_SUBJECTS.get(name),
+                )
+            )
+        if statistics.sample_size is not None:
+            values.append(
+                EvidenceReceiptNumber(
+                    locator="statistics.sample_size",
+                    value=float(statistics.sample_size),
+                    unit="raw",
+                    policy="exact",
+                )
+            )
+    return EvidenceReceiptFacts(
+        artifact_id=artifact.id,
+        receipt_id=receipt.receipt_id,
+        tool_name=receipt.tool_name,
+        values=values,
+    )
 
 
 def _summarize_artifact(artifact: Artifact) -> EvidenceArtifactSummary:

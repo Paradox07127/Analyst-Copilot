@@ -20,6 +20,7 @@ from eda_platform.application.dto import (
     QuestionExecutionStarted,
     QuestionSummary,
     QuestionsView,
+    RandomizedDesignConfirmed,
 )
 from eda_platform.application.services.question_service import (
     QuestionService,
@@ -108,6 +109,14 @@ class QuestionCardEditRequest(BaseModel):
     data_requirements: list[str] | None = None
 
 
+class RandomizedDesignConfirmRequest(BaseModel):
+    """The user's explicit declaration that assignment in this column was
+    randomized; it cannot be inferred from the data or set by the agent."""
+
+    dataset_id: str = Field(min_length=1)
+    treatment_column: str = Field(min_length=1)
+
+
 class QuestionDraftPrepareRequest(BaseModel):
     question: str = Field(min_length=1)
     llm: Literal["env", "offline"] = "env"
@@ -139,6 +148,24 @@ def edit_question_card(
             exclude={"expected_version"}, exclude_unset=True, exclude_none=True
         ),
         expected_version=body.expected_version,
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/experiment-designs/confirm",
+    status_code=201,
+    response_model=RandomizedDesignConfirmed,
+)
+def confirm_randomized_design(
+    session_id: str,
+    body: RandomizedDesignConfirmRequest,
+    request: Request,
+) -> RandomizedDesignConfirmed:
+    """Issue the credential that admits run_causal_experiment's randomized tier."""
+    return _service(request).confirm_randomized_design(
+        session_id,
+        dataset_id=body.dataset_id,
+        treatment_column=body.treatment_column,
     )
 
 

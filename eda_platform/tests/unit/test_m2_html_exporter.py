@@ -67,7 +67,7 @@ def test_export_report_html_marks_unverified_claims_like_markdown() -> None:
     html = export_report_html(bundle)
     narrative, _, ledger = html.partition("Claim Ledger")
 
-    assert "[Unverified figures] Revenue is 120." in narrative
+    assert "[Figures not re-checked] Revenue is 120." in narrative
     assert "<th>Numeric</th>" in ledger
     assert "<td>unverified</td>" in ledger
 

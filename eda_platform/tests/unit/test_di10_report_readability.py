@@ -515,8 +515,10 @@ def test_same_finding_four_places_renders_one_full_statement() -> None:
     # Exactly one full statement of the finding survives in the narrative.
     assert narrative.count("473") == 1
     assert "The analysis identified 473 late orders" in narrative
-    # Other sections carry at most a short cross-reference.
-    assert 'See "Business Findings" for the full statement' in narrative
+    # T15-e: the other sections drop the repeat outright. A cross-reference
+    # bullet used to stand in ('See "Business Findings" for the full
+    # statement'), which is a list item that carries no finding.
+    assert "for the full statement" not in narrative
     # The ledger keeps every claim (lossless traceability).
     ledger = markdown[markdown.index("### Claim Ledger") :]
     for claim_id in ("qfind_q1_0", "qfind_q1_1", "qbiz_q1_0", "rec_1"):

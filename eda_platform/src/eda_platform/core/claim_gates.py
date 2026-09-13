@@ -33,6 +33,10 @@ from eda_platform.schemas.receipts import (
     ReceiptScope,
     verify_receipt_digest,
 )
+from eda_platform.tools.causal_experiment import (
+    RANDOMIZED_EXPERIMENT_FAMILY,
+    randomized_design_credential_id,
+)
 
 # Canonical token extraction and exact/half-ULP tolerance ladder (analysis-v3
 # §5.2); promoted to public names in E3-B, aliased so call sites stay unchanged.
@@ -70,6 +74,36 @@ GATE_ORDER: tuple[GateName, ...] = (
 # these exact names so model claims cannot be licensed by generic table output.
 MODEL_EVIDENCE_TOOL_NAMES = frozenset({"run_baseline_model"})
 MODEL_EVIDENCE_METHOD_FAMILIES = frozenset({"ml_baseline", "model_card"})
+
+# The only receipt shape that licenses causal wording (user decision
+# 2026-08-25): a committed run_causal_experiment receipt from the randomized
+# tier, whose recorded design-confirmation credential re-derives from its own
+# dataset and treatment column. The license is receipt provenance, never text.
+CAUSAL_EVIDENCE_TOOL_NAME = "run_causal_experiment"
+
+
+def _licenses_causal_wording(receipt: EvidenceReceipt) -> bool:
+    if (
+        receipt.tool_name != CAUSAL_EVIDENCE_TOOL_NAME
+        or receipt.method.family != RANDOMIZED_EXPERIMENT_FAMILY
+    ):
+        return False
+    parameters = receipt.method.parameters
+    if parameters.get("experiment_design") != "randomized":
+        return False
+    confirmation = parameters.get("design_confirmation_id")
+    treatment = parameters.get("treatment_column")
+    if not isinstance(confirmation, str) or not isinstance(treatment, str):
+        return False
+    if len(receipt.scope.dataset_ids) != 1:
+        return False
+    # Forged parameters fail here unless the credential id matches this exact
+    # dataset + treatment binding; existence and expiry of the credential were
+    # verified by the executor before the receipt was committed.
+    return confirmation == randomized_design_credential_id(
+        dataset_id=receipt.scope.dataset_ids[0], treatment_column=treatment
+    )
+
 
 # R4: only these replication kinds license an independent-replication claim.
 _INDEPENDENCE_LICENSING_KINDS = frozenset({"holdout", "external_replication"})
@@ -629,18 +663,31 @@ def _entity_gate(
                         claim_id=claim.claim_id,
                     )
                 )
-        if claim.claim_type == "causal":
+        # Whitelist (user decision 2026-08-25): causal wording passes only when
+        # this claim itself cites a randomized-tier run_causal_experiment
+        # receipt whose credential verifies; everything else is rejected as
+        # before, regardless of how the text is phrased.
+        causal_licensed = any(
+            _licenses_causal_wording(receipt)
+            for receipt in resolved.receipts.values()
+        )
+        if claim.claim_type == "causal" and not causal_licensed:
             violations.append(
                 GateViolation(
                     code="causal_claim_rejected",
                     message=(
                         "causal claims are rejected by default in v1; rephrase "
-                        "as an observed association."
+                        "as an observed association, or cite a user-confirmed "
+                        "randomized-experiment receipt."
                     ),
                     claim_id=claim.claim_id,
                 )
             )
-        elif implies_causation(claim.claim_text):
+        elif (
+            claim.claim_type != "causal"
+            and implies_causation(claim.claim_text)
+            and not causal_licensed
+        ):
             violations.append(
                 GateViolation(
                     code="causal_language",

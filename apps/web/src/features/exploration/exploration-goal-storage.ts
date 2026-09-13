@@ -1,8 +1,7 @@
-/* The deep-dive goal is typed on the new-session screen and consumed on the
- * Explore screen, and the server cannot carry it between them: `business_context`
- * is a request-only field, and no endpoint lists a session's explorations. The
- * started run id is kept for the same reason — without it a run in flight is
- * only reachable through browser history. */
+/* Page-to-page pre-fill only, never the source of truth. The goal typed on the
+ * new-session screen is carried here until the Explore form persists it through
+ * prepare/start; the run id is a fallback while the server-side listing
+ * (GET /sessions/{id}/explorations) loads. Losing either is harmless. */
 
 const GOAL_KEY_PREFIX = "eda.exploration.goal.v1.";
 const RUN_KEY_PREFIX = "eda.exploration.run.v1.";

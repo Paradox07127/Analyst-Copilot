@@ -1030,6 +1030,17 @@ def _join_readers(readers: list[threading.Thread | None]) -> None:
             reader.join(timeout=1.0)
 
 
+def default_policy_digest() -> str:
+    """Digest of the default container policy, for environment manifests."""
+    return _policy_digest(
+        limits=SandboxLimits(),
+        pids_limit=DEFAULT_DOCKER_PIDS_LIMIT,
+        cpus=DEFAULT_DOCKER_CPUS,
+        tmpfs_size=DEFAULT_DOCKER_TMPFS_SIZE,
+        container_user=DEFAULT_CONTAINER_USER,
+    )
+
+
 def _policy_digest(
     *,
     limits: SandboxLimits,

@@ -6,11 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from exploration_test_helpers import (
-    TEST_RUNTIME_IDENTITY,
-    TEST_TRUSTED_RELEASE_PUBLIC_KEYS,
-    release_certificate,
-)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -77,9 +72,6 @@ def api(tmp_path: Path) -> _ApiFixture:
         store,
         ApprovalService(store),
         JobService(store, backend),
-        release_certificate=release_certificate(),
-        trusted_release_public_keys=TEST_TRUSTED_RELEASE_PUBLIC_KEYS,
-        trusted_runtime_identity=TEST_RUNTIME_IDENTITY,
         source_snapshot_resolver=source,
     )
     app.state.settings_service = SettingsService(
@@ -169,17 +161,23 @@ def _prepare_start(api: _ApiFixture) -> tuple[dict, dict]:
         ),
     ],
 )
-def test_every_entry_is_closed_without_a_release_certificate(
+def test_no_entry_is_gated_on_a_bare_install(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     method: str,
     path: str,
     body: dict | None,
     headers: dict[str, str],
 ) -> None:
+    """No certificate, no trust keys: every route answers on its own merits."""
+    for name in (
+        "EDA_EXPLORATION_RELEASE_CERTIFICATE_PATH",
+        "EDA_EXPLORATION_RELEASE_TRUSTED_KEYS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     client = TestClient(create_app(tmp_path))
     response = client.request(method, path, json=body, headers=headers)
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "exploration_release_unavailable"
+    assert response.status_code != 503, response.text
 
 
 def test_prepare_start_get_and_control_routes_project_journal_state(

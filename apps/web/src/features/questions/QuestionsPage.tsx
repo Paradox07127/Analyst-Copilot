@@ -13,7 +13,7 @@ import {
   type QuestionExecutionStarted,
   type QuestionSummary,
 } from "../../api/client";
-import { queryKeys, useQuestions } from "../../api/hooks";
+import { queryKeys, useDatasets, useQuestions } from "../../api/hooks";
 import {
   approvalGuidance,
   type ApprovalGuidance,
@@ -35,6 +35,7 @@ import {
   type Tone,
 } from "../../components/ui";
 import { useDialogFocus } from "../../components/use-dialog-focus";
+import { ReportStaleNotice } from "../reports/ReportStaleNotice";
 import { DRAFT_STEPS, RUN_ONE_STEPS } from "./StepChain";
 
 const OUTCOME_TONE: Record<string, Tone> = {
@@ -588,6 +589,102 @@ function GenreLine({ question }: { question: QuestionSummary }) {
   );
 }
 
+/* T8c: randomization cannot be read off the data, so the causal card carries
+ * the one user action that unlocks the experiment tier — an explicit "this
+ * column's assignment was randomized" declaration. Without it the agent runs
+ * (and labels) the observational design check instead. */
+function RandomizedDesignConfirm({ sessionId }: { sessionId: string }) {
+  const datasets = useDatasets(sessionId);
+  const [datasetId, setDatasetId] = useState("");
+  const [treatmentColumn, setTreatmentColumn] = useState("");
+  const confirm = useMutation({
+    mutationFn: () =>
+      api.confirmRandomizedDesign(sessionId, {
+        dataset_id: datasetId,
+        treatment_column: treatmentColumn.trim(),
+      }),
+  });
+
+  const items = datasets.data ?? [];
+  const effectiveDataset =
+    datasetId || (items.length === 1 ? (items[0]?.dataset_id ?? "") : "");
+  if (confirm.data) {
+    return (
+      <Card tone="quiet" className="flex flex-col gap-1 p-3">
+        <p className="text-xs font-medium">Randomized experiment</p>
+        <p className="text-xs text-status-neutral" role="status">
+          Randomized assignment confirmed for{" "}
+          <span className="font-medium">{confirm.data.treatment_column}</span>;
+          the confirmation expires{" "}
+          {new Date(confirm.data.expires_at).toLocaleString()}. Runs started
+          before then can analyze this as an experiment.
+        </p>
+      </Card>
+    );
+  }
+  return (
+    <Card tone="quiet" className="flex flex-col gap-2 p-3">
+      <p className="text-xs font-medium">Randomized experiment</p>
+      <p className="text-xs text-status-neutral">
+        Without your confirmation this question runs as an observational design
+        check: group differences are reported but never attributed to the
+        treatment. Confirm only if you know group assignment was actually
+        randomized.
+      </p>
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (effectiveDataset && treatmentColumn.trim()) confirm.mutate();
+        }}
+      >
+        <label className="flex flex-col gap-1 text-xs text-status-neutral">
+          Dataset
+          <select
+            value={effectiveDataset}
+            onChange={(event) => setDatasetId(event.target.value)}
+            className="rounded-base border border-border bg-bg px-2 py-1 text-sm"
+          >
+            <option value="" disabled>
+              Choose a dataset
+            </option>
+            {items.map((dataset) => (
+              <option key={dataset.dataset_id} value={dataset.dataset_id}>
+                {dataset.display_name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-status-neutral">
+          Assignment column
+          <input
+            value={treatmentColumn}
+            onChange={(event) => setTreatmentColumn(event.target.value)}
+            placeholder="e.g. test_group"
+            className="rounded-base border border-border bg-bg px-2 py-1 text-sm"
+          />
+        </label>
+        <button
+          type="submit"
+          disabled={
+            !effectiveDataset || !treatmentColumn.trim() || confirm.isPending
+          }
+          className="rounded-base border border-border bg-bg px-3 py-1.5 text-sm font-medium hover:bg-surface disabled:opacity-50"
+        >
+          {confirm.isPending ? "Confirming…" : "Confirm randomized assignment"}
+        </button>
+      </form>
+      {confirm.isError && (
+        <p role="alert" className="text-xs text-status-critical">
+          {confirm.error instanceof Error
+            ? confirm.error.message
+            : "Could not record the confirmation."}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 function QuestionCard({
   projectId,
   sessionId,
@@ -699,6 +796,10 @@ function QuestionCard({
           )}
 
         <GenreLine question={question} />
+
+        {question.analysis_mode === "causal_experiment" && (
+          <RandomizedDesignConfirm sessionId={sessionId} />
+        )}
 
         {editing ? (
           <CardEditForm
@@ -893,6 +994,12 @@ export function Component() {
           description="Review a suggested question or ask your own, then approve what runs."
         />
       </header>
+
+      <ReportStaleNotice
+        projectId={projectId}
+        sessionId={sessionId}
+        showReportLink
+      />
 
       {!hasSuggestions && (
         <DraftQuestionPanel

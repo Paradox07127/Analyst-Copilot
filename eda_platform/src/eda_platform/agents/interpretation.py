@@ -22,6 +22,7 @@ from eda_platform.tools.evidence import build_evidence_pack
 from eda_platform.tools.report_validator import (
     extract_numbers,
     full_coverage_evidence_refs,
+    gate_safe_number,
     validate_report_bundle,
 )
 
@@ -274,8 +275,11 @@ def _build_payload(
         "question": question,
         "claims": claims,
         "ranking_basis": ranking_basis,
+        # The model copies its figures from this list verbatim, so each entry
+        # must survive the report's numeric gate: `{value:g}` offered
+        # "1.35916e+07" for a 13591643.7 GMV and the quoting claim was pruned.
         "allowed_numbers": [
-            f"{value:g}%" if is_percent else f"{value:g}"
+            f"{gate_safe_number(value)}%" if is_percent else gate_safe_number(value)
             for value, is_percent in allowed_numbers
         ],
         "method_context": method_context,

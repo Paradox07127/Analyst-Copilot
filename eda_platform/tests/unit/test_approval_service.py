@@ -773,7 +773,6 @@ def test_all_approval_consumers_use_the_validate_before_consume_seam() -> None:
         "question_service.py": 2,
         "relationship_service.py": 1,
         "skill_service.py": 1,
-        "investigation_service.py": 3,
     }
     for filename, expected in expected_calls.items():
         source = (service_root / filename).read_text(encoding="utf-8")

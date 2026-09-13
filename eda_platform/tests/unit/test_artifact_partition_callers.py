@@ -6,7 +6,6 @@ import pytest
 
 from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.decision_report import create_decision_report
-from eda_platform.drivers.investigation_orchestrator import reject_plan
 from eda_platform.drivers.knowledge_promotion import build_promotion_candidate
 from eda_platform.drivers.synthesis_orchestrator import (
     _source_columns,
@@ -14,7 +13,6 @@ from eda_platform.drivers.synthesis_orchestrator import (
 )
 from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.investigations import (
-    InvestigationPlan,
     InvestigationRecord,
     ValidatedFinding,
 )
@@ -64,24 +62,6 @@ def _finding(question: str) -> ValidatedFinding:
         report_eligible=True,
         report_readiness="eligible",
         report_readiness_reason="The deterministic test fixture is eligible.",
-    )
-
-
-def _plan(investigation_id: str, question_id: str) -> InvestigationPlan:
-    return InvestigationPlan(
-        investigation_id=investigation_id,
-        source_session_id="source_run",
-        question_id=question_id,
-        card_version=1,
-        candidate_fingerprint=f"fingerprint_{investigation_id}",
-        question=f"Question for {investigation_id}",
-        target_datasets=["orders.csv"],
-        method_family="descriptive",
-        method_recipe="compare values",
-        allowed_tools=["sql"],
-        feasibility="ready",
-        status="planned",
-        status_reason="Ready.",
     )
 
 
@@ -218,42 +198,6 @@ def test_synthesis_selection_uses_exact_finding_run(tmp_path: Path) -> None:
         "shared_finding": "finding_run_new"
     }
     assert "New run is supported." in brief.headline
-
-
-def test_investigation_rejection_uses_exact_plan_partition(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    _save(
-        store,
-        artifact_id="shared_plan",
-        artifact_type=ArtifactType.INVESTIGATION_PLAN,
-        project_id="project_a",
-        session_id="plan_run_a",
-        payload=_plan("inv_a", "question_a").model_dump(mode="json"),
-    )
-    _save(
-        store,
-        artifact_id="shared_plan",
-        artifact_type=ArtifactType.INVESTIGATION_PLAN,
-        project_id="project_a",
-        session_id="plan_run_b",
-        payload=_plan("inv_b", "question_b").model_dump(mode="json"),
-    )
-
-    artifacts = reject_plan(
-        project_id="project_a",
-        plan_session_id="plan_run_a",
-        plan_id="shared_plan",
-        workspace=store.root,
-        reason="Reject only project A's plan.",
-    )
-    record = next(
-        InvestigationRecord.model_validate(artifact.payload)
-        for artifact in artifacts
-        if artifact.type is ArtifactType.INVESTIGATION_RECORD
-    )
-
-    assert record.investigation_id == "inv_a"
-    assert record.question_id == "question_a"
 
 
 def test_decision_report_uses_exact_brief_partition(tmp_path: Path) -> None:

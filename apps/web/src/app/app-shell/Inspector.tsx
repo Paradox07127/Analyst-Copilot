@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Link, useLocation, useParams } from "react-router";
+import type { DatasetHandle, SupportDocView } from "../../api/client";
 import {
   useDeleteSupportDoc,
   useDeleteUpload,
@@ -10,7 +12,9 @@ import {
 import { qualityCodeLabel, qualityCodeTitle } from "../../api/quality-codes";
 import { sessionSectionPath } from "../paths";
 import { isUnfiled } from "../unfiled";
-import { Marquee } from "../../components/ui";
+import { ErrorState } from "../../components/async-states";
+import { Button, Marquee } from "../../components/ui";
+import { useDialogFocus } from "../../components/use-dialog-focus";
 import { useWorkspaceFocus } from "../workspace-focus";
 
 const SECTION_LABELS: Record<string, string> = {
@@ -171,20 +175,69 @@ function formatBytes(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
+/* Same shape as SessionRail's DeleteRunDialog: deleting a stored file from a
+ * hover control is one mis-click away, so it gets the same two-step the other
+ * destructive actions have. */
+function ConfirmDeleteDialog({
+  name,
+  description,
+  confirmLabel,
+  pending,
+  error,
+  onConfirm,
+  onClose,
+}: {
+  name: string;
+  description: string;
+  confirmLabel: string;
+  pending: boolean;
+  error: unknown;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const { dialogRef, onKeyDown } = useDialogFocus(onClose);
+  return (
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Delete ${name}?`}
+      onKeyDown={onKeyDown}
+      className="animate-fade fixed inset-0 z-50 flex items-center justify-center bg-scrim p-4"
+    >
+      <div className="animate-enter flex max-w-md flex-col gap-3 rounded-base border border-border bg-bg p-4">
+        <h2 className="text-base font-semibold">Delete {name}?</h2>
+        <p className="text-sm">{description}</p>
+        {error != null && <ErrorState error={error} />}
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="danger" onClick={onConfirm} disabled={pending}>
+            {pending ? "Deleting…" : confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* Files belong to the project, not to the session that happened to upload
  * them, and nothing else in the app shows what a project is holding. This is
  * the management surface: what is stored, how big it is, and how to get rid of
- * it — the same delete the Launchpad offers, reachable without starting a run. */
+ * it — the same delete the Launchpad offers, reachable without starting a run.
+ * Sessions without a project store uploads in the hidden unfiled bucket, and
+ * this is their only management surface, so they render here too. */
 function ProjectData({ projectId }: { projectId: string }) {
   const uploads = useProjectUploads(projectId);
   const remove = useDeleteUpload(projectId);
+  const [confirming, setConfirming] = useState<DatasetHandle | null>(null);
   const files = uploads.data ?? [];
   const totalBytes = files.reduce((sum, file) => sum + file.byte_size, 0);
+  const unfiled = isUnfiled(projectId);
 
   return (
     <section className="flex flex-col gap-1.5">
       <p className="flex items-baseline gap-2 text-[10px] font-medium uppercase text-status-neutral">
-        Project data
+        {unfiled ? "Uploaded data" : "Project data"}
         {files.length > 0 && (
           <span className="tabular ml-auto normal-case">
             {files.length} file{files.length === 1 ? "" : "s"} · {formatBytes(totalBytes)}
@@ -201,7 +254,9 @@ function ProjectData({ projectId }: { projectId: string }) {
       )}
       {uploads.data && files.length === 0 && (
         <p className="text-xs text-status-neutral">
-          No data uploaded to this project yet.
+          {unfiled
+            ? "No data uploaded yet."
+            : "No data uploaded to this project yet."}
         </p>
       )}
       <ul className="flex flex-col gap-0.5">
@@ -218,7 +273,10 @@ function ProjectData({ projectId }: { projectId: string }) {
             </span>
             <button
               type="button"
-              onClick={() => remove.mutate(file.dataset_id)}
+              onClick={() => {
+                remove.reset();
+                setConfirming(file);
+              }}
               disabled={remove.isPending}
               aria-label={`Delete ${file.display_name}`}
               className="shrink-0 rounded-sm px-1 text-[11px] text-status-neutral opacity-0 transition-opacity hover:text-status-critical focus-visible:opacity-100 group-hover/file:opacity-100 disabled:opacity-40"
@@ -228,12 +286,24 @@ function ProjectData({ projectId }: { projectId: string }) {
           </li>
         ))}
       </ul>
-      {remove.isError && (
-        <p role="alert" className="text-xs text-status-critical">
-          {remove.error instanceof Error
-            ? remove.error.message
-            : "Could not delete that file."}
-        </p>
+      {confirming && (
+        <ConfirmDeleteDialog
+          name={confirming.display_name}
+          description={
+            unfiled
+              ? "The file is permanently removed from storage. Sessions that already analysed it keep their results, but it cannot be reused."
+              : "The file is permanently removed from every session in this project. Sessions that already analysed it keep their results, but it cannot be reused."
+          }
+          confirmLabel="Delete file"
+          pending={remove.isPending}
+          error={remove.isError ? remove.error : null}
+          onConfirm={() =>
+            remove.mutate(confirming.dataset_id, {
+              onSuccess: () => setConfirming(null),
+            })
+          }
+          onClose={() => setConfirming(null)}
+        />
       )}
     </section>
   );
@@ -242,6 +312,7 @@ function ProjectData({ projectId }: { projectId: string }) {
 function ProjectSupportDocuments({ projectId }: { projectId: string }) {
   const docs = useSupportDocs(projectId);
   const remove = useDeleteSupportDoc(projectId);
+  const [confirming, setConfirming] = useState<SupportDocView | null>(null);
   const files = docs.data?.pages.flatMap((page) => page.docs ?? []) ?? [];
 
   return (
@@ -281,7 +352,10 @@ function ProjectSupportDocuments({ projectId }: { projectId: string }) {
             </span>
             <button
               type="button"
-              onClick={() => remove.mutate(file.doc_id)}
+              onClick={() => {
+                remove.reset();
+                setConfirming(file);
+              }}
               disabled={remove.isPending}
               aria-label={`Delete support document ${file.name}`}
               className="shrink-0 rounded-sm px-1 text-[11px] text-status-neutral opacity-0 transition-opacity hover:text-status-critical focus-visible:opacity-100 group-hover/doc:opacity-100 disabled:opacity-40"
@@ -301,12 +375,20 @@ function ProjectSupportDocuments({ projectId }: { projectId: string }) {
           {docs.isFetchingNextPage ? "Loading…" : "Load more"}
         </button>
       )}
-      {remove.isError && (
-        <p role="alert" className="text-xs text-status-critical">
-          {remove.error instanceof Error
-            ? remove.error.message
-            : "Could not delete that document."}
-        </p>
+      {confirming && (
+        <ConfirmDeleteDialog
+          name={confirming.name}
+          description="The document is permanently removed from this project, and the agent stops reading it for context."
+          confirmLabel="Delete document"
+          pending={remove.isPending}
+          error={remove.isError ? remove.error : null}
+          onConfirm={() =>
+            remove.mutate(confirming.doc_id, {
+              onSuccess: () => setConfirming(null),
+            })
+          }
+          onClose={() => setConfirming(null)}
+        />
       )}
     </section>
   );
@@ -357,10 +439,14 @@ export function Inspector() {
         {sessionId && DATA_SECTIONS.has(section) && (
           <DataReadiness sessionId={sessionId} />
         )}
-        {projectId && !isUnfiled(projectId) && (
+        {/* Unfiled sessions store uploads in the hidden bucket and this is the
+          * only place to manage them; support docs stay project-only. */}
+        {projectId && (
           <>
             <ProjectData projectId={projectId} />
-            <ProjectSupportDocuments projectId={projectId} />
+            {!isUnfiled(projectId) && (
+              <ProjectSupportDocuments projectId={projectId} />
+            )}
           </>
         )}
         {!sessionId && !projectId && (

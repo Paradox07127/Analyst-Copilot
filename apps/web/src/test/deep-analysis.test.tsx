@@ -135,9 +135,9 @@ describe("Deep analysis page", () => {
       ),
     );
     renderAppAt(PATH);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Request failed (session_not_found)",
-    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Request failed");
+    expect(alert).toHaveTextContent("session_not_found");
   });
 
   it("renders a forbidden state for 403 instead of an empty state", async () => {

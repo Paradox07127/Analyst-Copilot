@@ -95,6 +95,14 @@ function CostCards({ metrics }: { metrics: SessionMetricsView }) {
         hint="not the Findings page count"
         title="Counts validated findings plus findings listed inside each question's execution result. The Findings page only counts validated findings, so the two totals can differ."
       />
+      {(metrics.exploration_runs ?? 0) > 0 && (
+        <MetricTile
+          label="Deep dive cost"
+          value={formatCost(metrics.exploration_est_cost_usd)}
+          hint={`${metrics.exploration_llm_calls ?? 0} call(s) · ${(metrics.exploration_total_tokens ?? 0).toLocaleString()} tokens · ${metrics.exploration_runs} run(s)`}
+          title="Spend of this session's deep-dive explorations. They run under their own budget, so this is reported beside the session total, not inside it."
+        />
+      )}
     </MetricStrip>
   );
 }

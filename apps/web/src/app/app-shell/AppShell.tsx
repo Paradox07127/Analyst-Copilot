@@ -28,7 +28,7 @@ import { SessionNav } from "./SessionNav";
 import { CollapsedSessionRail, SessionRail } from "./SessionRail";
 import { Inspector } from "./Inspector";
 import { ActivityCenter } from "./ActivityCenter";
-import { JobActivityProvider } from "../job-activity";
+import { JobActivityProvider, useServerJobRecovery } from "../job-activity";
 import { getRailCollapsed, setRailCollapsed } from "./rail-prefs";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { useDialogFocus } from "../../components/use-dialog-focus";
@@ -450,6 +450,8 @@ function AppShellLayout() {
         : null,
     [hash, pathname, search],
   );
+  /* Re-attach to this session's server-known runs (cleared cache, new device). */
+  useServerJobRecovery(currentSessionContext?.sessionId);
 
   const workspaceView = split ? (
     <SplitWorkspace

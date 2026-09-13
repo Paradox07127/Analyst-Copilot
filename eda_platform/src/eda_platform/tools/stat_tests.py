@@ -61,10 +61,11 @@ _EFFECT_CI_RESAMPLES = 2_000
 _EFFECT_CI_MAX_TOTAL_N = 8_000
 _EFFECT_CI_SEED = 0
 
-# Contingency tests get their effect CI from dedicated paths rather than the
-# (group, value) sample bootstrap in _EFFECT_CI_STATISTICS.
+# Tests whose effect CI comes from a dedicated path rather than the (group,
+# value) sample bootstrap in _EFFECT_CI_STATISTICS: contingency tests here,
+# and two_sample_ate's Welch interval in tools/causal_experiment.
 _EFFECT_CI_SPECIAL: frozenset[str] = frozenset(
-    {"paired_t_test", "chi_square_independence", "fisher_exact"}
+    {"paired_t_test", "chi_square_independence", "fisher_exact", "two_sample_ate"}
 )
 
 # Per-test-type publishability for the claim gate: a test type may enter the
@@ -79,6 +80,9 @@ TEST_PUBLISHABILITY: dict[str, str] = {
     "welch_anova": "confirmatory_ready",
     "mann_whitney_u": "confirmatory_ready",
     "kruskal_wallis": "confirmatory_ready",
+    # run_causal_experiment tier B: the ATE carries a Welch CI and a sample
+    # size, so it satisfies the effect-with-CI admission rule.
+    "two_sample_ate": "confirmatory_ready",
 }
 
 

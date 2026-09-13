@@ -120,11 +120,6 @@ export function qualitySignals(metrics: SessionMetricsView): QualitySignal[] {
     "Domain metrics skipped",
     metrics.domain_metrics_skipped,
   );
-  nonZeroNumber(
-    signals,
-    "Macro-loop rounds discarded",
-    metrics.macro_loop_discard_rounds,
-  );
   nonZeroNumber(signals, "Questions answered", metrics.question_answered);
   nonZeroNumber(signals, "Questions abstained", metrics.question_abstained);
   nonZeroNumber(signals, "Questions failed", metrics.question_failed);

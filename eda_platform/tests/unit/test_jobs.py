@@ -16,14 +16,6 @@ import pytest
 
 from eda_platform.application.dto import JobStatus
 from eda_platform.application.ports import JobCommand, JobRef
-from eda_platform.application.services.approval_service import (
-    ApprovalService,
-    payload_digest,
-)
-from eda_platform.application.services.investigation_service import (
-    APPROVAL_KIND_EXECUTE,
-    InvestigationService,
-)
 from eda_platform.application.services.job_service import (
     SUPPORTED_JOB_KINDS,
     JobConflictError,
@@ -421,80 +413,6 @@ def test_pre_scope_schema_migrates_request_scope_as_legacy_null(
         )
 
 
-def test_investigation_rearm_with_different_approved_llm_rejects_same_key(
-    store: ArtifactStore,
-) -> None:
-    store.start_session("demo", "source_run")
-    store.mark_session_status("demo", "source_run", "completed")
-    approvals = ApprovalService(store)
-    action = {
-        "type": "investigation_execute",
-        "source_session_id": "source_run",
-        "plan_session_id": "plan_run",
-        "plan_ids": ["plan_1"],
-        "plan_fingerprints": {"plan_1": "fingerprint"},
-    }
-    offline_payload = {
-        "project_id": "demo",
-        "source_session_id": "source_run",
-        "plan_session_id": "plan_run",
-        "plan_ids": ["plan_1"],
-        "plan_fingerprints": {"plan_1": "fingerprint"},
-        "llm": "offline",
-    }
-    action_hash, offline_token, _expires = approvals.register(
-        kind=APPROVAL_KIND_EXECUTE,
-        session_id="source_run",
-        project_id="demo",
-        action=action,
-        payload=offline_payload,
-    )
-    approvals.validate_and_consume(
-        action_hash,
-        kind=APPROVAL_KIND_EXECUTE,
-        session_id="source_run",
-        generation=offline_token,
-        idempotency_key="investigation-key",
-    )
-    backend = _RecordingBackend()
-    jobs = JobService(store, backend)
-    first = jobs.create_investigation_execute_job(
-        "ixsess_offline",
-        project_id="demo",
-        source_session_id="source_run",
-        plan_session_id="plan_run",
-        plan_ids=["plan_1"],
-        plan_fingerprints={"plan_1": "fingerprint"},
-        llm="offline",
-        idempotency_key="investigation-key",
-        idempotency_content={
-            "source_session_id": "source_run",
-            "action_hash": action_hash,
-            "approval_payload_digest": payload_digest(offline_payload),
-            "payload_policy": None,
-        },
-    )
-    store.mark_job_status(first.job_id, "completed")
-
-    env_payload = {**offline_payload, "llm": "env"}
-    same_hash, env_token, _expires = approvals.register(
-        kind=APPROVAL_KIND_EXECUTE,
-        session_id="source_run",
-        project_id="demo",
-        action=action,
-        payload=env_payload,
-    )
-    assert same_hash == action_hash
-
-    with pytest.raises(JobIdempotencyMismatchError):
-        InvestigationService(store, approvals, jobs).execute(
-            "source_run",
-            action_hash=action_hash,
-            approval_token=env_token,
-            idempotency_key="investigation-key",
-        )
-
-
 def test_secret_env_is_hashed_and_content_order_is_canonical(
     store: ArtifactStore,
 ) -> None:
@@ -666,33 +584,6 @@ def _create_kind_for_idempotency_matrix(
             llm="offline",
             **common,
         )
-    if kind == "investigation_plan":
-        return service.create_investigation_plan_job(
-            execution_session_id,
-            source_session_id="source_run",
-            question_ids=["question_1"],
-            deep=True,
-            **common,
-        )
-    if kind == "investigation_execute":
-        return service.create_investigation_execute_job(
-            execution_session_id,
-            source_session_id="source_run",
-            plan_session_id="plan_run",
-            plan_ids=["plan_1"],
-            plan_fingerprints={"plan_1": "fingerprint"},
-            llm="offline",
-            **common,
-        )
-    if kind == "macro_loop":
-        return service.create_macro_loop_job(
-            execution_session_id,
-            source_session_id="source_run",
-            plan_session_id="plan_run",
-            depth=4,
-            llm="offline",
-            **common,
-        )
     if kind == "skill_replay":
         return service.create_skill_replay_job(
             execution_session_id,
@@ -740,7 +631,6 @@ def _create_kind_for_idempotency_matrix(
             policy={"policy_fingerprint": "xplcy_1"},
             data_state_witness="dsw1_witness",
             code_fingerprint="code-v1",
-            release_certificate_digest="certificate-v1",
             provider="openai",
             payload_policy="schema+aggregates",
             llm_env=None,

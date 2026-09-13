@@ -11,6 +11,7 @@ import pandas as pd
 from eda_platform.schemas.resource_metrics import (
     DatasetRole,
     EdaDatasetEstimate,
+    EdaResourceLimitGuidance,
     EdaResourcePolicy,
     EdaResourcePreflight,
 )
@@ -18,6 +19,24 @@ from eda_platform.tools.loader import stream_csv_chunks
 
 _MIN_FRAME_EXPANSION_RATIO = 0.5
 _MAX_FRAME_EXPANSION_RATIO = 8.0
+
+# Reason codes that mean "a limit was exceeded", as opposed to the worker
+# adjustments that also land in `reason_codes`.
+LIMITING_REASON_CODES = frozenset(
+    {
+        "no_input_datasets",
+        "dataset_count_exceeded",
+        "single_input_bytes_exceeded",
+        "input_bytes_total_exceeded",
+        "column_count_exceeded",
+        "row_count_exceeded",
+        "estimated_working_set_exceeded",
+    }
+)
+
+# Granularity of the memory budget a user is asked to set, so the suggestion is
+# a round number in the unit the settings form uses rather than raw bytes.
+_BUDGET_SUGGESTION_STEP_BYTES = 256 << 20
 
 
 class EdaResourceLimitError(RuntimeError):
@@ -274,6 +293,63 @@ def preflight_csv_resources(
         baseline_peak_rss_bytes=baseline_peak_rss_bytes,
         policy=effective,
         precleaning_enabled=precleaning_enabled,
+    )
+
+
+def resource_limit_guidance(
+    decision: EdaResourcePreflight,
+) -> EdaResourceLimitGuidance | None:
+    """Restate a stopped decision as the numbers and the ways out.
+
+    Returns None for an accepted run. The "turn the clean off" way out is
+    computed, not guessed: the working set is re-estimated with precleaning
+    disabled and offered only when that alone clears every limit.
+    """
+    if decision.status == "accepted":
+        return None
+    policy = decision.policy
+    limiting = [code for code in decision.reason_codes if code in LIMITING_REASON_CODES]
+    largest = max(
+        decision.datasets,
+        key=lambda item: item.best_frame_deep_bytes,
+        default=None,
+    )
+    without_precleaning = (
+        estimate_working_set_bytes(
+            decision.datasets,
+            active_workers=decision.effective_dataset_workers,
+            baseline_peak_rss_bytes=decision.baseline_peak_rss_bytes,
+            policy=policy,
+            precleaning_enabled=False,
+        )
+        if decision.precleaning_enabled
+        else decision.estimated_working_set_bytes
+    )
+    clean_off_fits = (
+        decision.precleaning_enabled
+        and limiting == ["estimated_working_set_exceeded"]
+        and without_precleaning <= policy.max_working_set_bytes
+    )
+    headroom = max(decision.estimated_working_set_bytes, policy.max_working_set_bytes)
+    return EdaResourceLimitGuidance(
+        status=decision.status,
+        reason_codes=limiting,
+        dataset_count=decision.input_dataset_count,
+        estimated_working_set_bytes=decision.estimated_working_set_bytes,
+        max_working_set_bytes=policy.max_working_set_bytes,
+        over_budget_bytes=max(
+            0, decision.estimated_working_set_bytes - policy.max_working_set_bytes
+        ),
+        largest_dataset_name="" if largest is None else largest.name,
+        largest_dataset_bytes=0 if largest is None else largest.best_frame_deep_bytes,
+        largest_dataset_rows=0 if largest is None else largest.best_rows,
+        max_rows_per_dataset=policy.max_rows_per_dataset,
+        precleaning_enabled=decision.precleaning_enabled,
+        working_set_without_precleaning_bytes=without_precleaning,
+        disabling_precleaning_would_fit=clean_off_fits,
+        suggested_max_working_set_bytes=(
+            ceil(headroom / _BUDGET_SUGGESTION_STEP_BYTES) * _BUDGET_SUGGESTION_STEP_BYTES
+        ),
     )
 
 

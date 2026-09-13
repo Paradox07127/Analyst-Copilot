@@ -379,11 +379,15 @@ export function Component() {
   const projects = useProjects();
   const usage = useWorkspaceUsage(usageWindowDays);
   const historyUsage = useWorkspaceUsage(DEFAULT_USAGE_WINDOW_DAYS);
+  const [showAllProjects, setShowAllProjects] = useState(false);
   const empty = projects.data?.length === 0;
   const active = (projects.data ?? []).filter((p) => p.session_count > 0);
   const idle = (projects.data ?? []).filter((p) => p.session_count === 0);
-  const visibleActive = active.slice(0, PROJECT_LIMIT);
-  const visibleIdle = idle.slice(0, Math.max(0, PROJECT_LIMIT - visibleActive.length));
+  const projectLimit = showAllProjects
+    ? active.length + idle.length
+    : PROJECT_LIMIT;
+  const visibleActive = active.slice(0, projectLimit);
+  const visibleIdle = idle.slice(0, Math.max(0, projectLimit - visibleActive.length));
   const hiddenProjectCount = active.length + idle.length - visibleActive.length - visibleIdle.length;
 
   const changePeriod = (nextPeriod: UsagePeriod) => {
@@ -479,10 +483,24 @@ export function Component() {
                     ))}
                   </ul>
                   {hiddenProjectCount > 0 && (
-                    <p className="text-xs text-status-neutral">
-                      + {hiddenProjectCount} more project{hiddenProjectCount === 1 ? "" : "s"}
-                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowAllProjects(true)}
+                      className="self-start rounded-base px-1 py-0.5 text-xs text-status-neutral hover:text-primary hover:underline"
+                    >
+                      Show {hiddenProjectCount} more project{hiddenProjectCount === 1 ? "" : "s"}
+                    </button>
                   )}
+                  {showAllProjects &&
+                    active.length + idle.length > PROJECT_LIMIT && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllProjects(false)}
+                        className="self-start rounded-base px-1 py-0.5 text-xs text-status-neutral hover:text-primary hover:underline"
+                      >
+                        Show fewer projects
+                      </button>
+                    )}
                 </div>
               ))}
             </section>

@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -555,6 +556,36 @@ def build_shadow_budget_runtime(
         budget_port=JournalBudgetPort(hard_check=hard_check, extra_remaining=remaining),
         event_store=event_store,
         effective_policy=effective_budget,
+    )
+
+
+@lru_cache(maxsize=1)
+def live_exploration_tool_capability_digest() -> str:
+    """Digest of the read-only tool surface this build would hand the model.
+
+    Tool schemas are dataset independent, so an empty context yields the same
+    digest the worker recomputes against its real datasets.
+    """
+    from eda_platform.agents.data_tools import DataToolContext, build_data_tools
+    from eda_platform.core.exploration_profiles import (
+        build_read_only_exploration_toolset,
+    )
+    from eda_platform.core.stat_registry import StatTestRegistry
+    from eda_platform.tools.sql_runner import build_catalog
+
+    context = DataToolContext(
+        datasets=[],
+        catalog=build_catalog([]),
+        project_id="capability-digest",
+        session_id="capability-digest",
+        store=None,
+        payload_policy="schema+aggregates",
+        artifacts=[],
+        stat_registry=StatTestRegistry(None),
+    )
+    registered = {tool.name: tool for tool in build_data_tools(context)}
+    return exploration_tool_capability_digest(
+        build_read_only_exploration_toolset(registered)
     )
 
 

@@ -118,6 +118,32 @@ class EdaResourcePreflight(_StrictModel):
         return self
 
 
+class EdaResourceLimitGuidance(_StrictModel):
+    """Why a run stopped at the resource gate, in numbers a user can act on.
+
+    Derived from :class:`EdaResourcePreflight`; carried alongside it so the API
+    and the UI never have to re-derive the arithmetic behind the decision.
+    """
+
+    schema_version: int = 1
+    status: ResourcePreflightStatus
+    reason_codes: list[str] = Field(default_factory=list)
+    """Only the limits that were actually exceeded, never worker adjustments."""
+    dataset_count: int = Field(default=0, ge=0)
+    estimated_working_set_bytes: int = Field(default=0, ge=0)
+    max_working_set_bytes: int = Field(ge=1)
+    over_budget_bytes: int = Field(default=0, ge=0)
+    largest_dataset_name: str = ""
+    largest_dataset_bytes: int = Field(default=0, ge=0)
+    largest_dataset_rows: int = Field(default=0, ge=0)
+    max_rows_per_dataset: int = Field(ge=1)
+    precleaning_enabled: bool = False
+    working_set_without_precleaning_bytes: int = Field(default=0, ge=0)
+    disabling_precleaning_would_fit: bool = False
+    """True only when turning the pre-ingest clean off makes every limit fit."""
+    suggested_max_working_set_bytes: int = Field(ge=1)
+
+
 class EdaDataFootprint(_StrictModel):
     """Aggregate shape and memory footprint for analysis or raw-lineage frames."""
 

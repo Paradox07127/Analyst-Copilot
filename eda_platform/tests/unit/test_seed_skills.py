@@ -247,7 +247,6 @@ def test_import_seed_revalidates_template_instantiability(tmp_path: Path) -> Non
         method="m",
         rationale="r",
         params=[SeedParam(name="value_col", role="measure")],
-        source_url="",
     )
 
     with pytest.raises(ValueError):

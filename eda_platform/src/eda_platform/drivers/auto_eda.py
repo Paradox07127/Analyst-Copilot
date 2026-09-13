@@ -9,7 +9,7 @@ from math import ceil
 from pathlib import Path
 from shutil import copy2
 from time import perf_counter
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 import pandas as pd
 
@@ -35,7 +35,11 @@ from eda_platform.core.llm import (
 )
 from eda_platform.core.llm_ledger import meter_llm_client, restore_run_budget_state
 from eda_platform.core.meaning_proposals import MeaningProposal
-from eda_platform.core.methods import MethodGateContext, evaluate_feasibility
+from eda_platform.core.methods import (
+    MethodGateContext,
+    causal_treatment_candidate_exists,
+    evaluate_feasibility,
+)
 from eda_platform.core.process_metrics import PeakRssMeasurement, process_peak_rss
 from eda_platform.core.provenance import env_digest
 from eda_platform.core.semantic import (
@@ -55,9 +59,14 @@ from eda_platform.core.session_metrics import (
 from eda_platform.core.skills_store import catalog_block
 from eda_platform.core.store import ArtifactStore
 from eda_platform.core.support_docs import extract_support_snippets, load_support_docs
+from eda_platform.core.tool_calling_probe import tool_calling_readiness
 from eda_platform.core.tool_guard import ToolGuardError
 from eda_platform.drivers.cancellation import raise_if_cancelled
-from eda_platform.drivers.question_exec import execute_question_candidate
+from eda_platform.drivers.question_exec import (
+    execute_question_candidate,
+    execute_question_with_tools,
+    question_needs_method_agent,
+)
 from eda_platform.drivers.report_artifacts import build_agentic_report_artifacts
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile
 from eda_platform.schemas.cleaning import CleaningRecipe
@@ -1397,21 +1406,27 @@ def _ensure_question_feasibility(
 ) -> QuestionCandidate:
     if candidate.feasibility is not None:
         return candidate
-    feasibility = evaluate_feasibility(
-        MethodGateContext(
-            profiles=profiles,
-            target_datasets=candidate.target_datasets,
-            analysis_mode=candidate.analysis_mode,
-            target_column=None,
-        )
+    gate_ctx = MethodGateContext(
+        profiles=profiles,
+        target_datasets=candidate.target_datasets,
+        analysis_mode=candidate.analysis_mode,
+        target_column=None,
     )
+    feasibility = evaluate_feasibility(gate_ctx)
     return candidate.model_copy(
         update={
             "candidate_methods": candidate.candidate_methods
             or ([feasibility.method_id] if feasibility.method_id is not None else []),
             "feasibility": feasibility,
+            # Same rule as question_agent: a causal card runs the tier-A design
+            # check only when a two-valued assignment column exists.
             "proposed_action": (
-                "design_experiment"
+                (
+                    "run_analysis"
+                    if feasibility.status == "constrained"
+                    and causal_treatment_candidate_exists(gate_ctx)
+                    else "design_experiment"
+                )
                 if candidate.analysis_mode == "causal_experiment"
                 else "collect_data"
                 if feasibility.status in {"needs_data", "unsuitable"}
@@ -1424,9 +1439,22 @@ def _ensure_question_feasibility(
 class ExecuteTopQuestionsStep:
     name: ClassVar[str] = "execute_top_questions"
     requires: ClassVar[tuple[ArtifactType, ...]] = (ArtifactType.QUESTION_CANDIDATE_SET,)
+    # The agent route mints typed method evidence, so the SQL pair alone would
+    # make the pipeline reject a forecast/segmentation/model answer. Everything
+    # below is reachable from `build_data_tools`; the two open-analysis types
+    # (code execution, raw preview) are not, because this step never passes a
+    # code backend and the Python tool stays unregistered without one.
     produces: ClassVar[tuple[ArtifactType, ...]] = (
         ArtifactType.SQL_RESULT,
         ArtifactType.QUESTION_EXECUTION_RESULT,
+        ArtifactType.TABLE,
+        ArtifactType.EVIDENCE_RECEIPT,
+        ArtifactType.STAT_TEST_RESULT,
+        ArtifactType.SEGMENTATION_RESULT,
+        ArtifactType.ANOMALY_SCREEN_RESULT,
+        ArtifactType.MODEL_CARD,
+        ArtifactType.RELATIONSHIP_VALIDATION_SET,
+        ArtifactType.CHAT_TURN_PLAN,
     )
 
     def __init__(
@@ -1436,11 +1464,13 @@ class ExecuteTopQuestionsStep:
         question_candidate_artifact_id: str,
         relationship_artifact_ids: list[str],
         llm: LLMClient | None = None,
+        payload_policy: PayloadPolicy = "schema+aggregates",
     ) -> None:
         self.loaded_datasets = list(loaded_datasets)
         self.question_candidate_artifact_id = question_candidate_artifact_id
         self.relationship_artifact_ids = relationship_artifact_ids
         self.llm = llm
+        self.payload_policy: PayloadPolicy = payload_policy
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         question_artifact = ctx.store.get_artifact(
@@ -1486,24 +1516,64 @@ class ExecuteTopQuestionsStep:
             and any(candidate.origin == "llm" for candidate in selected)
             else None
         )
+        # Only questions whose publication contract demands typed method
+        # evidence pay for the tool loop; a plain aggregate is cheaper and
+        # just as correct on the deterministic SQL path.
+        agent_route = self._settle_agent_route(ctx, selected)
+        # The agent must see what this run already produced (profiles, quality,
+        # roles, relationships) or it can only guess at the data.
+        context_artifacts = (
+            ctx.store.list_artifacts(project_id=ctx.project_id, session_id=ctx.session_id)
+            if agent_route
+            else []
+        )
         for candidate in selected:
             # Disclose machine-confirmed joins in result risks.
             if candidate.required_relations:
                 notes = exec_whitelist.disclosure_notes(candidate.required_relations)
                 if notes:
                     candidate = candidate.model_copy(update={"risks": [*candidate.risks, *notes]})
-            produced = execute_question_candidate(
-                candidate,
-                datasets=self.loaded_datasets,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-                parent_ids=parent_ids,
-                llm=self.llm,
-                confirmed_joins=confirmed_joins,
-                catalog=(
-                    llm_catalog if candidate.origin == "llm" else template_catalog
-                ),
-            )
+            produced: list[Artifact] | None = None
+            if agent_route and question_needs_method_agent(candidate):
+                agent_run = execute_question_with_tools(
+                    candidate,
+                    datasets=self.loaded_datasets,
+                    project_id=ctx.project_id,
+                    session_id=ctx.session_id,
+                    parent_ids=parent_ids,
+                    llm=cast(LLMClient, self.llm),
+                    context_artifacts=context_artifacts,
+                    store=ctx.store,
+                    payload_policy=self.payload_policy,
+                )
+                if agent_run.degraded_reason is None:
+                    produced = agent_run.artifacts
+                else:
+                    agent_route = not agent_run.route_unsupported
+                    ctx.emit_trace(
+                        TraceEvent(
+                            session_id=ctx.session_id,
+                            event_type="agent_route_degraded",
+                            name="execute_top_questions",
+                            summary={
+                                "question_id": candidate.question_id,
+                                "reason": agent_run.degraded_reason,
+                            },
+                        )
+                    )
+            if produced is None:
+                produced = execute_question_candidate(
+                    candidate,
+                    datasets=self.loaded_datasets,
+                    project_id=ctx.project_id,
+                    session_id=ctx.session_id,
+                    parent_ids=parent_ids,
+                    llm=self.llm,
+                    confirmed_joins=confirmed_joins,
+                    catalog=(
+                        llm_catalog if candidate.origin == "llm" else template_catalog
+                    ),
+                )
             artifacts.extend(produced)
             qexec = next(
                 (
@@ -1554,6 +1624,45 @@ class ExecuteTopQuestionsStep:
                     )
                 )
         return artifacts
+
+    def _settle_agent_route(
+        self,
+        ctx: SessionContext,
+        selected: Sequence[QuestionCandidate],
+    ) -> bool:
+        """Probe tool calling only when a selected question actually needs it."""
+        if not any(question_needs_method_agent(candidate) for candidate in selected):
+            return False
+        readiness = tool_calling_readiness(self.llm)
+        if readiness.source in {"probe", "cached"}:
+            ctx.emit_trace(
+                TraceEvent(
+                    session_id=ctx.session_id,
+                    event_type="tool_calling_probe",
+                    name="execute_top_questions",
+                    finished_at=datetime.now(UTC),
+                    summary={
+                        "usable": readiness.usable,
+                        "source": readiness.source,
+                        "detail": readiness.detail,
+                    },
+                )
+            )
+        if not readiness.usable:
+            ctx.emit_trace(
+                TraceEvent(
+                    session_id=ctx.session_id,
+                    event_type="agent_route_degraded",
+                    name="execute_top_questions",
+                    finished_at=datetime.now(UTC),
+                    summary={
+                        "reason": readiness.detail
+                        or "This client cannot drive the tool loop.",
+                        "source": readiness.source,
+                    },
+                )
+            )
+        return readiness.usable
 
 
 class ExportAgenticReportStep:
@@ -1624,6 +1733,42 @@ class ExportAgenticReportStep:
             narrator_llm=self.narrator_llm,
             payload_policy=self.payload_policy,
         )
+        # A live-LLM run that fell back to the deterministic report must not
+        # look identical to a healthy one: this flag is what marks the job
+        # degraded (worker completion summary) and lights the header badge.
+        report_llm = self.narrator_llm or self.llm
+        if report.used_fallback and not is_offline_client(report_llm):
+            ctx.emit_trace(
+                TraceEvent(
+                    session_id=ctx.session_id,
+                    event_type="report_degraded",
+                    name="export_agentic_report",
+                    finished_at=datetime.now(UTC),
+                    summary={
+                        "degraded": True,
+                        "reason": (
+                            "The language model was unavailable or repeatedly "
+                            "invalid, so this report was assembled "
+                            "deterministically from verified evidence."
+                        ),
+                    },
+                )
+            )
+        if report.narration_discards:
+            # Observability for silently dropped narrative paragraphs; the
+            # sections keep their bullets, nothing about the report changes.
+            ctx.emit_trace(
+                TraceEvent(
+                    session_id=ctx.session_id,
+                    event_type="narration_discarded",
+                    name="export_agentic_report",
+                    finished_at=datetime.now(UTC),
+                    summary={
+                        "discard_count": len(report.narration_discards),
+                        "discards": list(report.narration_discards),
+                    },
+                )
+            )
         for event in report.llm_events:
             call = event.usage
             summary = {
@@ -2330,6 +2475,7 @@ def run_auto_eda(
                 question_candidate_artifact_id=question_candidate_artifact.id,
                 relationship_artifact_ids=[artifact.id for artifact in relationship_artifacts],
                 llm=llm,
+                payload_policy=payload_policy,
             )
         ],
         ctx,
@@ -2634,6 +2780,7 @@ def _finalize_agent_artifacts(
             execution_fingerprint=effective_fingerprint,
             input_hashes=manifest.input_hashes,
             generated_at=generated_at,
+            started_at=manifest.created_at,
         )
         handoff.env_digest = runtime_env_digest
         context = handoff.payload.get("context_policy", {})

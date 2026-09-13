@@ -1,4 +1,4 @@
-"""Generic append-only JSONL event journal (extracted from loop_journal).
+"""Generic append-only JSONL event journal.
 
 The journal is the source of truth. Snapshots are optional caches and are
 never used by :meth:`JsonlEventJournal.rebuild`, so corruption in an older

@@ -8,13 +8,18 @@ import json
 import os
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from eda_platform.application.dto import JobEvent, JobStatus
+from eda_platform.application.dto import (
+    JobEvent,
+    JobStatus,
+    SessionJobList,
+    SessionJobSummary,
+)
 from eda_platform.application.ports import TERMINAL_JOB_STATUSES, JobBackend, JobCommand
 from eda_platform.application.services.session_service import ProjectNotFoundError
 from eda_platform.core.ids import validate_session_id
@@ -33,9 +38,6 @@ SUPPORTED_JOB_KINDS = frozenset(
         "report_generate",
         "session_fork",
         "question_draft",
-        "investigation_plan",
-        "investigation_execute",
-        "macro_loop",
         "synthesis_brief_create",
         "decision_report_generate",
         "cleaning_preview",
@@ -94,7 +96,16 @@ class EventsPage(NamedTuple):
     """False when the underlying page was full — more rows may follow immediately."""
 
 
-def _resolved_resource_policy(on_exceed: str) -> EdaResourcePolicy:
+# Policy fields a caller's Settings may raise. Anything outside this set stays
+# server-owned: a browser must not be able to widen the byte caps or reshape the
+# estimator's own multipliers.
+SETTABLE_RESOURCE_FIELDS = frozenset({"max_working_set_bytes", "max_rows_per_dataset"})
+
+
+def _resolved_resource_policy(
+    on_exceed: str, overrides: Mapping[str, int] | None = None
+) -> EdaResourcePolicy:
+    """Deployment env first, then the caller's own Settings choice on top."""
     env_fields = {
         "EDA_MAX_WORKING_SET_BYTES": "max_working_set_bytes",
         "EDA_MAX_INPUT_BYTES_TOTAL": "max_input_bytes_total",
@@ -112,6 +123,9 @@ def _resolved_resource_policy(on_exceed: str) -> EdaResourcePolicy:
             values[field_name] = int(raw)
         except ValueError as exc:
             raise JobValidationError(f"{env_name} must be an integer") from exc
+    for name, value in (overrides or {}).items():
+        if name in SETTABLE_RESOURCE_FIELDS:
+            values[name] = value
     try:
         return EdaResourcePolicy.model_validate(values)
     except ValueError as exc:
@@ -137,6 +151,7 @@ class JobService:
         generate_report: bool = True,
         dataset_workers: int = 1,
         resource_limit_action: str = "limited",
+        resource_overrides: Mapping[str, int] | None = None,
         llm: str = "env",
         payload_policy: str | None = None,
         llm_env: dict[str, str] | None = None,
@@ -156,7 +171,7 @@ class JobService:
             raise JobValidationError("dataset_workers must be 1 or 2")
         if resource_limit_action not in {"limited", "reject"}:
             raise JobValidationError("resource_limit_action must be limited or reject")
-        resource_policy = _resolved_resource_policy(resource_limit_action)
+        resource_policy = _resolved_resource_policy(resource_limit_action, resource_overrides)
         return self._create_and_enqueue(
             session_id,
             kind=kind,
@@ -368,116 +383,6 @@ class JobService:
             },
         )
 
-    def create_investigation_plan_job(
-        self,
-        session_id: str,
-        *,
-        project_id: str,
-        source_session_id: str,
-        question_ids: list[str],
-        deep: bool = False,
-        idempotency_key: str | None = None,
-        idempotency_content: dict[str, Any] | None = None,
-    ) -> JobStatus:
-        """Queue deterministic plan building onto a fresh derived run.
-
-        The plans land on their own ``investigation_*`` run that the driver
-        mints; ``session_id`` is the ``ipsess_*`` lifecycle run, so a failed build
-        never flips the source run to failed. Building spends no model budget,
-        which is why this kind carries no approval.
-        """
-        return self._create_and_enqueue(
-            session_id,
-            kind="investigation_plan",
-            project_id=project_id,
-            lane_key=source_session_id,
-            idempotency_key=idempotency_key,
-            idempotency_content=idempotency_content,
-            request_scope=source_session_id,
-            build_params=lambda _resolved: {
-                "source_session_id": source_session_id,
-                "question_ids": list(question_ids),
-                "deep": deep,
-            },
-        )
-
-    def create_investigation_execute_job(
-        self,
-        session_id: str,
-        *,
-        project_id: str,
-        source_session_id: str,
-        plan_session_id: str,
-        plan_ids: list[str],
-        plan_fingerprints: dict[str, str],
-        llm: str = "env",
-        payload_policy: str | None = None,
-        llm_env: dict[str, str] | None = None,
-        idempotency_key: str | None = None,
-        idempotency_content: dict[str, Any] | None = None,
-    ) -> JobStatus:
-        """Queue execution of approved plans onto a fresh derived run.
-
-        Findings and records land on ``plan_session_id``; ``session_id`` is the
-        ``ixsess_*`` lifecycle run. ``plan_fingerprints`` lets the worker
-        recompute what was approved right before executing.
-        """
-        return self._create_and_enqueue(
-            session_id,
-            kind="investigation_execute",
-            project_id=project_id,
-            lane_key=plan_session_id,
-            idempotency_key=idempotency_key,
-            env=llm_env if llm == "env" else None,
-            idempotency_content=idempotency_content,
-            request_scope=source_session_id,
-            build_params=lambda _resolved: {
-                "source_session_id": source_session_id,
-                "plan_session_id": plan_session_id,
-                "plan_ids": list(plan_ids),
-                "plan_fingerprints": dict(plan_fingerprints),
-                "llm": llm,
-                "payload_policy": payload_policy,
-            },
-        )
-
-    def create_macro_loop_job(
-        self,
-        session_id: str,
-        *,
-        project_id: str,
-        source_session_id: str,
-        plan_session_id: str,
-        depth: int,
-        llm: str = "env",
-        payload_policy: str | None = None,
-        llm_env: dict[str, str] | None = None,
-        idempotency_key: str | None = None,
-        idempotency_content: dict[str, Any] | None = None,
-    ) -> JobStatus:
-        """Queue the Ultra macro loop over an executed plan run.
-
-        The ledger and follow-up artifacts land on ``plan_session_id`` and its own
-        internal funnel runs; ``session_id`` is the ``mlsess_*`` lifecycle run.
-        """
-        return self._create_and_enqueue(
-            session_id,
-            kind="macro_loop",
-            project_id=project_id,
-            lane_key=plan_session_id,
-            idempotency_key=idempotency_key,
-            env=llm_env if llm == "env" else None,
-            idempotency_content=idempotency_content,
-            request_scope=source_session_id,
-            build_params=lambda _resolved: {
-                "source_session_id": source_session_id,
-                "plan_session_id": plan_session_id,
-                "depth": depth,
-                "llm": llm,
-                "payload_policy": payload_policy,
-            },
-        )
-
     def create_skill_replay_job(
         self,
         session_id: str,
@@ -647,7 +552,6 @@ class JobService:
         policy: dict[str, Any],
         data_state_witness: str,
         code_fingerprint: str,
-        release_certificate_digest: str,
         provider: str,
         payload_policy: str | None,
         llm_env: dict[str, str] | None,
@@ -678,7 +582,6 @@ class JobService:
                 "policy": policy,
                 "data_state_witness": data_state_witness,
                 "code_fingerprint": code_fingerprint,
-                "release_certificate_digest": release_certificate_digest,
                 "provider": provider,
                 "payload_policy": payload_policy,
                 "operation": operation,
@@ -842,6 +745,53 @@ class JobService:
 
     def get_job(self, job_id: str) -> JobStatus:
         return _to_status(self._require_job(job_id))
+
+    def retry_job(
+        self,
+        job_id: str,
+        *,
+        llm_env: dict[str, str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> JobStatus:
+        """Re-queue a failed or cancelled auto_eda job with its persisted params.
+
+        The durable ``params_json`` is the approved request (datasets, context,
+        payload policy, …) so nothing is re-derived; only the secret env
+        overlay is resolved fresh, because it is never persisted. Derived-run
+        kinds are excluded on purpose — their retry story is their own slice.
+        """
+        job = self._require_job(job_id)
+        if str(job["kind"]) != "auto_eda":
+            raise JobValidationError("Only the main analysis job can be retried.")
+        if str(job["status"]) not in TERMINAL_JOB_STATUSES:
+            raise JobConflictError(job_id, f"Job {job_id} is still active.")
+        if str(job["status"]) == "completed":
+            raise JobValidationError("Only a failed or cancelled job can be retried.")
+        params_json = self._lifecycle.params_json(job_id)
+        if params_json is None:
+            raise JobValidationError("The original job kept no parameters to retry.")
+        params = json.loads(params_json)
+        session_id = str(job["session_id"])
+        return self._create_and_enqueue(
+            session_id,
+            kind="auto_eda",
+            project_id=str(job["project_id"]),
+            idempotency_key=idempotency_key,
+            env=llm_env if params.get("llm") == "env" else None,
+            # The retried job must not collide with the original launch's
+            # digest semantics: scope the content to this retry source.
+            idempotency_content={"retry_of": job_id, "params": params},
+            request_scope=session_id,
+            build_params=lambda _resolved: params,
+        )
+
+    def list_session_jobs(self, session_id: str) -> SessionJobList:
+        """Job history for one session, newest first — deliberately unpaginated:
+        a single session's job count stays small."""
+        jobs = [
+            _to_session_summary(job) for job in self._store.list_jobs_for_session(session_id)
+        ]
+        return SessionJobList(session_id=session_id, jobs=jobs)
 
     def cancel_job(self, job_id: str) -> JobStatus:
         job = self._require_job(job_id)
@@ -1082,6 +1032,33 @@ def _check_idempotent_match(
 
 def events_url_for(job_id: str) -> str:
     return f"/api/v1/jobs/{job_id}/events"
+
+
+def _to_session_summary(job: dict) -> SessionJobSummary:
+    source_session_id: str | None = None
+    raw_params = job.get("params_json")
+    if isinstance(raw_params, str) and raw_params:
+        with suppress(ValueError):
+            params = json.loads(raw_params)
+            if isinstance(params, dict) and isinstance(
+                params.get("source_session_id"), str
+            ):
+                source_session_id = params["source_session_id"]
+    return SessionJobSummary(
+        job_id=job["job_id"],
+        session_id=job["session_id"],
+        project_id=job["project_id"],
+        kind=job["kind"],
+        status=job["status"],
+        cancel_requested=bool(job["cancel_requested"]),
+        created_at=_parse_datetime(job.get("created_at")),
+        started_at=_parse_datetime(job.get("started_at")),
+        finished_at=_parse_datetime(job.get("finished_at")),
+        error_code=job.get("error_code"),
+        error_message=job.get("error_message"),
+        source_session_id=source_session_id,
+        events_url=events_url_for(str(job["job_id"])),
+    )
 
 
 def _to_status(job: dict) -> JobStatus:

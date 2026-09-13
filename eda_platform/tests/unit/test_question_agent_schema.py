@@ -15,9 +15,7 @@ from pydantic import BaseModel
 
 from eda_platform.agents.chat_router import Intent
 from eda_platform.agents.code_agent import CodeDraft
-from eda_platform.agents.followup_agent import _RawFollowUpResponse
 from eda_platform.agents.interpretation import _InterpretationDraft
-from eda_platform.agents.investigation_loop import _ProbeDecision
 from eda_platform.agents.planner import AnalysisPlan
 from eda_platform.agents.question_agent import (
     RawLLMQuestionProposal,
@@ -36,9 +34,7 @@ STRUCTURED_OUTPUT_SCHEMAS: tuple[type[BaseModel], ...] = (
     Intent,
     _InterpretationDraft,
     RawSemanticHypotheses,
-    _ProbeDecision,
     ReportPlanDraft,
-    _RawFollowUpResponse,
     _SCQARewrite,
     _SCQAInterleavedRewrite,
 )

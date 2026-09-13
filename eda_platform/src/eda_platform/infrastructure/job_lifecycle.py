@@ -524,6 +524,8 @@ class JobLifecycleRepository:
         *,
         error_code: str | None = None,
         error_message: str | None = None,
+        error_detail: str | None = None,
+        summary: dict[str, object] | None = None,
     ) -> bool:
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"Invalid terminal status: {status}")
@@ -537,6 +539,8 @@ class JobLifecycleRepository:
                     status=status,
                     error_code=error_code,
                     error_message=error_message,
+                    error_detail=error_detail,
+                    extra_summary=summary,
                 )
                 conn.commit()
                 return changed
@@ -932,6 +936,8 @@ class JobLifecycleRepository:
         status: str,
         error_code: str | None,
         error_message: str | None,
+        error_detail: str | None = None,
+        extra_summary: dict[str, object] | None = None,
     ) -> bool:
         row = conn.execute(
             """
@@ -985,6 +991,12 @@ class JobLifecycleRepository:
             summary.update(
                 {"error_code": error_code, "error_message": error_message}
             )
+        if error_detail is not None:
+            # Raw exception text for the Trace page; the human sentence stays
+            # in error_message so status surfaces never show this by default.
+            summary["error_detail"] = error_detail
+        if extra_summary:
+            summary.update(extra_summary)
         self._insert_event(
             conn,
             job_id=claim.job_id,

@@ -22,6 +22,7 @@ const GROUPS: Record<string, string[]> = {
     "Questions",
     "Deep analysis",
     "Findings",
+    "Explore",
     "Compare",
     "Chat",
     "Skills",
@@ -244,6 +245,37 @@ describe("App Shell", () => {
     );
   });
 
+  it("offers a top-bar way back after the floating button is hidden", async () => {
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    await screen.findByRole("heading", { name: "Data Map" });
+    const banner = screen.getByRole("banner", { name: "Workbench" });
+    expect(
+      within(banner).queryByRole("button", { name: "Show activity button" }),
+    ).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Open activity" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "Activity" })).getByRole(
+        "button",
+        { name: "Hide floating button" },
+      ),
+    );
+
+    const restore = within(banner).getByRole("button", {
+      name: "Show activity button",
+    });
+    await user.click(restore);
+    expect(
+      screen.getByRole("button", {
+        name: "Close activity from floating button",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(banner).queryByRole("button", { name: "Show activity button" }),
+    ).toBeNull();
+  });
+
   it("does not duplicate the Activity launcher in the top bar", async () => {
     renderAppAt("/projects/p1/sessions/r1/data-map");
     await screen.findByRole("heading", { name: "Data Map" });
@@ -347,6 +379,23 @@ describe("Run navigation groups", () => {
         ).toEqual(pages),
       );
     }
+  });
+
+  it("always links Explore, with no capability to negotiate", async () => {
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/findings");
+    await screen.findByRole("heading", { name: "Findings" });
+
+    await chooseStage(user, "Investigate with the agent");
+    const list = await screen.findByRole("list", {
+      name: "Investigate with the agent",
+    });
+    const explore = await within(list).findByText("Explore");
+    expect(explore.closest("a")).toHaveAttribute(
+      "href",
+      "/projects/p1/sessions/r1/explorations",
+    );
+    expect(explore.closest("[aria-disabled='true']")).toBeNull();
   });
 
   it("gives every page an icon", async () => {
@@ -460,6 +509,74 @@ describe("Run navigation groups", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("names the failure instead of claiming EDA is still preparing", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          project_id: "p1",
+          title: "Failed run",
+          status: "failed",
+          created_at: "2026-07-20T10:00:00Z",
+          updated_at: "2026-07-21T10:00:00Z",
+          dataset_names: [],
+          artifact_count: 0,
+          report_status: null,
+          chat_message_count: 0,
+          code_version: "abc123",
+          seed: 42,
+          source_session_id: null,
+          artifact_type_counts: {},
+          warnings: [],
+        }),
+      ),
+      http.get("/api/v1/sessions/:sessionId/datasets", () =>
+        HttpResponse.json([]),
+      ),
+      http.get("/api/v1/sessions/:sessionId/jobs", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          jobs: [
+            {
+              job_id: "job_failed_1",
+              session_id: String(params["sessionId"]),
+              project_id: "p1",
+              kind: "auto_eda",
+              status: "failed",
+              cancel_requested: false,
+              created_at: "2026-07-25T10:00:00Z",
+              started_at: "2026-07-25T10:00:01Z",
+              finished_at: "2026-07-25T10:00:02Z",
+              error_code: "KeyError",
+              error_message:
+                "The analysis referenced a column or field (revenue) that the data does not contain.",
+              source_session_id: null,
+              events_url: "/api/v1/jobs/job_failed_1/events",
+            },
+          ],
+        }),
+      ),
+    );
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    await screen.findByRole("heading", { name: "Data Map" });
+
+    const navigation = screen.getByRole("navigation", {
+      name: "Session sections",
+    });
+    /* A visible marker, not only a hover title. */
+    expect(
+      await within(navigation).findByText("Analysis failed"),
+    ).toBeInTheDocument();
+    /* The greyed pages explain the failure with the worker's human sentence. */
+    const disabled = await within(navigation).findAllByTitle(
+      /The analysis failed\. The analysis referenced a column or field/,
+    );
+    expect(disabled.length).toBeGreaterThan(0);
+    expect(
+      within(navigation).queryByTitle("EDA is still preparing this workspace."),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides session navigation without an open run", async () => {
     renderAppAt("/projects/p1/new-session");
     await screen.findByRole("heading", { name: "New session" });
@@ -473,5 +590,170 @@ describe("Run navigation groups", () => {
     for (const label of ["Data map", "Quality", "Trace & cost", "Findings"]) {
       expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
     }
+  });
+});
+
+describe("Inspector file deletion", () => {
+  const upload = {
+    dataset_id: "ds_orders",
+    project_id: "p1",
+    display_name: "orders.csv",
+    original_uri: "projects/p1/uploads/ds_orders/v1/orders.csv",
+    format: "csv",
+    content_hash: "abc",
+    byte_size: 2048,
+    row_count: 42,
+    schema: [{ name: "id", dtype: "int64" }],
+    ingest_status: "ready",
+  };
+
+  it("asks for confirmation and only deletes after it", async () => {
+    let deleted = 0;
+    server.use(
+      http.get("/api/v1/projects/:projectId/uploads", () =>
+        HttpResponse.json([upload]),
+      ),
+      http.delete("/api/v1/projects/:projectId/uploads/:datasetId", () => {
+        deleted += 1;
+        return HttpResponse.json({ dataset_id: "ds_orders", deleted: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    const inspector = await screen.findByRole("complementary", {
+      name: "Context Inspector",
+    });
+
+    await user.click(
+      await within(inspector).findByRole("button", {
+        name: "Delete orders.csv",
+      }),
+    );
+    expect(deleted).toBe(0);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete orders.csv?",
+    });
+    expect(
+      within(dialog).getByText(/removed from every session in this project/i),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete file" }),
+    );
+    await waitFor(() => expect(deleted).toBe(1));
+    expect(
+      screen.queryByRole("dialog", { name: "Delete orders.csv?" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("cancelling the dialog deletes nothing", async () => {
+    let deleted = 0;
+    server.use(
+      http.get("/api/v1/projects/:projectId/uploads", () =>
+        HttpResponse.json([upload]),
+      ),
+      http.delete("/api/v1/projects/:projectId/uploads/:datasetId", () => {
+        deleted += 1;
+        return HttpResponse.json({ dataset_id: "ds_orders", deleted: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    const inspector = await screen.findByRole("complementary", {
+      name: "Context Inspector",
+    });
+    await user.click(
+      await within(inspector).findByRole("button", {
+        name: "Delete orders.csv",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(deleted).toBe(0);
+    expect(
+      within(inspector).getByText("orders.csv"),
+    ).toBeInTheDocument();
+  });
+
+  it("asks for confirmation before deleting a support document", async () => {
+    let deleted = 0;
+    server.use(
+      http.get("/api/v1/projects/:projectId/support-docs", ({ params }) =>
+        HttpResponse.json({
+          project_id: String(params["projectId"]),
+          docs: [
+            {
+              doc_id: "doc_1",
+              name: "notes.md",
+              byte_size: 128,
+              modified_at: "2026-07-25T12:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.delete("/api/v1/projects/:projectId/support-docs/:docId", () => {
+        deleted += 1;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    const inspector = await screen.findByRole("complementary", {
+      name: "Context Inspector",
+    });
+    await user.click(
+      await within(inspector).findByRole("button", {
+        name: "Delete support document notes.md",
+      }),
+    );
+    expect(deleted).toBe(0);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete notes.md?",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete document" }),
+    );
+    await waitFor(() => expect(deleted).toBe(1));
+    expect(
+      screen.queryByRole("dialog", { name: "Delete notes.md?" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lists and deletes uploads for a session without a project", async () => {
+    let deleted = 0;
+    server.use(
+      http.get("/api/v1/projects/:projectId/uploads", ({ params }) =>
+        HttpResponse.json(
+          String(params["projectId"]) === "unfiled-sessions" ? [upload] : [],
+        ),
+      ),
+      http.delete("/api/v1/projects/:projectId/uploads/:datasetId", ({ params }) => {
+        if (String(params["projectId"]) !== "unfiled-sessions") {
+          return HttpResponse.json(
+            { error: { code: "project_not_found", message: "wrong project" } },
+            { status: 404 },
+          );
+        }
+        deleted += 1;
+        return HttpResponse.json({ dataset_id: "ds_orders", deleted: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt("/projects/unfiled-sessions/sessions/r1/data-map");
+    const inspector = await screen.findByRole("complementary", {
+      name: "Context Inspector",
+    });
+
+    expect(
+      await within(inspector).findByText("orders.csv"),
+    ).toBeInTheDocument();
+    await user.click(
+      within(inspector).getByRole("button", { name: "Delete orders.csv" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete orders.csv?",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete file" }),
+    );
+    await waitFor(() => expect(deleted).toBe(1));
   });
 });

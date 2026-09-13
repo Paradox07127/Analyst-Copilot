@@ -18,25 +18,15 @@ from pydantic import BaseModel
 
 from eda_platform.agents.interpretation import InterpretationResult, interpret_findings
 from eda_platform.core.llm import OfflineLLMClient
-from eda_platform.drivers.auto_eda import AutoEDAResult, run_auto_eda
-from eda_platform.drivers.investigation_orchestrator import (
-    approve_plan,
-    create_investigation_plans,
-    execute_investigation_plans,
-)
 from eda_platform.drivers.question_exec import execute_question_candidate
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, EvidenceRef
-from eda_platform.schemas.investigations import ValidatedFinding
 from eda_platform.schemas.questions import (
     QuestionCandidate,
-    QuestionCandidateSet,
     QuestionExecutionResult,
     QuestionFinding,
     QuestionScore,
 )
 from eda_platform.tools.loader import LoadedDataset, load_csv
-
-GOLDEN_DATA = Path(__file__).parents[1] / "golden" / "data"
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -285,63 +275,3 @@ def test_question_exec_none_client_stamps_absent(tmp_path: Path) -> None:
     qexec = _qexec_from(artifacts)
     assert qexec.interpretation_status == "absent"
     assert qexec.interpretation == ""
-
-
-# --------------------------------------------------------------------------- #
-# Orchestrator wiring (offline end-to-end)
-# --------------------------------------------------------------------------- #
-def _source(tmp_path: Path) -> AutoEDAResult:
-    return run_auto_eda(
-        [GOLDEN_DATA / "ecommerce_orders.csv"],
-        workspace=tmp_path / "workspace",
-        project_id="project_demo",
-        session_id="source_run",
-    )
-
-
-def test_orchestrator_offline_stamps_absent_on_validated_finding(tmp_path: Path) -> None:
-    source = _source(tmp_path)
-    candidate_set = QuestionCandidateSet.model_validate(
-        next(
-            item.payload
-            for item in source.artifacts
-            if item.type is ArtifactType.QUESTION_CANDIDATE_SET
-        )
-    )
-    candidate = next(
-        item
-        for item in candidate_set.candidates
-        if item.origin == "template" and item.sql_template is not None
-    )
-    planned = create_investigation_plans(
-        project_id=source.project_id,
-        source_session_id=source.session_id,
-        question_ids=[candidate.question_id],
-        workspace=source.workspace,
-        session_id="plan_run",
-    )
-    plan_artifact = next(
-        item for item in planned.artifacts if item.type is ArtifactType.INVESTIGATION_PLAN
-    )
-    approve_plan(
-        project_id=source.project_id,
-        plan_session_id=planned.session_id,
-        plan_id=plan_artifact.id,
-        workspace=source.workspace,
-    )
-    completed = execute_investigation_plans(
-        project_id=source.project_id,
-        plan_session_id=planned.session_id,
-        plan_ids=[plan_artifact.id],
-        workspace=source.workspace,
-    )
-    finding = ValidatedFinding.model_validate(
-        next(
-            item.payload
-            for item in completed.artifacts
-            if item.type is ArtifactType.VALIDATED_FINDING
-        )
-    )
-    # Offline run: no model was available, so interpretation is absent, not fabricated.
-    assert finding.interpretation_status == "absent"
-    assert finding.interpretation == ""

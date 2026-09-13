@@ -31,6 +31,7 @@ import {
   DataWorkspacePage,
   DatasetScopeBar,
 } from "../../components/data-workspace";
+import { saveCsv } from "../../components/csv";
 import { Marquee, formatCompact } from "../../components/ui";
 import { HeaderDistributionChart } from "./ColumnDistributionStrip";
 import { TypeIcon, classifyColumn } from "./mini-charts";
@@ -638,6 +639,21 @@ export function Component() {
                     ? " · more available"
                     : ""}
               </span>
+              <button
+                type="button"
+                onClick={() =>
+                  saveCsv(
+                    `${dataset?.display_name?.replace(/\.csv$/i, "") ?? datasetId}-rows-${offset + 1}-${offset + preview.data.rows.length}.csv`,
+                    preview.data.columns,
+                    displayedRows.map((row) => row.map(formatCell)),
+                  )
+                }
+                disabled={displayedRows.length === 0}
+                title="Downloads only the rows already loaded on this page, after search and sort — not the whole table."
+                className="ml-auto rounded-base border border-border px-3 py-1 text-sm hover:bg-surface disabled:opacity-50"
+              >
+                Export loaded rows (CSV)
+              </button>
             </footer>
           </>
         ))}

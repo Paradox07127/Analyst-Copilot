@@ -40,7 +40,7 @@
     "payment_sequential.*(?:ANOVA|p-value)",
     "(?:seller|customer|geolocation)_zip_code_prefix.*(?:average|mean)",
     "\\bp(?:-value)?\\s*[=:]?\\s*0(?:\\D|$)",
-    "\\[Low relevance\\]"
+    "\\[Barely related evidence\\]"
   ],
   "max_tokens": 0,
   "max_duration_seconds": 35.0

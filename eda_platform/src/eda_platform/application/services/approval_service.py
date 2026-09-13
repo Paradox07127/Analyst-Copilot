@@ -78,6 +78,34 @@ class ApprovalIdempotencyRaceError(ApprovalConsumedError):
     """The same idempotent request lost the approval's atomic consume race."""
 
 
+def read_active_credential(
+    store: ArtifactStore,
+    *,
+    action_hash: str,
+    kind: str,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Read-only check that a user-issued credential is still valid.
+
+    Unlike an approval, a credential is a declaration of fact (e.g. "assignment
+    in this column was randomized"), so it is verified without being consumed:
+    the same confirmation may back repeated analyses until it expires. The same
+    integrity guards as validate_and_consume apply — kind, payload digest,
+    pending status and expiry — and any mismatch reads as absent.
+    """
+    row = store.get_pending_action(action_hash, session_id=session_id)
+    if row is None or str(row["kind"]) != kind:
+        return None
+    payload = json.loads(str(row["payload_json"]))
+    payload = payload if isinstance(payload, dict) else {}
+    if payload_digest(payload) != str(row["payload_digest"]):
+        return None
+    now = datetime.now(UTC).isoformat()
+    if row["status"] != "pending" or str(row["expires_at"]) <= now:
+        return None
+    return payload
+
+
 class ApprovalService:
     def __init__(
         self,

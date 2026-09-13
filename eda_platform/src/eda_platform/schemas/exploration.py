@@ -558,3 +558,39 @@ class ExplorationLoopState(BaseModel):
                 "current_round_index is not restored: no round is open."
             )
         return self.current_round_index
+
+
+class ExplorationFindingClaim(BaseModel):
+    """One gate-passed exploration claim, republished with the store artifact
+    ids of the receipts it cites so report gates can resolve its numbers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: str = Field(min_length=1)
+    receipt_artifact_ids: tuple[str, ...] = ()
+
+
+class ExplorationFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    insight_id: str = Field(min_length=1)
+    statement: str | None = None
+    rationale: str | None = None
+    status: str = Field(min_length=1)
+    trust_level: str = Field(min_length=1)
+    limitations: tuple[str, ...] = ()
+    claims: tuple[ExplorationFindingClaim, ...] = ()
+
+
+class ExplorationFindingSet(BaseModel):
+    """Persisted deep-dive conclusions of one stopped exploration run
+    (artifact type ``EXPLORATION_FINDING_SET``)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = 1
+    exploration_id: str = Field(min_length=1)
+    source_session_id: str = Field(min_length=1)
+    goal: str | None = None
+    stop_reason: str = Field(min_length=1)
+    findings: tuple[ExplorationFinding, ...] = ()

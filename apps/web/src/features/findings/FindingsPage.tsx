@@ -18,8 +18,8 @@ import type {
   KnowledgePromotionPrepared,
 } from "../../api/client";
 import {
-  useCapabilities,
   useDecisionCoverage,
+  useExplorations,
   useFindings,
   usePrepareFindingPromotion,
   usePromoteFinding,
@@ -34,6 +34,7 @@ import {
   ErrorState,
   LoadingSkeleton,
 } from "../../components/async-states";
+import { saveCsv } from "../../components/csv";
 import {
   Badge,
   Card,
@@ -186,6 +187,17 @@ function PromoteControl({
   );
 }
 
+/* The prefill names the finding's artifact id and question so the chat agent
+ * can locate the artifact; the user edits or replaces the wording freely. */
+function findingChatDraft(finding: FindingSummary): string {
+  const statement = (finding.statements ?? [])[0]?.text;
+  return (
+    `About finding ${finding.artifact_id} ("${finding.question}")` +
+    (statement ? ` — "${statement}"` : "") +
+    ": why does the data support this, and what should I check before relying on it?"
+  );
+}
+
 function FindingCard({
   projectId,
   sessionId,
@@ -271,6 +283,13 @@ function FindingCard({
           </Badge>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs">
+          <Link
+            to={sessionSectionPath(projectId, sessionId, "chat")}
+            state={{ chatDraft: findingChatDraft(finding) }}
+            className="text-primary underline-offset-2 hover:underline"
+          >
+            Ask about this
+          </Link>
           {sourceSessionNavigable ? (
             <Link
               to={sessionSectionPath(projectId, finding.source_session_id, "artifacts")}
@@ -669,6 +688,36 @@ function InvestigationLog({
 
 const RELIABILITY_OPTIONS = ["All", "high", "medium", "low"];
 
+function exportFindingsCsv(findings: FindingSummary[]): void {
+  saveCsv(
+    "findings.csv",
+    [
+      "Question",
+      "Statements",
+      "Claim class",
+      "Analytical reliability",
+      "Evidence support",
+      "Decision readiness",
+      "Freshness",
+      "Limitations",
+      "Source session",
+      "Saved at",
+    ],
+    findings.map((finding) => [
+      finding.question,
+      (finding.statements ?? []).map((statement) => statement.text).join(" | "),
+      finding.claim_class,
+      finding.analytical_reliability,
+      finding.evidence_support,
+      finding.decision_readiness,
+      finding.freshness.status,
+      (finding.limitations ?? []).join(" | "),
+      finding.source_session_id,
+      finding.created_at ?? "",
+    ]),
+  );
+}
+
 function FindingsList({
   projectId,
   sessionId,
@@ -700,24 +749,35 @@ function FindingsList({
             Showing {visible.length} of {findings.length} project finding(s)
           </p>
         </div>
-        <label
-          htmlFor="findings-reliability-filter"
-          className="flex w-fit flex-col gap-1 text-xs text-status-neutral"
-        >
-          Analytical reliability
-          <select
-            id="findings-reliability-filter"
-            value={reliability}
-            onChange={(event) => onReliabilityChange(event.target.value)}
-            className="rounded-base border border-border bg-bg px-2 py-1 text-sm text-text"
+        <div className="flex flex-wrap items-end gap-3">
+          <label
+            htmlFor="findings-reliability-filter"
+            className="flex w-fit flex-col gap-1 text-xs text-status-neutral"
           >
-            {RELIABILITY_OPTIONS.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
+            Analytical reliability
+            <select
+              id="findings-reliability-filter"
+              value={reliability}
+              onChange={(event) => onReliabilityChange(event.target.value)}
+              className="rounded-base border border-border bg-bg px-2 py-1 text-sm text-text"
+            >
+              {RELIABILITY_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => exportFindingsCsv(visible)}
+            disabled={visible.length === 0}
+            title="Downloads the findings currently listed, after the reliability filter."
+            className="rounded-base border border-border px-3 py-1 text-sm hover:bg-surface disabled:opacity-50"
+          >
+            Export findings (CSV)
+          </button>
+        </div>
       </div>
       {visible.length === 0 ? (
         <EmptyState
@@ -740,10 +800,10 @@ function FindingsList({
   );
 }
 
-/* The way into Explore. It sits here rather than in the section bar because
- * this is the page where the user has just learned what is worth chasing, and
- * because a started run has no listing endpoint — the id remembered at launch
- * is the only way back to one already in flight. */
+/* The way into Explore. It sits here because this is the page where the user
+ * has just learned what is worth chasing. Runs already started are found
+ * through the server-side listing; the id remembered at launch is only the
+ * fallback while that listing loads. */
 function DeepDiveBar({
   projectId,
   sessionId,
@@ -751,11 +811,11 @@ function DeepDiveBar({
   projectId: string;
   sessionId: string;
 }) {
-  const capabilities = useCapabilities();
-  if (capabilities.data?.exploration_available !== true) return null;
+  const runs = useExplorations(sessionId);
 
   const goal = readExplorationGoal(sessionId);
-  const startedId = readLastExplorationId(sessionId);
+  const listedId = runs.data?.explorations?.[0]?.exploration_id;
+  const startedId = listedId ?? readLastExplorationId(sessionId);
   const to = startedId
     ? explorationRunPath(projectId, sessionId, startedId)
     : sessionSectionPath(projectId, sessionId, "explorations");
@@ -764,8 +824,8 @@ function DeepDiveBar({
     <Card tone="quiet" className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3">
       <p className="min-w-64 flex-1 text-sm">
         {startedId ? (
-          /* Not "is running": the remembered id says a run was started, not
-           * that it is still going. The run page owns the status. */
+          /* Not "is running": a listed run was started, not necessarily still
+           * going. The run page owns the status. */
           "This session has a deep dive."
         ) : goal ? (
           <>

@@ -6,6 +6,7 @@ import {
   sortPreviewRows,
 } from "../features/datasets/TablePreviewPage";
 import { renderAppAt, renderAppWithRouterAt } from "./render";
+import { objectUrls } from "./setup";
 
 describe("sortPreviewRows", () => {
   it("sorts numeric columns by value, not lexicographic order", () => {
@@ -136,7 +137,6 @@ describe("Table Preview toolbar (integration)", () => {
 
     expect(screen.getByLabelText("Dataset")).toHaveValue("sample");
     expect(screen.getByRole("button", { name: "Search loaded rows" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Export loaded rows" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "All tables" })).not.toBeInTheDocument();
     expect(screen.queryByText("Inspecting sample.csv")).not.toBeInTheDocument();
   });
@@ -202,5 +202,57 @@ describe("Table header distributions (integration)", () => {
       within(nameHeader).getByText("row-1 · 30 records (12.0%)"),
     ).toBeInTheDocument();
     expect(bars[1]).toHaveClass("opacity-45");
+  });
+});
+
+/* jsdom's Blob only exposes FileReader. */
+function readBlob(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(blob);
+  });
+}
+
+describe("Table preview CSV export", () => {
+  it("downloads the loaded rows as CSV and says only loaded rows are included", async () => {
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/table/sample");
+    await screen.findByText("row-0");
+
+    const priorDownloads = objectUrls.created.length;
+    const exportButton = screen.getByRole("button", {
+      name: "Export loaded rows (CSV)",
+    });
+    expect(exportButton).toHaveAccessibleDescription(
+      /only the rows already loaded on this page/i,
+    );
+    await user.click(exportButton);
+
+    expect(objectUrls.created.length).toBe(priorDownloads + 1);
+    const csv = await readBlob(objectUrls.created.at(-1)!);
+    expect(csv.split(/\r?\n/)[0]).toBe("id,name,value");
+    expect(csv).toContain("0,row-0,0");
+    expect(csv).toContain("row-99");
+    expect(csv).not.toContain("row-100");
+  });
+
+  it("exports what is on screen: search and sort apply", async () => {
+    const user = userEvent.setup();
+    renderAppAt(
+      "/projects/p1/sessions/r1/table/sample?q=row-1&sort=id&dir=desc",
+    );
+    await screen.findByDisplayValue("row-1");
+
+    const priorDownloads = objectUrls.created.length;
+    await user.click(
+      screen.getByRole("button", { name: "Export loaded rows (CSV)" }),
+    );
+    const csv = await readBlob(objectUrls.created.at(-1)!);
+    expect(objectUrls.created.length).toBe(priorDownloads + 1);
+    const lines = csv.split(/\r?\n/);
+    expect(lines[1]).toContain("row-19");
+    expect(csv).not.toContain("row-0,");
   });
 });

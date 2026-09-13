@@ -70,6 +70,7 @@ from eda_platform.core.provider_registry import (
 )
 from eda_platform.core.request_dialect import forget_learned_repairs
 from eda_platform.core.tool_calling_probe import forget_probe_results
+from eda_platform.schemas.resource_metrics import EdaResourcePolicy
 
 DEFAULT_SESSION_ID = "default"
 DEFAULT_SESSION_TTL_SECONDS = 12 * 60 * 60
@@ -82,13 +83,26 @@ PAYLOAD_POLICIES = ("schema_only", "schema+aggregates", "schema+aggregates+sampl
 STRUCTURED_MODES = ("auto", "json_schema", "json_object")
 
 # The exploration meaning of this legacy integer has one authority in
-# core.exploration_tiers: 0 quick, 1 standard, 2/3 deep. Existing investigation
-# thresholds remain below until that older workflow is retired.
+# core.exploration_tiers: 0 quick, 1 standard, 2/3 deep.
 DEFAULT_ANALYSIS_DEPTH = min(ANALYSIS_DEPTH_TO_EXPLORATION_TIER)
 MIN_ANALYSIS_DEPTH = min(ANALYSIS_DEPTH_TO_EXPLORATION_TIER)
 MAX_ANALYSIS_DEPTH = max(ANALYSIS_DEPTH_TO_EXPLORATION_TIER)
-DEEP_INVESTIGATION_DEPTH = 1
-MACRO_LOOP_DEPTH = 2
+
+# Resource limits a user may raise when their machine can take it. Only the two
+# that decide whether a given upload runs at all are settable: the working-set
+# budget is what stops real runs, and the per-table row cap is the only other
+# limit that can bind once that budget is raised. The remaining policy fields
+# (byte caps, column cap, sampling depth, frame multipliers, on_exceed) are
+# either an order of magnitude looser than the working-set gate or describe how
+# the estimate is made rather than what a machine can hold.
+DEFAULT_MAX_WORKING_SET_BYTES = EdaResourcePolicy.model_fields[
+    "max_working_set_bytes"
+].default
+DEFAULT_MAX_ROWS_PER_DATASET = EdaResourcePolicy.model_fields[
+    "max_rows_per_dataset"
+].default
+MIN_MAX_WORKING_SET_BYTES, MAX_MAX_WORKING_SET_BYTES = 512 << 20, 64 << 30
+MIN_MAX_ROWS_PER_DATASET, MAX_MAX_ROWS_PER_DATASET = 100_000, 500_000_000
 
 MIN_TEMPERATURE, MAX_TEMPERATURE = 0.0, 2.0
 MIN_MAX_TOKENS, MAX_MAX_TOKENS = 256, 200_000
@@ -133,6 +147,8 @@ class _Session:
     analysis_depth: int = DEFAULT_ANALYSIS_DEPTH
     report_model: str = ""
     """Optional second model for the report narrative; "" means use `settings`."""
+    max_working_set_bytes: int = DEFAULT_MAX_WORKING_SET_BYTES
+    max_rows_per_dataset: int = DEFAULT_MAX_ROWS_PER_DATASET
     version: int = 0
 
 
@@ -145,6 +161,8 @@ class EffectiveSettings:
     overridden: bool = False
     env_overlay: dict[str, str] = field(default_factory=dict)
     analysis_depth: int = DEFAULT_ANALYSIS_DEPTH
+    resource_overrides: dict[str, int] = field(default_factory=dict)
+    """Resource-policy fields the caller chose in Settings, for a new run."""
 
 
 @dataclass
@@ -275,6 +293,10 @@ class SettingsService:
             overridden=session.touched,
             env_overlay=_env_overlay(session.settings, session.report_model),
             analysis_depth=session.analysis_depth,
+            resource_overrides={
+                "max_working_set_bytes": session.max_working_set_bytes,
+                "max_rows_per_dataset": session.max_rows_per_dataset,
+            },
         )
 
     # Write paths
@@ -315,6 +337,20 @@ class SettingsService:
                 session.analysis_depth = _parse_analysis_depth(patch.analysis_depth)
             if patch.report_model is not None:
                 session.report_model = _parse_report_model(patch.report_model)
+            if patch.max_working_set_bytes is not None:
+                session.max_working_set_bytes = _bounded_int(
+                    "max_working_set_bytes",
+                    patch.max_working_set_bytes,
+                    MIN_MAX_WORKING_SET_BYTES,
+                    MAX_MAX_WORKING_SET_BYTES,
+                )
+            if patch.max_rows_per_dataset is not None:
+                session.max_rows_per_dataset = _bounded_int(
+                    "max_rows_per_dataset",
+                    patch.max_rows_per_dataset,
+                    MIN_MAX_ROWS_PER_DATASET,
+                    MAX_MAX_ROWS_PER_DATASET,
+                )
             session.touched = True
             session.version += 1
             return self._view(session)
@@ -335,6 +371,8 @@ class SettingsService:
             session.dev_mode = False
             session.analysis_depth = DEFAULT_ANALYSIS_DEPTH
             session.report_model = ""
+            session.max_working_set_bytes = DEFAULT_MAX_WORKING_SET_BYTES
+            session.max_rows_per_dataset = DEFAULT_MAX_ROWS_PER_DATASET
             session.version += 1
             return self._view(session)
 
@@ -458,6 +496,8 @@ class SettingsService:
             usd_per_1k_prompt=settings.usd_per_1k_prompt,
             usd_per_1k_completion=settings.usd_per_1k_completion,
             analysis_depth=session.analysis_depth,
+            max_working_set_bytes=session.max_working_set_bytes,
+            max_rows_per_dataset=session.max_rows_per_dataset,
             dev_mode=session.dev_mode,
             api_key_set=bool(settings.api_key),
             api_key_last4=_last4(settings.api_key),
@@ -749,6 +789,12 @@ def _parse_provider(value: str) -> LLMProvider:
         return LLMProvider(value.strip())
     except ValueError:
         raise SettingsValidationError(f"Unknown provider: {value!r}") from None
+
+
+def _bounded_int(name: str, value: int, low: int, high: int) -> int:
+    if isinstance(value, bool) or not low <= value <= high:
+        raise SettingsValidationError(f"{name} must be between {low} and {high}.")
+    return int(value)
 
 
 def _bounded_float(

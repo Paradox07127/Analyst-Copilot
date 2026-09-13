@@ -21,12 +21,9 @@ import pytest
 from eda_platform.core.store import ArtifactStore
 from eda_platform.core.trace import FINDINGS_DEDUPLICATED
 from eda_platform.drivers.synthesis_orchestrator import create_synthesis_brief
-from eda_platform.schemas.anomaly import AnomalyScreenResult
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, EvidenceRef
 from eda_platform.schemas.investigations import InvestigationRecord, ValidatedFinding
-from eda_platform.schemas.model_card import ModelCard
 from eda_platform.schemas.questions import FindingScore, QuestionFinding
-from eda_platform.schemas.stats import StatTestResult
 from eda_platform.schemas.synthesis import SynthesisBrief
 from eda_platform.tools.interestingness import (
     DEFAULT_COVERAGE,
@@ -37,11 +34,6 @@ from eda_platform.tools.interestingness import (
     deduplicate_findings,
     finding_interestingness,
     interestingness,
-)
-from eda_platform.tools.method_findings import (
-    anomaly_findings,
-    model_findings,
-    stat_findings,
 )
 
 
@@ -132,108 +124,6 @@ def test_finding_interestingness_with_stat_backing_is_not_penalized() -> None:
         text="A pattern.", evidence=_stat_evidence(0.4), exploratory=False
     )
     assert finding_interestingness(exploratory) == finding_interestingness(validated)
-
-
-# --------------------------------------------------------------------------- #
-# Reducer wiring: interestingness multiplies into final only when computed.
-# --------------------------------------------------------------------------- #
-def _stat_result(
-    group_column: str = "region", value_column: str = "revenue"
-) -> StatTestResult:
-    return StatTestResult(
-        dataset_id="sales.csv",
-        test_type="one_way_anova",
-        group_column=group_column,
-        value_column=value_column,
-        statistic=8.1,
-        p_value=0.002,
-        effect_size=0.2,
-        sample_size=120,
-    )
-
-
-def test_stat_reducer_without_row_count_keeps_legacy_score() -> None:
-    finding = stat_findings(_stat_result(), "artifact")[0]
-    assert finding.score is not None
-    assert finding.score.interestingness is None
-    assert finding.score.final == 0.998  # impact x significance, DI8-D contract
-
-
-def test_stat_reducer_multiplies_interestingness_into_final() -> None:
-    finding = stat_findings(_stat_result(), "artifact", dataset_row_count=240)[0]
-    score = finding.score
-    assert score is not None
-    assert score.interestingness is not None
-    assert 0.0 < score.interestingness < 1.0
-    assert score.final == pytest.approx(
-        score.impact * score.significance * score.interestingness, abs=1e-5
-    )
-
-
-def test_stat_reducer_penalizes_identity_column_pair() -> None:
-    honest = stat_findings(_stat_result(), "artifact", dataset_row_count=240)[0]
-    identity = stat_findings(
-        _stat_result(group_column="revenue", value_column="revenue"),
-        "artifact",
-        dataset_row_count=240,
-    )[0]
-    assert honest.score is not None and identity.score is not None
-    assert identity.score.interestingness is not None
-    assert honest.score.interestingness is not None
-    assert identity.score.interestingness < honest.score.interestingness
-    assert identity.score.final < honest.score.final
-
-
-def _model_card(feature_columns: list[str]) -> ModelCard:
-    return ModelCard(
-        dataset_id="orders",
-        task_type="regression",
-        target_column="amount",
-        feature_columns=feature_columns,
-        split_strategy="random",
-        train_rows=80,
-        test_rows=20,
-        model_type="baseline",
-        metrics={"r2": 0.6},
-    )
-
-
-def test_model_reducer_penalizes_target_predicting_itself() -> None:
-    honest = model_findings(_model_card(["quantity"]), "artifact", dataset_row_count=200)[0]
-    identity = model_findings(
-        _model_card(["quantity", "amount"]), "artifact", dataset_row_count=200
-    )[0]
-    assert honest.score is not None and identity.score is not None
-    assert honest.score.interestingness is not None
-    assert identity.score.interestingness is not None
-    assert identity.score.interestingness < honest.score.interestingness
-
-
-def _anomaly_result(outlier_count: int) -> AnomalyScreenResult:
-    return AnomalyScreenResult(
-        dataset_name="orders",
-        column="amount",
-        method="robust_zscore",
-        threshold=3.5,
-        total_rows=100,
-        non_null_rows=80,
-        outlier_count=outlier_count,
-        outlier_percent=outlier_count / 80 * 100,
-        median=10,
-        mad=2,
-        q1=8,
-        q3=12,
-    )
-
-
-def test_anomaly_reducer_penalizes_count_equals_rows_identity() -> None:
-    partial = anomaly_findings(_anomaly_result(20), "artifact")[0]
-    everything = anomaly_findings(_anomaly_result(80), "artifact")[0]
-    assert partial.score is not None and everything.score is not None
-    # The anomaly result carries its own coverage anchor -> always computed.
-    assert partial.score.interestingness is not None
-    assert everything.score.interestingness is not None
-    assert everything.score.interestingness < partial.score.interestingness
 
 
 # --------------------------------------------------------------------------- #

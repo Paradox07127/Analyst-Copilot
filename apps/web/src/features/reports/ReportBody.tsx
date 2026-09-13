@@ -12,29 +12,29 @@ import { Badge, type Tone } from "../../components/ui";
 import { EvidenceLaneBadge } from "../exploration/ExplorationView";
 import { headingId, isArtifactIdShape } from "./report-outline";
 
-/* exporter.py:_narrative_claim_text — the only prefixes it emits. Anything
+/* exporter.py:display_claim_text — the only prefixes it emits. Anything
  * else in brackets is the author's own text and is left alone. */
 const QUALIFIERS: Record<string, { tone: Tone; meaning: string }> = {
-  Indicative: {
+  "Suggestive, not conclusive": {
     tone: "info",
     meaning:
       "Supported by evidence, but not at the strongest tier. Check the Claim Ledger before quoting it.",
   },
-  "Exploratory — hypothesis-generating": {
+  "A lead, not a conclusion": {
     tone: "neutral",
     meaning:
-      "A lead, not a conclusion. It suggests where to look next; it does not settle anything.",
+      "It suggests where to look next; it does not settle anything.",
   },
   "Confirmatory evidence — not a claim of certainty": {
     tone: "info",
     meaning:
       "Evidence from a designated confirmation lane. It still carries limitations and is not a claim of certainty.",
   },
-  "Low relevance": {
+  "Barely related evidence": {
     tone: "neutral",
     meaning: "Evidence exists but barely bears on the claim.",
   },
-  "Unverified figures": {
+  "Figures not re-checked": {
     tone: "warn",
     meaning:
       "The figures in this claim could not be re-checked against an evidence artifact.",
@@ -78,7 +78,7 @@ function QualifierBadges({ labels }: { labels: string[] }) {
     <>
       {labels.map((label) => (
         <span key={label} className="mr-1 inline-flex align-baseline">
-          {label === "Exploratory — hypothesis-generating" ? (
+          {label === "A lead, not a conclusion" ? (
             <EvidenceLaneBadge lane="exploratory" label={label} />
           ) : label === "Confirmatory evidence — not a claim of certainty" ? (
             <EvidenceLaneBadge lane="confirmatory" label={label} />
@@ -128,6 +128,7 @@ export function ReportBody({
   selectedId,
   onInspect,
   qualityHref,
+  onAskSection,
 }: {
   markdown: string;
   inspectableIds: Set<string>;
@@ -135,6 +136,8 @@ export function ReportBody({
   onInspect: (artifactId: string) => void;
   /** Where "the Quality page" should go; omitted outside a session route. */
   qualityHref?: string;
+  /** When given, every section heading offers "Ask about this" (chat). */
+  onAskSection?: (sectionTitle: string) => void;
 }) {
   const components = useMemo<Components>(() => {
     const inspectable = (token: string) =>
@@ -191,11 +194,33 @@ export function ReportBody({
           {children}
         </h1>
       ),
-      h2: ({ node, children, ...props }) => (
-        <h2 {...props} id={headingId(childText(children))}>
-          {children}
-        </h2>
-      ),
+      h2: ({ node, children, ...props }) => {
+        const text = childText(children);
+        const heading = (
+          <h2 {...props} id={headingId(text)}>
+            {children}
+          </h2>
+        );
+        if (!onAskSection) return heading;
+        /* A sibling, not a child: a button inside the heading would pollute
+         * its accessible name and every outline built from it. */
+        return (
+          <>
+            {heading}
+            <div className="not-prose">
+              <button
+                type="button"
+                onClick={() => onAskSection(text)}
+                aria-label={`Ask about ${text}`}
+                title="Open Chat with a question about this section prefilled"
+                className="text-xs font-medium text-primary hover:underline"
+              >
+                Ask about this section
+              </button>
+            </div>
+          </>
+        );
+      },
       h3: ({ node, children, ...props }) => (
         <h3 {...props} id={headingId(childText(children))}>
           {children}
@@ -243,7 +268,7 @@ export function ReportBody({
         );
       },
     };
-  }, [inspectableIds, selectedId, onInspect, qualityHref]);
+  }, [inspectableIds, selectedId, onInspect, qualityHref, onAskSection]);
 
   return (
     <article className="report-markdown min-w-0">

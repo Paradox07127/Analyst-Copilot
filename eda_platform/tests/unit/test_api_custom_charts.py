@@ -58,6 +58,10 @@ def _profile(session_id: str) -> Artifact:
             "columns": 3,
             "column_names": ["amount", "label", "day"],
             "dtypes": {"amount": "int64", "label": "object", "day": "object"},
+            "missing_values": {"amount": 0, "label": 0, "day": 0},
+            "missing_percent": {"amount": 0.0, "label": 0.0, "day": 0.0},
+            "numeric_columns": ["amount"],
+            "categorical_columns": ["label", "day"],
         },
     )
 
@@ -452,3 +456,32 @@ def test_dataset_id_is_run_scoped(client: TestClient) -> None:
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "dataset_not_found"
+
+
+def test_save_to_charts_persists_a_listed_servable_chart(client: TestClient) -> None:
+    response = _post(client, aggregate="sum", save_to_charts=True)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    chart_id = body["saved_chart_id"]
+    assert chart_id
+
+    listed = client.get(f"/api/v1/sessions/{RUN}/charts")
+    assert listed.status_code == 200, listed.text
+    items = listed.json()["items"]
+    assert [item["artifact_id"] for item in items] == [chart_id]
+    assert items[0]["dataset_id"] == DATASET
+    assert "amount" in items[0]["title"]
+
+    served = client.get(f"/api/v1/sessions/{RUN}/charts/{chart_id}")
+    assert served.status_code == 200, served.text
+    spec = served.json()["spec"]
+    assert spec["mark"] == "bar"
+    assert spec["data"]["values"] == body["spec"]["data"]["values"]
+
+
+def test_without_save_flag_nothing_lands_in_charts(client: TestClient) -> None:
+    response = _post(client, aggregate="sum")
+    assert response.status_code == 200, response.text
+    assert response.json()["saved_chart_id"] is None
+    listed = client.get(f"/api/v1/sessions/{RUN}/charts")
+    assert listed.json()["items"] == []

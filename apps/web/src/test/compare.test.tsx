@@ -353,7 +353,7 @@ describe("Compare page", () => {
     renderAppAt(`${PAGE_PATH}&right=r2`);
 
     expect(
-      await screen.findByText("Request failed (compare_project_mismatch)"),
+      await screen.findByText("compare_project_mismatch"),
     ).toBeInTheDocument();
     expect(
       screen.getByText("Sessions belong to different projects."),

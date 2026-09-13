@@ -96,6 +96,11 @@ function ChartControls({
   );
   const [dropMissing, setDropMissing] = useState(true);
   const [dropOutliers, setDropOutliers] = useState(false);
+  /* The request that produced the chart on screen. Saving re-runs exactly it
+   * with the save flag, so later control changes cannot save a different chart. */
+  const [builtRequest, setBuiltRequest] = useState<CustomChartRequest | null>(
+    null,
+  );
 
   const buildChart = useBuildCustomChart(sessionId, projectId);
 
@@ -125,10 +130,17 @@ function ChartControls({
       // Never send outlier-dropping against a null Y: the API 422s on that
       // combination, except for a histogram, which fences its own X.
       drop_outliers: outliersDisabled ? false : dropOutliers,
+      save_to_charts: false,
     };
+    setBuiltRequest(body);
     buildChart.mutate(body, {
       onSuccess: (view) => setAggregate(view.aggregate as Aggregate),
     });
+  }
+
+  function handleSave() {
+    if (!builtRequest) return;
+    buildChart.mutate({ ...builtRequest, save_to_charts: true });
   }
 
   const histogramBlocked = chartType === "histogram" && xOptions.length === 0;
@@ -271,6 +283,21 @@ function ChartControls({
                   spec={buildChart.data.spec}
                   label={`Custom ${buildChart.data.chart_type} chart`}
                 />
+                {buildChart.data.saved_chart_id ? (
+                  <p role="status" className="text-xs text-status-ok">
+                    Saved. This chart now appears in this session's charts.
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSave}
+                    disabled={buildChart.isPending}
+                    title="Keeps this chart with the session, so it is still here after you leave the page."
+                    className="self-start rounded-base border border-border px-3 py-1.5 text-sm font-medium hover:bg-surface disabled:opacity-50"
+                  >
+                    Save to charts
+                  </button>
+                )}
               </div>
             ))}
         </>

@@ -158,18 +158,54 @@ def test_unsupported_method_families_explain_their_constraints() -> None:
         columns=[_column("amount", "numeric", unique_count=90)],
     )
 
+    two_numeric = _profile(
+        rows=100,
+        columns=[
+            _column("amount", "numeric", unique_count=90),
+            _column("quantity", "numeric", unique_count=40),
+        ],
+    )
+    short_two_numeric = _profile(
+        rows=20,
+        columns=[
+            _column("amount", "numeric", unique_count=18),
+            _column("quantity", "numeric", unique_count=12),
+        ],
+    )
+
     forecast = _evaluate(with_time, mode="forecast")
     no_time = _evaluate(without_time, mode="forecast")
-    segmentation = _evaluate(with_time, mode="segmentation")
+    segmentation = _evaluate(two_numeric, mode="segmentation")
+    one_numeric = _evaluate(with_time, mode="segmentation")
+    short_segmentation = _evaluate(short_two_numeric, mode="segmentation")
     causal = _evaluate(with_time, mode="causal_experiment")
 
-    assert forecast.status == "constrained"
+    # T8a: forecast has a typed executor (run_forecast), so a gate-ok profile is ready.
+    assert forecast.status == "ready"
     assert forecast.reasons == [
-        "forecast method family not implemented yet; start with a descriptive trend"
+        "A descriptive trend baseline is available; it projects recent patterns, "
+        "not a forecasting model."
     ]
     assert no_time.status == "needs_data" and no_time.missing == ["time column"]
-    assert segmentation.status == "constrained"
+    # T8b: segmentation has a typed executor (run_segmentation); the gate now
+    # demands the minimum structure the tool needs instead of promising work.
+    assert segmentation.status == "ready"
+    assert segmentation.reasons == [
+        "Clustering can run on the numeric features; segment stability is "
+        "verified per run."
+    ]
+    assert one_numeric.status == "unsuitable"
+    assert one_numeric.missing == ["at least 2 numeric columns"]
+    assert short_segmentation.status == "needs_data"
+    assert short_segmentation.missing == ["at least 30 rows"]
+    # T8c: causal_experiment has a typed executor (run_causal_experiment) but
+    # stays constrained — tier B is gated on a user-confirmed randomized design.
     assert causal.status == "constrained"
+    assert causal.reasons == [
+        "A treatment/outcome contrast with covariate balance checks can run; "
+        "causal attribution additionally requires a user-confirmed randomized "
+        "experiment design."
+    ]
 
 
 def test_none_mode_uses_deterministic_descriptive_fallback_without_llm_text() -> None:
@@ -293,7 +329,10 @@ def test_llm_card_mapping_and_invalid_mode_fallback(tmp_path: Path) -> None:
     assert invalid.analysis_mode is None
     assert invalid.candidate_methods == ["descriptive_sql"]
     assert invalid.feasibility is not None and invalid.feasibility.status == "ready"
-    assert causal.proposed_action == "design_experiment"
+    # T8c: churned is a two-valued assignment-shaped column, so the causal card
+    # can run the tier-A design check instead of stalling on design_experiment.
+    assert causal.feasibility is not None and causal.feasibility.status == "constrained"
+    assert causal.proposed_action == "run_analysis"
 
 
 def _gate(

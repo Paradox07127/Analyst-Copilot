@@ -29,7 +29,7 @@ from eda_platform.agents.tool_context import (
     mint_local_execution_context,
 )
 from eda_platform.core.column_roles import ColumnRoleSet
-from eda_platform.core.ids import make_artifact_id
+from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.permissions import PermissionTier, require_permission
 from eda_platform.core.query import DuckDBQueryEngine
 from eda_platform.core.receipt_outbox import ReceiptOutbox
@@ -63,6 +63,16 @@ from eda_platform.schemas.stats import StatTestType
 from eda_platform.tools.analysis import resolve_numeric_correlation_columns
 from eda_platform.tools.anomaly import create_anomaly_artifact
 from eda_platform.tools.anomaly import screen_anomalies as screen_anomaly_column
+from eda_platform.tools.causal_experiment import (
+    BALANCE_SMD_THRESHOLD,
+    OBSERVATIONAL_DESIGN_FAMILY,
+    RANDOMIZED_DESIGN_APPROVAL_KIND,
+    RANDOMIZED_EXPERIMENT_FAMILY,
+    randomized_design_credential_id,
+)
+from eda_platform.tools.causal_experiment import (
+    run_causal_experiment as run_causal_experiment_frame,
+)
 from eda_platform.tools.cleaning_advice import recommended_cleaning_operations
 from eda_platform.tools.domain_metrics import (
     MetricContractResult,
@@ -70,6 +80,7 @@ from eda_platform.tools.domain_metrics import (
     validate_metric_result,
 )
 from eda_platform.tools.evidence import PayloadPolicy
+from eda_platform.tools.forecast import FORECAST_LIMITATION, run_forecast_baselines
 from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.missingness import (
     create_missingness_artifact,
@@ -87,6 +98,15 @@ from eda_platform.tools.relationship_discovery import (
 from eda_platform.tools.relationship_discovery import (
     discover_relationship_candidates,
     validate_relationships,
+)
+from eda_platform.tools.segmentation import (
+    ARI_STABLE_FROM,
+    ARI_UNSTABLE_BELOW,
+    SEGMENTATION_LIMITATION,
+    create_segmentation_artifact,
+)
+from eda_platform.tools.segmentation import (
+    run_segmentation as run_segmentation_frame,
 )
 from eda_platform.tools.slice_profile import compute_slice_profile
 from eda_platform.tools.sql_runner import SqlCatalog, rewrite_relation_names, run_sql
@@ -218,6 +238,51 @@ class AnalyzeTimeSeriesArguments(BaseModel):
     agg: Literal["sum", "mean", "count"] = "sum"
 
 
+class RunForecastArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(min_length=1)
+    time_column: str = Field(min_length=1)
+    value_column: str = Field(min_length=1)
+    agg: Literal["sum", "mean", "count"] = "sum"
+    freq: str | None = Field(default=None, min_length=1, max_length=16)
+    period: int | None = Field(default=None, ge=2, le=1_000)
+    horizon: int = Field(default=6, ge=1, le=36)
+
+
+class RunSegmentationArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(min_length=1)
+    feature_columns: list[str] = Field(min_length=2, max_length=10)
+    k: int | None = Field(default=None, ge=2, le=8)
+    random_state: int = Field(default=42, ge=0, le=4_294_967_295)
+
+    @model_validator(mode="after")
+    def _feature_columns_are_unique(self) -> RunSegmentationArguments:
+        if len(self.feature_columns) != len(set(self.feature_columns)):
+            raise ValueError("feature_columns must not contain duplicates.")
+        return self
+
+
+class RunCausalExperimentArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(min_length=1)
+    treatment_column: str = Field(min_length=1)
+    outcome_column: str = Field(min_length=1)
+    covariate_columns: list[str] | None = Field(default=None, max_length=10)
+    design: Literal["observational", "randomized"] = "observational"
+
+    @model_validator(mode="after")
+    def _covariates_are_unique(self) -> RunCausalExperimentArguments:
+        if self.covariate_columns is not None and len(self.covariate_columns) != len(
+            set(self.covariate_columns)
+        ):
+            raise ValueError("covariate_columns must not contain duplicates.")
+        return self
+
+
 class DiagnoseMissingnessArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -270,6 +335,9 @@ _DATA_TOOL_ARGUMENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "correlate_columns": CorrelateColumnsArguments,
     "profile_slice": ProfileSliceArguments,
     "analyze_time_series": AnalyzeTimeSeriesArguments,
+    "run_forecast": RunForecastArguments,
+    "run_segmentation": RunSegmentationArguments,
+    "run_causal_experiment": RunCausalExperimentArguments,
     "diagnose_missingness": DiagnoseMissingnessArguments,
     "run_baseline_model": RunBaselineModelArguments,
     "run_open_analysis": OpenAnalysisArguments,
@@ -282,6 +350,20 @@ def data_tool_argument_schema(tool_name: str) -> type[BaseModel]:
         return _DATA_TOOL_ARGUMENT_SCHEMAS[tool_name]
     except KeyError as exc:
         raise ValueError(f"unknown production data tool {tool_name!r}") from exc
+
+
+def data_tool_registry_digest() -> str:
+    """Fingerprint of the production tool surface: names plus argument fields."""
+    return stable_hash(
+        {
+            "analysis_tool_version": _ANALYSIS_TOOL_VERSION,
+            "tools": {
+                name: sorted(schema.model_fields)
+                for name, schema in _DATA_TOOL_ARGUMENT_SCHEMAS.items()
+            },
+        },
+        length=16,
+    )
 
 
 OpenAnalysisExecutor = Callable[[OpenAnalysisArguments], AgentToolResult]
@@ -300,6 +382,9 @@ class DataToolContext:
     artifacts: list[Artifact] = field(default_factory=list)
     open_analysis: OpenAnalysisExecutor | None = None
     stat_registry: StatTestRegistry | None = None
+    # Derived batch runs execute under a qsess_* session while user-issued
+    # credentials (randomized-design confirmations) live on the source session.
+    source_session_id: str | None = None
     _artifacts_by_id: dict[str, Artifact] = field(init=False, repr=False)
     _datasets_by_id: dict[str, LoadedDataset] = field(init=False, repr=False)
     # logical_step_id -> receipt artifact id: in-process replay deduplication.
@@ -509,6 +594,62 @@ def build_data_tools(context: DataToolContext) -> list[AgentTool]:
             args_schema=AnalyzeTimeSeriesArguments,
             execute=lambda args: _analyze_time_series(
                 context, cast(AnalyzeTimeSeriesArguments, args)
+            ),
+        ),
+        AgentTool(
+            name="run_forecast",
+            description=(
+                "Project an aggregated time series forward with simple fpp3 baselines "
+                "(naive, seasonal-naive, drift, mean): the baseline with the lowest "
+                "rolling-origin backtest MAE is projected ahead with an empirical error "
+                "band built from its backtest residuals. This is a descriptive baseline "
+                "projection, not a forecasting model -- it assumes recent patterns "
+                "continue and carries no confidence guarantee, so phrase results as "
+                "'if recent patterns continue'. Use it for forecast questions that need "
+                "a forward projection; use analyze_time_series for trend/seasonality "
+                "diagnostics. It refuses histories too short to leave at least five "
+                "backtest origins."
+            ),
+            args_schema=RunForecastArguments,
+            execute=lambda args: _run_forecast(context, cast(RunForecastArguments, args)),
+        ),
+        AgentTool(
+            name="run_segmentation",
+            description=(
+                "Cluster rows on 2-10 explicitly chosen numeric feature columns "
+                "(z-score standardized KMeans; k picked by silhouette over 2..8 "
+                "unless given) and grade the partition's resampling stability "
+                "with ARI over 20 subsample refits. Pick features the question "
+                "is actually about -- ids, codes and constants are rejected. An "
+                "unstable result (mean ARI below 0.6) is reported but carries "
+                "no evidence standing; phrase results as a descriptive "
+                "partition, never as proof that distinct real-world groups "
+                "exist."
+            ),
+            args_schema=RunSegmentationArguments,
+            execute=lambda args: _run_segmentation(
+                context, cast(RunSegmentationArguments, args)
+            ),
+        ),
+        AgentTool(
+            name="run_causal_experiment",
+            description=(
+                "Two-group treatment/outcome contrast with a covariate balance "
+                "table (standardized mean differences). The default design="
+                "'observational' is a design check: it reports the group "
+                "difference with a fixed disclaimer that the difference cannot "
+                "be attributed to the treatment. Pass design='randomized' ONLY "
+                "when the user has explicitly confirmed the assignment was "
+                "randomized -- the tool verifies a user-issued confirmation "
+                "credential for this dataset and treatment column, and without "
+                "one it automatically runs the observational check and says so. "
+                "treatment_column must have exactly two non-null values; "
+                "outcome_column must be numeric or binary. Never claim "
+                "causation from the observational tier."
+            ),
+            args_schema=RunCausalExperimentArguments,
+            execute=lambda args: _run_causal_experiment(
+                context, cast(RunCausalExperimentArguments, args)
             ),
         ),
         AgentTool(
@@ -2256,19 +2397,527 @@ def _analyze_time_series(
     return durable_result
 
 
+def _run_forecast(
+    context: DataToolContext,
+    args: RunForecastArguments,
+) -> AgentToolResult:
+    # No hypothesis test and no p-value anywhere in this path, so nothing is
+    # registered on the multiplicity ledger (same rule as run_baseline_model).
+    dataset = _single_dataset(context, args.dataset_id)
+    result = run_forecast_baselines(
+        dataset.frame,
+        dataset_id=args.dataset_id,
+        dataset_name=dataset.record.name,
+        time_column=args.time_column,
+        value_column=args.value_column,
+        freq=args.freq,
+        period=args.period,
+        agg=args.agg,
+        horizon=args.horizon,
+    )
+    assert result.table is not None  # run_forecast_baselines always builds it
+    payload = result.table.model_dump(mode="json")
+    primary = Artifact(
+        id=make_artifact_id("table", payload),
+        type=ArtifactType.TABLE,
+        project_id=context.project_id,
+        session_id=context.session_id,
+        payload=payload,
+        warnings=list(result.warnings),
+        plain_language=result.table.description,
+    )
+    context.add_artifact(primary)
+
+    chosen = next(
+        backtest
+        for backtest in result.backtests
+        if backtest.baseline == result.chosen_baseline
+    )
+    facts: list[ReceiptFact] = [
+        _fact("chosen_baseline", result.chosen_baseline, "string"),
+        _fact("horizon", result.horizon, "count"),
+        _fact("n_periods", result.n_periods, "count"),
+        _fact("gap_count", result.gap_count, "count"),
+        _fact("backtest_origins", result.backtest_origins, "count"),
+        _fact("backtest_mae", chosen.mae, "number"),
+        _fact("backtest_rmse", chosen.rmse, "number"),
+        _fact("mase", chosen.mase, "null" if chosen.mase is None else "number"),
+        _fact("projection_start", result.projection_start, "string"),
+        _fact("projection_end", result.projection_end, "string"),
+    ]
+    facts.extend(
+        _fact(f"projection{index}.value", projection.value, "number")
+        for index, projection in enumerate(result.projections[:_MAX_FACT_COLUMNS])
+    )
+    baseline_rows = [row for row in result.table.rows if "baseline" in row]
+    projection_rows = [row for row in result.table.rows if "period" in row]
+    receipt, receipt_artifact = _emit_receipt(
+        context,
+        tool_name="run_forecast",
+        arguments=args.model_dump(mode="json"),
+        raw_output=payload,
+        artifact_ids=(primary.id,),
+        result_count=result.horizon,
+        scope=ReceiptScope(
+            dataset_ids=(args.dataset_id,),
+            columns=(args.time_column, args.value_column),
+            time_range=result.time_range,
+        ),
+        facts=tuple(facts),
+        # The manifest covers the projection segment: those are the rows whose
+        # numbers a report may cite period by period.
+        fact_manifest=_build_fact_manifest(
+            projection_rows,
+            [f"projection{index}" for index in range(len(projection_rows))],
+            evaluated_count=min(_MAX_FACT_COLUMNS, len(projection_rows)),
+            total_rows=len(projection_rows),
+        ),
+        method=ReceiptMethod(
+            family="forecast_baseline",
+            parameters={
+                "agg": args.agg,
+                "freq": result.regular_frequency,
+                "period": result.period,
+                "horizon": result.horizon,
+                "chosen_baseline": result.chosen_baseline,
+                "backtest_scheme": "rolling_origin",
+            },
+            assumptions=(FORECAST_LIMITATION,),
+            warnings=tuple(result.warnings),
+        ),
+    )
+    durable_result = AgentToolResult(
+        content=cast(
+            dict[str, Any],
+            _clip_json(
+                {
+                    "artifact_id": primary.id,
+                    "receipt_id": receipt.receipt_id,
+                    "chosen_baseline": result.chosen_baseline,
+                    "horizon": result.horizon,
+                    "n_periods": result.n_periods,
+                    "gap_count": result.gap_count,
+                    "backtest_origins": result.backtest_origins,
+                    "backtest_mae": chosen.mae,
+                    "backtest_rmse": chosen.rmse,
+                    "mase": chosen.mase,
+                    "projection_start": result.projection_start,
+                    "projection_end": result.projection_end,
+                    "baselines": baseline_rows,
+                    "projections": projection_rows,
+                    "limitation": FORECAST_LIMITATION,
+                    "warnings": list(result.warnings),
+                }
+            ),
+        ),
+        artifacts=[primary],
+        receipt_artifact=receipt_artifact,
+    )
+    verify_data_tool_result_contract(
+        receipt, durable_result, args.model_dump(mode="json")
+    )
+    return durable_result
+
+
+def _run_segmentation(
+    context: DataToolContext,
+    args: RunSegmentationArguments,
+) -> AgentToolResult:
+    # Silhouette and ARI are not hypothesis tests and carry no p-value, so
+    # nothing lands on the multiplicity ledger (same rule as run_baseline_model).
+    dataset = _single_dataset(context, args.dataset_id)
+    result = run_segmentation_frame(
+        dataset.frame,
+        dataset_name=dataset.record.name,
+        feature_columns=args.feature_columns,
+        k=args.k,
+        random_state=args.random_state,
+    )
+    primary = create_segmentation_artifact(
+        result,
+        project_id=context.project_id,
+        session_id=context.session_id,
+    )
+    context.add_artifact(primary)
+
+    facts: list[ReceiptFact] = [
+        _fact("k", result.k, "count"),
+        _fact("silhouette", result.silhouette, "number"),
+        _fact("ari_mean", result.ari_mean, "number"),
+        _fact("ari_min", result.ari_min, "number"),
+        _fact("stability", result.stability, "string"),
+        _fact("sample_rows", result.sample_rows, "count"),
+    ]
+    for index, cluster in enumerate(result.clusters[:_MAX_FACT_COLUMNS]):
+        facts.extend(
+            (
+                _fact(f"cluster{index}.size", cluster.size, "count"),
+                _fact(f"cluster{index}.share", cluster.share, "number"),
+            )
+        )
+    payload = primary.payload
+    cluster_rows = cast(list[dict[str, Any]], payload["clusters"])
+    parameters: dict[str, str | int | float | bool | None] = {
+        "k": result.k,
+        "k_selection": result.k_selection,
+        "n_init": 10,
+        "resamples": result.resamples,
+        "ari_unstable_below": ARI_UNSTABLE_BELOW,
+        "ari_stable_from": ARI_STABLE_FROM,
+        "standardization": "zscore",
+        "random_state": args.random_state,
+    }
+    if result.stability == "unstable":
+        # Producer-owned evidence verdict: an unstable partition never counts
+        # as hypothesis evidence (schemas/receipts.py:212).
+        parameters["hypothesis_evidence_valid"] = False
+    receipt, receipt_artifact = _emit_receipt(
+        context,
+        tool_name="run_segmentation",
+        arguments=args.model_dump(mode="json"),
+        raw_output=payload,
+        artifact_ids=(primary.id,),
+        result_count=result.k,
+        scope=ReceiptScope(
+            dataset_ids=(args.dataset_id,),
+            columns=tuple(args.feature_columns),
+        ),
+        facts=tuple(facts),
+        fact_manifest=_build_fact_manifest(
+            cluster_rows,
+            [f"cluster{index}" for index in range(len(cluster_rows))],
+            evaluated_count=min(_MAX_FACT_COLUMNS, len(cluster_rows)),
+            total_rows=len(cluster_rows),
+        ),
+        method=ReceiptMethod(
+            family="segmentation_kmeans",
+            parameters=parameters,
+            assumptions=(SEGMENTATION_LIMITATION,),
+            warnings=tuple(result.notes),
+        ),
+    )
+    durable_result = AgentToolResult(
+        content=cast(
+            dict[str, Any],
+            _clip_json(
+                {
+                    "artifact_id": primary.id,
+                    "receipt_id": receipt.receipt_id,
+                    **payload,
+                    "limitation": SEGMENTATION_LIMITATION,
+                }
+            ),
+        ),
+        artifacts=[primary],
+        receipt_artifact=receipt_artifact,
+    )
+    verify_data_tool_result_contract(
+        receipt, durable_result, args.model_dump(mode="json")
+    )
+    return durable_result
+
+
+_CAUSAL_DESIGN_CHECK_TEST_TYPE = "causal_design_check"
+
+
+def _active_randomized_design_credential(
+    context: DataToolContext,
+    *,
+    dataset_id: str,
+    treatment_column: str,
+) -> str | None:
+    """Return the credential id when the user has confirmed this randomized design.
+
+    Randomization cannot be proven from the data, so tier B is admitted only by
+    a user-issued confirmation credential (an approval-row declaration) bound
+    to this dataset and treatment column. No credential -> None, and the caller
+    downgrades to the observational tier. The credential is read, not consumed:
+    a design confirmation is a statement of fact, valid until it expires.
+    """
+    store = context.store
+    if store is None:
+        return None
+    # Local import: agents must not pull the application layer in at import
+    # time; only the credentialed tier B path needs the approval store logic.
+    from eda_platform.application.services.approval_service import (
+        read_active_credential,
+    )
+
+    credential_id = randomized_design_credential_id(
+        dataset_id=dataset_id, treatment_column=treatment_column
+    )
+    session_ids = [context.session_id]
+    if context.source_session_id and context.source_session_id != context.session_id:
+        session_ids.append(context.source_session_id)
+    for session_id in session_ids:
+        payload = read_active_credential(
+            store,
+            action_hash=credential_id,
+            kind=RANDOMIZED_DESIGN_APPROVAL_KIND,
+            session_id=session_id,
+        )
+        if (
+            payload is not None
+            and payload.get("dataset_id") == dataset_id
+            and payload.get("treatment_column") == treatment_column
+        ):
+            return credential_id
+    return None
+
+
+def _run_causal_experiment(
+    context: DataToolContext,
+    args: RunCausalExperimentArguments,
+) -> AgentToolResult:
+    dataset = _single_dataset(context, args.dataset_id)
+    execution = _resolve_execution(context)
+    registry = cast(StatTestRegistry, context.stat_registry)
+    credential_id: str | None = None
+    effective_design: Literal["observational", "randomized"] = "observational"
+    if args.design == "randomized":
+        # The agent may request the randomized tier, but never admit it: the
+        # user-issued confirmation credential decides, and its absence
+        # downgrades to the observational design check with an explicit note.
+        credential_id = _active_randomized_design_credential(
+            context,
+            dataset_id=args.dataset_id,
+            treatment_column=args.treatment_column,
+        )
+        if credential_id is not None:
+            effective_design = "randomized"
+    requested_test_type = (
+        "two_sample_ate"
+        if effective_design == "randomized"
+        else _CAUSAL_DESIGN_CHECK_TEST_TYPE
+    )
+    family_id = derive_family_id(
+        dataset_id=args.dataset_id,
+        columns=(args.treatment_column, args.outcome_column),
+    )
+    attempt = registry.begin_attempt(
+        family_id=family_id,
+        requested_test_type=requested_test_type,
+        arguments_digest=canonical_tool_arguments_digest(
+            RunCausalExperimentArguments, args
+        ),
+        logical_step_id=execution.logical_step_id,
+    )
+    try:
+        result = run_causal_experiment_frame(
+            dataset.frame,
+            dataset_id=args.dataset_id,
+            dataset_name=dataset.record.name,
+            treatment_column=args.treatment_column,
+            outcome_column=args.outcome_column,
+            covariate_columns=args.covariate_columns,
+            design=effective_design,
+            requested_design=args.design,
+            comparison_count=attempt.sequence_index,
+        )
+    except Exception as exc:
+        # Failed attempts stay on the multiplicity ledger (same rule as
+        # run_stat_test): selective reporting must not shrink the family.
+        registry.record_failure(attempt.attempt_id, error=str(exc)[:500])
+        raise
+    stat = result.stat
+    primary = create_stat_test_artifact(
+        stat,
+        project_id=context.project_id,
+        session_id=context.session_id,
+    )
+    assert result.balance_table is not None  # run_causal_experiment always builds it
+    balance_payload = result.balance_table.model_dump(mode="json")
+    balance_artifact = Artifact(
+        id=make_artifact_id("table", balance_payload),
+        type=ArtifactType.TABLE,
+        project_id=context.project_id,
+        session_id=context.session_id,
+        payload=balance_payload,
+        plain_language=result.balance_table.description,
+    )
+    context.add_artifact(primary)
+    context.add_artifact(balance_artifact)
+
+    facts: list[ReceiptFact] = [
+        _fact("p_value", stat.p_value, "number"),
+        _fact("statistic", stat.statistic, "number"),
+    ]
+    if stat.effect_size is not None:
+        facts.append(_fact("effect_size", stat.effect_size, "number"))
+    facts.extend(
+        [
+            _fact("sample_size", stat.sample_size, "count"),
+            _fact("design", result.design, "string"),
+            _fact("outcome_kind", result.outcome_kind, "string"),
+            _fact(
+                "imbalanced_covariate_count",
+                len(result.imbalanced_covariates),
+                "count",
+            ),
+        ]
+    )
+    for index, row in enumerate(result.balance_rows[:_MAX_FACT_COLUMNS]):
+        facts.extend(
+            [
+                _fact(f"covariate{index}.name", str(row["covariate"]), "string"),
+                _fact(
+                    f"covariate{index}.smd",
+                    row["smd"],
+                    "null" if row["smd"] is None else "number",
+                ),
+            ]
+        )
+    parameters: dict[str, str | int | float | bool | None] = {
+        "requested_design": args.design,
+        "experiment_design": result.design,
+        "treatment_column": args.treatment_column,
+        "outcome_column": args.outcome_column,
+        "outcome_kind": result.outcome_kind,
+        "balance_threshold": BALANCE_SMD_THRESHOLD,
+        "ci_method": result.ci_method,
+        "requested_test_type": requested_test_type,
+        "test_family_id": family_id,
+        "comparison_count": attempt.sequence_index,
+        "session_attempt_count": len(registry.attempts()),
+        "stat_attempt_id": attempt.attempt_id,
+    }
+    if result.design == "randomized":
+        assert credential_id is not None
+        # The claim-gate whitelist re-derives this id from the receipt's
+        # dataset and treatment column; recording it anchors causal wording to
+        # the user-issued confirmation, never to text.
+        parameters["design_confirmation_id"] = credential_id
+    if result.ate_definition is not None:
+        parameters["ate_definition"] = result.ate_definition
+    receipt, receipt_artifact = _emit_receipt(
+        context,
+        tool_name="run_causal_experiment",
+        arguments=args.model_dump(mode="json"),
+        raw_output={
+            "stat": stat.model_dump(mode="json"),
+            "balance": balance_payload,
+        },
+        artifact_ids=(primary.id, balance_artifact.id),
+        result_count=1,
+        scope=ReceiptScope(
+            dataset_ids=(args.dataset_id,),
+            columns=(
+                args.treatment_column,
+                args.outcome_column,
+                *result.covariate_columns,
+            ),
+        ),
+        facts=tuple(facts),
+        fact_manifest=_build_fact_manifest(
+            result.balance_rows,
+            [f"covariate{index}" for index in range(len(result.balance_rows))],
+            evaluated_count=min(_MAX_FACT_COLUMNS, len(result.balance_rows)),
+            total_rows=len(result.balance_rows),
+        ),
+        method=ReceiptMethod(
+            family=(
+                RANDOMIZED_EXPERIMENT_FAMILY
+                if result.design == "randomized"
+                else OBSERVATIONAL_DESIGN_FAMILY
+            ),
+            parameters=parameters,
+            assumptions=(result.disclaimer,),
+            warnings=tuple(warning.message for warning in stat.warnings),
+        ),
+        statistics=ReceiptStatistics(
+            statistical_family_id=family_id,
+            test_name=stat.test_type,
+            test_statistic=stat.statistic,
+            p_value=stat.p_value,
+            adjusted_p_value=stat.adjusted_p_value,
+            effect_size=stat.effect_size,
+            ci_low=stat.effect_ci_low,
+            ci_high=stat.effect_ci_high,
+            sample_size=stat.sample_size,
+            sequence_index=attempt.sequence_index,
+        ),
+        execution=execution,
+    )
+    registry.record_completion(attempt.attempt_id, receipt_id=receipt.receipt_id)
+    durable_result = AgentToolResult(
+        content=cast(
+            dict[str, Any],
+            _clip_json(
+                {
+                    "artifact_id": primary.id,
+                    "balance_artifact_id": balance_artifact.id,
+                    "receipt_id": receipt.receipt_id,
+                    "design": result.design,
+                    "requested_design": args.design,
+                    "test_type": stat.test_type,
+                    "outcome_kind": result.outcome_kind,
+                    "p_value": stat.p_value,
+                    "adjusted_p_value": stat.adjusted_p_value,
+                    "effect_size": stat.effect_size,
+                    "effect_ci": [stat.effect_ci_low, stat.effect_ci_high],
+                    "sample_size": stat.sample_size,
+                    "groups": stat.groups,
+                    "ate_definition": result.ate_definition,
+                    "ci_method": result.ci_method,
+                    "imbalanced_covariates": list(result.imbalanced_covariates),
+                    "balance": list(result.balance_rows),
+                    "assumptions": [
+                        f"{check.name}={check.status}" for check in stat.assumptions
+                    ],
+                    "disclaimer": result.disclaimer,
+                    "warnings": [warning.message for warning in stat.warnings],
+                }
+            ),
+        ),
+        artifacts=[primary, balance_artifact],
+        receipt_artifact=receipt_artifact,
+    )
+    verify_data_tool_result_contract(
+        receipt, durable_result, args.model_dump(mode="json")
+    )
+    return durable_result
+
+
+_MISSINGNESS_TEST_TYPE = "missingness_target_association"
+
+
 def _diagnose_missingness(
     context: DataToolContext,
     args: DiagnoseMissingnessArguments,
 ) -> AgentToolResult:
     dataset = _single_dataset(context, args.dataset_id)
-    result = diagnose_missingness(
-        dataset.frame,
-        dataset_id=args.dataset_id,
-        dataset_name=dataset.record.name,
-        target_column=args.target_column,
-        group_columns=args.group_columns,
-        top_k=args.top_k,
-    )
+    execution = _resolve_execution(context)
+    registry = cast(StatTestRegistry, context.stat_registry)
+    attempt = None
+    family_id = None
+    if args.target_column:
+        # Target-association tests are hypothesis tests: they must land on the
+        # multiplicity ledger like run_stat_test, or the E4a issuer's family
+        # counts miss the whole Holm-corrected batch.
+        family_id = derive_family_id(
+            dataset_id=args.dataset_id, columns=(args.target_column,)
+        )
+        attempt = registry.begin_attempt(
+            family_id=family_id,
+            requested_test_type=_MISSINGNESS_TEST_TYPE,
+            arguments_digest=canonical_tool_arguments_digest(
+                DiagnoseMissingnessArguments, args
+            ),
+            logical_step_id=execution.logical_step_id,
+        )
+    try:
+        result = diagnose_missingness(
+            dataset.frame,
+            dataset_id=args.dataset_id,
+            dataset_name=dataset.record.name,
+            target_column=args.target_column,
+            group_columns=args.group_columns,
+            top_k=args.top_k,
+        )
+    except Exception as exc:
+        if attempt is not None:
+            registry.record_failure(attempt.attempt_id, error=str(exc)[:500])
+        raise
     primary = create_missingness_artifact(
         result,
         project_id=context.project_id,
@@ -2344,6 +2993,30 @@ def _diagnose_missingness(
                 ),
             ]
         )
+    method_parameters: dict[str, Any] = {
+        "target_column": args.target_column,
+        "group_column_count": len(result.group_columns),
+        "target_correction": "holm",
+        "top_k": args.top_k,
+        "mnar_ruled_out": False,
+    }
+    statistics = None
+    if attempt is not None:
+        # The issuer matches the declared requested_test_type against the
+        # ledger; the headline statistics come from the top (smallest adjusted
+        # p) association, the full batch stays in the facts.
+        method_parameters["requested_test_type"] = _MISSINGNESS_TEST_TYPE
+        method_parameters["test_family_id"] = family_id
+        top = result.target_associations[0] if result.target_associations else None
+        statistics = ReceiptStatistics(
+            statistical_family_id=family_id,
+            test_name=top.test_name if top else _MISSINGNESS_TEST_TYPE,
+            p_value=top.p_value if top else None,
+            adjusted_p_value=top.adjusted_p_value if top else None,
+            effect_size=top.effect_size if top else None,
+            sample_size=top.sample_size if top else None,
+            sequence_index=attempt.sequence_index,
+        )
     receipt, receipt_artifact = _emit_receipt(
         context,
         tool_name="diagnose_missingness",
@@ -2365,17 +3038,14 @@ def _diagnose_missingness(
         ),
         method=ReceiptMethod(
             family="missingness_diagnostic",
-            parameters={
-                "target_column": args.target_column,
-                "group_column_count": len(result.group_columns),
-                "target_correction": "holm",
-                "top_k": args.top_k,
-                "mnar_ruled_out": False,
-            },
+            parameters=method_parameters,
             assumptions=("MNAR is not identifiable from observed data alone.",),
             warnings=tuple(result.limitations),
         ),
+        statistics=statistics,
     )
+    if attempt is not None:
+        registry.record_completion(attempt.attempt_id, receipt_id=receipt.receipt_id)
     durable_result = AgentToolResult(
         content=cast(
             dict[str, Any],

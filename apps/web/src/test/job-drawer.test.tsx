@@ -318,6 +318,55 @@ describe("Activity center with job SSE", () => {
     expect(progress).toHaveTextContent("EDA · degraded");
   });
 
+  it("shows the human failure reason and retries a failed analysis", async () => {
+    const retried: string[] = [];
+    server.use(
+      http.post("/api/v1/jobs/:jobId/retry", ({ params }) => {
+        retried.push(String(params["jobId"]));
+        return HttpResponse.json(
+          {
+            job_id: "job_retry_1",
+            session_id: "r_new",
+            status: "queued",
+            events_url: "/api/v1/jobs/job_retry_1/events",
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    const { source, user } = await launchTrackedJob();
+    const drawer = screen.getByRole("dialog", { name: "Activity" });
+
+    act(() => source.emit("job.started", frame("job.started", "job_1")));
+    act(() =>
+      source.emit("step_started", frame("step_started", "profile_dataset")),
+    );
+    act(() =>
+      source.emit("job.failed", {
+        ...frame("job.failed", "job_1"),
+        summary: {
+          error_code: "FileNotFoundError",
+          error_message:
+            "A data file this analysis needed could not be found. Re-upload the file or start a new session with the current data.",
+          error_detail: "FileNotFoundError: /tmp/x.csv",
+        },
+      }),
+    );
+
+    /* The reason is the worker's sentence, not the bare exception name. */
+    expect(
+      within(drawer).getByText(
+        /A data file this analysis needed could not be found/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).queryByText("FileNotFoundError: /tmp/x.csv"),
+    ).not.toBeInTheDocument();
+
+    await user.click(within(drawer).getByRole("button", { name: "Run again" }));
+    await waitFor(() => expect(retried).toEqual(["job_1"]));
+  });
+
   it("uses separate Activity and Event log sections", async () => {
     const { user, source } = await launchTrackedJob();
     const drawer = screen.getByRole("dialog", { name: "Activity" });
@@ -631,7 +680,11 @@ describe("Activity center with job SSE", () => {
     expect(screen.queryByTestId("activity-run-count")).toBeNull();
   });
 
-  it("hides the cancel button for a question_exec job", async () => {
+  /* The backend's cancel_job never looked at kind and every worker handler
+   * gets a cancel_check, yet a client-side whitelist told most kinds "Cannot
+   * be cancelled mid-run." Any live run must offer cancel; reintroducing the
+   * whitelist turns this red. */
+  it("offers cancel for a running job regardless of its kind", async () => {
     server.use(
       http.get("/api/v1/jobs/:jobId", ({ params }) =>
         HttpResponse.json(
@@ -644,10 +697,65 @@ describe("Activity center with job SSE", () => {
     act(() => source.emit("job.started", frame("job.started", "job_1")));
 
     expect(
-      await screen.findByText("Cannot be cancelled mid-run."),
+      await screen.findByRole("button", { name: "Cancel job" }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Cancel job" }),
+      screen.queryByText("Cannot be cancelled mid-run."),
     ).not.toBeInTheDocument();
+  });
+
+  /* localStorage only knows about jobs this browser launched. A cleared cache
+   * or a device switch must not orphan a run the server still executes. */
+  it("recovers a server-known running job when localStorage is empty", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/jobs", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          jobs: [
+            {
+              job_id: "job_srv",
+              session_id: "dop_r1",
+              project_id: "p1",
+              kind: "cleaning_apply",
+              status: "running",
+              cancel_requested: false,
+              created_at: "2026-08-25T10:00:00Z",
+              started_at: "2026-08-25T10:00:01Z",
+              finished_at: null,
+              error_code: null,
+              source_session_id: "r1",
+              events_url: "/api/v1/jobs/job_srv/events",
+            },
+          ],
+        }),
+      ),
+      http.get("/api/v1/jobs/:jobId", ({ params }) =>
+        HttpResponse.json(
+          jobStatus(String(params["jobId"]), {
+            kind: "cleaning_apply",
+            session_id: "dop_r1",
+          }),
+        ),
+      ),
+    );
+    window.localStorage.setItem("eda.layout.activity-open", "true");
+    expect(window.localStorage.getItem("eda.activity.jobs")).toBeNull();
+
+    const user = userEvent.setup();
+    renderAppAt("/projects/p1/sessions/r1/data-map");
+    const drawer = await screen.findByRole("dialog", { name: "Activity" });
+    /* One recovered run auto-focuses the Activity view; it is fully
+     * actionable there — including cancel. */
+    expect(
+      await within(drawer).findByText(/Selected job_srv/),
+    ).toBeInTheDocument();
+    expect(
+      await within(drawer).findByRole("button", { name: "Cancel job" }),
+    ).toBeInTheDocument();
+
+    await user.click(within(drawer).getByRole("tab", { name: "Runs" }));
+    expect(
+      within(drawer).getByRole("button", { name: "View run job_srv" }),
+    ).toBeInTheDocument();
   });
 });

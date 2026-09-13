@@ -436,7 +436,7 @@ describe("Relationships page", () => {
     );
 
     expect(
-      await screen.findByText("Request failed (join_not_confirmable)"),
+      await screen.findByText("join_not_confirmable"),
     ).toBeInTheDocument();
   });
 
@@ -714,7 +714,7 @@ describe("Relationship discovery", () => {
     );
 
     expect(
-      await screen.findByText("Request failed (relationship_session_busy)"),
+      await screen.findByText("relationship_session_busy"),
     ).toBeInTheDocument();
   });
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from eda_platform.application.services.session_service import (
 )
 from eda_platform.core.store import ArtifactStore
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, EvidenceRef
+from eda_platform.schemas.sessions import SessionManifest
 from eda_platform.tools.agent_handoff import create_agent_handoff_artifact
 
 PROJECT = "demo"
@@ -212,6 +214,116 @@ def test_get_artifact_detail_is_bound_to_run_partition(
 def test_get_artifact_missing_raises(service: ArtifactService) -> None:
     with pytest.raises(ArtifactNotFoundError):
         service.get_artifact(RUN, "nope")
+
+
+def _derived_run(
+    store: ArtifactStore,
+    session_id: str,
+    *,
+    source: str | None = RUN,
+    project_id: str = PROJECT,
+) -> None:
+    store.start_session(project_id, session_id)
+    store.write_manifest(
+        SessionManifest(
+            session_id=session_id,
+            project_id=project_id,
+            input_hashes={},
+            code_version="test",
+            created_at=datetime.now(UTC),
+            source_session_id=source,
+        )
+    )
+
+
+def _save_in(
+    store: ArtifactStore,
+    session_id: str,
+    artifact_id: str,
+    *,
+    project_id: str = PROJECT,
+    **payload: object,
+) -> None:
+    store.save_artifact(
+        Artifact(
+            id=artifact_id,
+            type=ArtifactType.QUESTION_EXECUTION_RESULT,
+            project_id=project_id,
+            session_id=session_id,
+            payload=payload or {"k": "v"},
+        )
+    )
+
+
+def test_get_artifact_resolves_a_derived_run_artifact(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    """Chat cites conclusions produced by question runs derived from the open
+    session; the detail read under the parent's URL must find them."""
+    _derived_run(store, "qsess_run_1_1")
+    _save_in(store, "qsess_run_1_1", "qexec_1", owner="derived")
+
+    detail = service.get_artifact(RUN, "qexec_1")
+
+    assert detail.artifact_id == "qexec_1"
+    assert detail.session_id == "qsess_run_1_1"
+    assert detail.payload == {"owner": "derived"}
+
+
+def test_own_partition_wins_over_a_derived_run(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    _save_in(store, RUN, "qexec_1", owner="run_1")
+    _derived_run(store, "qsess_run_1_1")
+    _save_in(store, "qsess_run_1_1", "qexec_1", owner="derived")
+
+    assert service.get_artifact(RUN, "qexec_1").payload == {"owner": "run_1"}
+
+
+def test_derived_lookup_does_not_reach_an_unrelated_run(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    _derived_run(store, "qsess_other_1", source="run_other")
+    _save_in(store, "qsess_other_1", "qexec_1")
+
+    with pytest.raises(ArtifactNotFoundError):
+        service.get_artifact(RUN, "qexec_1")
+
+
+def test_derived_lookup_does_not_cross_projects(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    """A run id is not unique across projects, and neither are content-derived
+    artifact ids: lineage may never carry a read out of its own project."""
+    store.ensure_project("other", name="Other")
+    _derived_run(store, "qsess_run_1_1", project_id="other")
+    _save_in(store, "qsess_run_1_1", "qexec_1", project_id="other")
+
+    with pytest.raises(ArtifactNotFoundError):
+        service.get_artifact(RUN, "qexec_1")
+
+
+def test_derived_lookup_still_hides_internal_runs(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    _derived_run(store, "qsess_run_1__internal")
+    _save_in(store, "qsess_run_1__internal", "qexec_1")
+
+    with pytest.raises(ArtifactNotFoundError):
+        service.get_artifact(RUN, "qexec_1")
+
+
+def test_an_internal_sibling_does_not_shadow_a_visible_one(
+    store: ArtifactStore, service: ArtifactService
+) -> None:
+    """Content-derived ids repeat across sibling runs, and the internal copy can
+    be the newer one; hiding it must not take the visible run's copy with it."""
+    _derived_run(store, "qsess_run_1_1")
+    _save_in(store, "qsess_run_1_1", "qexec_1", owner="visible")
+    _derived_run(store, "qsess_run_1__internal")
+    _save_in(store, "qsess_run_1__internal", "qexec_1", owner="internal")
+
+    assert service.get_artifact(RUN, "qexec_1").payload == {"owner": "visible"}
 
 
 def test_agent_handoff_requires_completed_publish_barrier(

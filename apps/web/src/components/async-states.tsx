@@ -83,10 +83,15 @@ export function ErrorState({
       role="alert"
       className="flex flex-col gap-2 rounded-base border border-status-critical/40 p-4"
     >
-      <p className="text-sm font-medium text-status-critical">
-        {apiError ? `Request failed (${apiError.code})` : "Request failed"}
-      </p>
+      <p className="text-sm font-medium text-status-critical">Request failed</p>
       <p className="text-sm text-status-neutral">{message}</p>
+      {/* The code is a support reference, not the headline: worker failures
+        * surface here too, and their codes are raw exception names. */}
+      {apiError && (
+        <p className="font-mono text-[11px] text-status-neutral/70">
+          {apiError.code}
+        </p>
+      )}
       {onRetry && (
         <button
           type="button"

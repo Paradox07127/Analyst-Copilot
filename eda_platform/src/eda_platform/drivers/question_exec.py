@@ -58,14 +58,17 @@ from eda_platform.schemas.artifacts import (
 from eda_platform.schemas.model_card import ModelCard
 from eda_platform.schemas.plans import AnalysisPlan
 from eda_platform.schemas.questions import (
+    DEGRADABLE_ANALYSIS_MODES,
     QuestionAnswerContract,
     QuestionCandidate,
     QuestionCandidateSet,
     QuestionExecutionResult,
     QuestionFinding,
     method_answer_contract,
+    method_degradation_disclosure,
 )
 from eda_platform.schemas.relations import RelationshipCandidateSet
+from eda_platform.schemas.segmentation import SegmentationResult
 from eda_platform.schemas.sessions import (
     SessionManifest,
     TraceEvent,
@@ -87,7 +90,10 @@ from eda_platform.tools.loader import (
     defer_csv,
 )
 from eda_platform.tools.profiler import looks_like_id_name
-from eda_platform.tools.report_validator import full_coverage_evidence_refs
+from eda_platform.tools.report_validator import (
+    full_coverage_evidence_refs,
+    gate_safe_number,
+)
 from eda_platform.tools.sql_runner import SqlCatalog, build_catalog, run_sql
 
 _APPROVAL_UNAVAILABLE_FEEDBACK = (
@@ -271,6 +277,89 @@ def execute_question_candidate(
         on_join_used=on_join_used,
         catalog=catalog,
     )
+
+
+def question_needs_method_agent(candidate: QuestionCandidate) -> bool:
+    """True when SQL alone can never satisfy this question's publication contract."""
+    contract = _effective_answer_contract(candidate)
+    return contract is not None and contract.kind == "method"
+
+
+@dataclass(frozen=True)
+class AgentQuestionRun:
+    """Outcome of one tool-loop question execution.
+
+    ``degraded_reason`` set means nothing ran and the caller must take the SQL
+    path; ``route_unsupported`` additionally means the provider refused the
+    tools payload, so every further question in the same run should skip it.
+    """
+
+    artifacts: list[Artifact]
+    degraded_reason: str | None = None
+    route_unsupported: bool = False
+
+
+def execute_question_with_tools(
+    candidate: QuestionCandidate,
+    *,
+    datasets: Sequence[LoadedDataset],
+    project_id: str,
+    session_id: str,
+    parent_ids: Sequence[str],
+    llm: LLMClient,
+    context_artifacts: Sequence[Artifact],
+    store: ArtifactStore,
+    payload_policy: PayloadPolicy = "schema+aggregates",
+    code_backend: ExecutionBackend | None = None,
+    timeout_seconds: float = 10.0,
+    source_session_id: str | None = None,
+) -> AgentQuestionRun:
+    """Answer one question through the typed tool loop, as a qexec artifact."""
+    try:
+        scoped_datasets = _agent_scoped_datasets(candidate, datasets)
+    except ValueError as exc:
+        return AgentQuestionRun(artifacts=[], degraded_reason=str(exc)[:500])
+    try:
+        agent_result = run_question_agent(
+            candidate.question_en,
+            candidate_context=_agent_candidate_context(candidate),
+            datasets=scoped_datasets,
+            project_id=project_id,
+            session_id=session_id,
+            llm=cast(ToolCallingLLM, llm),
+            artifacts=context_artifacts,
+            store=store,
+            payload_policy=payload_policy,
+            code_backend=code_backend,
+            timeout_seconds=timeout_seconds,
+            source_session_id=source_session_id,
+        )
+    except ToolCallingUnsupportedError as exc:
+        # Only a provider that diagnosed the tools payload lands here, so this
+        # is a capability fact and not a retry.
+        return AgentQuestionRun(
+            artifacts=[], degraded_reason=str(exc)[:500], route_unsupported=True
+        )
+    # Reading an existing artifact makes it evidence, not a new artifact of
+    # this run. Only locally minted tool output is returned and re-saved with
+    # the qexec result. A same-session caller (auto_eda) needs the id filter
+    # too: there the prior EDA artifacts share this session id.
+    known_ids = {artifact.id for artifact in context_artifacts}
+    produced = [
+        artifact
+        for artifact in cast(list[Artifact], agent_result.artifacts)
+        if artifact.session_id == session_id and artifact.id not in known_ids
+    ]
+    produced.append(
+        _agent_qexec_artifact(
+            candidate,
+            agent_result=agent_result,
+            project_id=project_id,
+            session_id=session_id,
+            parent_ids=parent_ids,
+        )
+    )
+    return AgentQuestionRun(artifacts=produced)
 
 
 def run_question_batch(
@@ -470,26 +559,29 @@ def _run_question_batch(
                 notes = batch_whitelist.disclosure_notes(candidate.required_relations)
                 if notes:
                     candidate = candidate.model_copy(update={"risks": [*candidate.risks, *notes]})
+            answered_by_agent = False
             if agent_route:
-                try:
-                    agent_result = run_question_agent(
-                        candidate.question_en,
-                        candidate_context=_agent_candidate_context(candidate),
-                        datasets=_agent_scoped_datasets(candidate, datasets),
-                        project_id=project_id,
-                        session_id=actual_session_id,
-                        llm=cast(ToolCallingLLM, run_llm),
-                        artifacts=source_artifacts,
-                        store=store,
-                        payload_policy=payload_policy,
-                        code_backend=code_backend,
-                        timeout_seconds=timeout_seconds,
-                    )
-                except ToolCallingUnsupportedError as exc:
-                    # Only a provider that diagnosed the tools payload lands
-                    # here, so this is a capability fact and not a retry:
-                    # the rest of the batch takes the deterministic path.
-                    agent_route = False
+                agent_run = execute_question_with_tools(
+                    candidate,
+                    datasets=datasets,
+                    project_id=project_id,
+                    session_id=actual_session_id,
+                    parent_ids=[*source_parent_ids, source_qcand.id],
+                    llm=run_llm,
+                    context_artifacts=source_artifacts,
+                    store=store,
+                    payload_policy=payload_policy,
+                    code_backend=code_backend,
+                    timeout_seconds=timeout_seconds,
+                    source_session_id=source_session_id,
+                )
+                if agent_run.degraded_reason is None:
+                    artifacts = agent_run.artifacts
+                    answered_by_agent = True
+                else:
+                    # A refused tools payload is a capability fact: the rest of
+                    # the batch takes the deterministic path too.
+                    agent_route = not agent_run.route_unsupported
                     store.append_trace(
                         project_id,
                         TraceEvent(
@@ -498,29 +590,11 @@ def _run_question_batch(
                             name="question_batch",
                             summary={
                                 "question_id": question_id,
-                                "reason": str(exc)[:500],
+                                "reason": agent_run.degraded_reason,
                             },
                         ),
                     )
-                else:
-                    # Reading an existing artifact makes it evidence, not a new
-                    # artifact of this derived run. Only locally produced tool
-                    # outputs are returned and re-saved with the qexec result.
-                    artifacts = [
-                        artifact
-                        for artifact in cast(list[Artifact], agent_result.artifacts)
-                        if artifact.session_id == actual_session_id
-                    ]
-                    artifacts.append(
-                        _agent_qexec_artifact(
-                            candidate,
-                            agent_result=agent_result,
-                            project_id=project_id,
-                            session_id=actual_session_id,
-                            parent_ids=[*source_parent_ids, source_qcand.id],
-                        )
-                    )
-            if not agent_route:
+            if not answered_by_agent:
                 # Offline mode, adapters without a tool transport, and a model
                 # the provider just refused a tools payload for.
                 artifacts = execute_question_candidate(
@@ -751,7 +825,22 @@ def _agent_qexec_artifact(
         evidence_artifacts=evidence_artifacts,
         tool_names=agent_result.tool_names,
     )
+    sql_artifacts = [
+        artifact
+        for artifact in evidence_artifacts
+        if artifact.type is ArtifactType.SQL_RESULT
+    ]
+    degradation: str | None = None
     if contract_failure is not None:
+        # Same rule as the pipeline route: a descriptive method that fell back
+        # to a query publishes qualified rather than throwing the result away.
+        degradation = _method_degradation(candidate, contract_failure)
+        if degradation is not None and not any(
+            _data_contract_failure(candidate, artifact) is None
+            for artifact in sql_artifacts
+        ):
+            degradation = None
+    if contract_failure is not None and degradation is None:
         contract = _effective_answer_contract(candidate)
         return _failed_qexec_artifact(
             question_id=candidate.question_id,
@@ -770,11 +859,6 @@ def _agent_qexec_artifact(
             **common,
         )
 
-    sql_artifacts = [
-        artifact
-        for artifact in evidence_artifacts
-        if artifact.type is ArtifactType.SQL_RESULT
-    ]
     findings: list[QuestionFinding] = []
     for artifact in sql_artifacts:
         try:
@@ -821,7 +905,9 @@ def _agent_qexec_artifact(
         ),
         answer_contract=_effective_answer_contract(candidate),
         contract_status=(
-            "passed"
+            "unverified"
+            if degradation is not None
+            else "passed"
             if _effective_answer_contract(candidate) is not None
             else "not_required"
         ),
@@ -837,7 +923,7 @@ def _agent_qexec_artifact(
         # validator rejected it", which the UI renders identically.
         interpretation_status="validated",
         exploratory=candidate.exploratory,
-        limitations=list(candidate.risks),
+        limitations=[*([degradation] if degradation else []), *candidate.risks],
     )
     return Artifact(
         id=make_artifact_id(
@@ -1154,7 +1240,17 @@ def _successful_qexec_artifact(
     seeds: SemanticSeeds | None = None,
 ) -> Artifact:
     contract_failure = _result_contract_failure(candidate, sql_artifact)
+    degradation: str | None = None
     if contract_failure is not None:
+        degradation = _method_degradation(candidate, contract_failure)
+        if degradation is not None:
+            # The method is unproven, but every other publication check still
+            # has to pass before the query's own result may stand in for it.
+            residual = _data_contract_failure(candidate, sql_artifact)
+            if residual is not None:
+                degradation = None
+                contract_failure = residual
+    if contract_failure is not None and degradation is None:
         return _failed_qexec_artifact(
             question_id=candidate.question_id,
             question=candidate.question_en,
@@ -1196,7 +1292,9 @@ def _successful_qexec_artifact(
         plan_summary=plan_summary,
         answer_contract=_effective_answer_contract(candidate),
         contract_status=(
-            "passed"
+            "unverified"
+            if degradation is not None
+            else "passed"
             if _effective_answer_contract(candidate) is not None
             else "not_required"
         ),
@@ -1211,7 +1309,12 @@ def _successful_qexec_artifact(
         # Only the whitelist disclosure lines (appended to risks by the callers)
         # are report-facing; ordinary card risks stay on the candidate.
         limitations=[
-            risk for risk in candidate.risks if "auto-confirmed (high confidence)" in risk
+            *([degradation] if degradation else []),
+            *(
+                risk
+                for risk in candidate.risks
+                if "auto-confirmed (high confidence)" in risk
+            ),
         ],
     )
     payload = result.model_dump(mode="json")
@@ -1239,6 +1342,13 @@ def _result_contract_failure(
     )
     if method_failure is not None:
         return method_failure
+    return _data_contract_failure(candidate, sql_artifact)
+
+
+def _data_contract_failure(
+    candidate: QuestionCandidate, sql_artifact: Artifact
+) -> _ResultContractFailure | None:
+    """Every publication check except the method one: shape, metric, units."""
     result = SqlResult.model_validate(sql_artifact.payload)
     if not result.rows_preview:
         return _ResultContractFailure("empty_query_result", "query returned no answer rows")
@@ -1346,6 +1456,29 @@ def _method_contract_failure(
     return None
 
 
+def _method_degradation(
+    candidate: QuestionCandidate, failure: _ResultContractFailure
+) -> str | None:
+    """The disclosure to publish under, or None when the answer must be withheld.
+
+    Two questions in the 2026-08-26 Compare run computed 2591 and 73 rows and
+    the reader was told "the run did not produce the evidence this question
+    requires". Discarding a result and calling it uncomputed is a lie; the fix
+    is to publish it qualified. Only descriptive methods degrade — a causal or
+    predictive question has no honest query stand-in at all.
+    """
+    contract = _effective_answer_contract(candidate)
+    if contract is None or contract.kind != "method":
+        return None
+    if failure.code != contract.abstention_code:
+        return None
+    if candidate.analysis_mode not in DEGRADABLE_ANALYSIS_MODES:
+        return None
+    return method_degradation_disclosure(
+        contract.required_method_id or "", candidate.question_en
+    )
+
+
 def _effective_answer_contract(
     candidate: QuestionCandidate,
 ) -> QuestionAnswerContract | None:
@@ -1359,6 +1492,7 @@ def _valid_method_artifact(artifact: Artifact) -> bool:
         ArtifactType.MODEL_CARD: ("model", ModelCard),
         ArtifactType.ANOMALY_SCREEN_RESULT: ("anomaly", AnomalyScreenResult),
         ArtifactType.STAT_TEST_RESULT: ("stat", StatTestResult),
+        ArtifactType.SEGMENTATION_RESULT: ("segmentation", SegmentationResult),
         ArtifactType.TABLE: ("table", AnalysisTable),
     }
     binding = validators.get(artifact.type)
@@ -1536,20 +1670,6 @@ def intent_metric_column(intent: QuestionIntent, row: dict[str, object]) -> str 
     return None
 
 
-def _format_number(value: float) -> str:
-    """Fixed-point text for a cited value; never scientific notation.
-
-    Deliberately NOT the exporter's magnitude-scaled policy: this composes
-    `finding.text`, which is persisted as an artifact, and rounding here would
-    rewrite stored evidence. The exporter re-renders at display time, so a
-    stored "12.4973" still reads "12.5" in the report.
-    """
-    if value == int(value) and abs(value) < 1e15:
-        return str(int(value))
-    text = f"{value:.4f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
 def _is_percent_valued(column: str) -> bool:
     return bool(_column_tokens(column) & _PERCENT_VALUED_TOKENS)
 
@@ -1588,7 +1708,7 @@ def _intent_finding(
     if intent == "share":
         return _share_intent_finding(candidate, artifact_id, row, column, value)
     return QuestionFinding(
-        text=f"{candidate.question_en} The {column} is {_format_number(value)}.",
+        text=f"{candidate.question_en} The {column} is {gate_safe_number(value)}.",
         evidence=[
             EvidenceRef(
                 kind="sql",
@@ -1609,7 +1729,7 @@ def _share_intent_finding(
 ) -> QuestionFinding:
     """Build a percentage finding, including its numerator and denominator when available."""
     percent_valued = _is_percent_valued(column)
-    rate_text = f"{_format_number(value)}%" if percent_valued else _format_number(value)
+    rate_text = f"{gate_safe_number(value)}%" if percent_valued else gate_safe_number(value)
     rate_evidence = EvidenceRef(
         kind="sql",
         artifact_id=artifact_id,
@@ -1626,8 +1746,8 @@ def _share_intent_finding(
     numerator_column, numerator, denominator = pair
     return QuestionFinding(
         text=(
-            f"{candidate.question_en} {_format_number(numerator)} of "
-            f"{_format_number(denominator)} rows ({rate_text})."
+            f"{candidate.question_en} {gate_safe_number(numerator)} of "
+            f"{gate_safe_number(denominator)} rows ({rate_text})."
         ),
         evidence=[
             EvidenceRef(
@@ -1710,7 +1830,7 @@ def _domain_metric_finding(
         if declared_unit is None and f"{{{name}}}%" in template:
             # Historical SqlResult artifacts predate produced-unit metadata.
             declared_unit = "percent"
-        rendered = _format_number(value)
+        rendered = gate_safe_number(value)
         display_unit = currency_unit_display(declared_unit)
         if display_unit is not None:
             rendered = f"{rendered} {display_unit}"
@@ -1852,8 +1972,9 @@ def _trend_finding(
         unseen = total_periods - len(rows)
         text = (
             f"{candidate.question_en} Over the first {len(rows)} of "
-            f"{total_periods} periods the metric moved from {start:g} to "
-            f"{end:g}; {unseen} later periods were not returned, so the "
+            f"{total_periods} periods the metric moved from {gate_safe_number(start)} "
+            f"to {gate_safe_number(end)}; {unseen} later periods were not "
+            f"returned, so the "
             "overall trend is not established."
         )
     else:
@@ -1861,8 +1982,9 @@ def _trend_finding(
             "increased" if end > start else "decreased" if end < start else "stayed flat"
         )
         text = (
-            f"{candidate.question_en} The metric {direction} from {start:g} "
-            f"to {end:g} across the returned periods."
+            f"{candidate.question_en} The metric {direction} from "
+            f"{gate_safe_number(start)} to {gate_safe_number(end)} across the "
+            "returned periods."
         )
     return QuestionFinding(
         text=text,
@@ -1931,7 +2053,7 @@ def _single_value_finding(
     if value is None:
         return _generic_finding(candidate, artifact_id, [row])
     return QuestionFinding(
-        text=f"{candidate.question_en} The returned {column} is {value:g}.",
+        text=f"{candidate.question_en} The returned {column} is {gate_safe_number(value)}.",
         evidence=[
             EvidenceRef(
                 kind="sql",
@@ -1978,7 +2100,10 @@ def _generic_finding(
         return QuestionFinding(text=f"{candidate.question_en} SQL returned result rows.")
     where = f" for {top.get(label_column)}" if label_column is not None else ""
     return QuestionFinding(
-        text=f"{candidate.question_en} The returned {metric_column} is {value:g}{where}.",
+        text=(
+            f"{candidate.question_en} The returned {metric_column} is "
+            f"{gate_safe_number(value)}{where}."
+        ),
         evidence=[
             EvidenceRef(
                 kind="sql",
@@ -2098,7 +2223,7 @@ def _ranked_finding(
                         )
                     )
         parts = [
-            f"{label} ({basis_column} {value:.4g}{suffix}"
+            f"{label} ({basis_column} {gate_safe_number(value)}{suffix}"
             f"{_group_size_suffix(row, size_column)})"
             for label, value, row in zip(labels, values, leaders, strict=False)
         ]
@@ -2120,7 +2245,8 @@ def _ranked_finding(
         ranked = total_rows if total_rows is not None else len(rows)
         text = (
             f"{candidate.question_en} Ranked by {basis_column} {direction}: the {noun} "
-            f"{basis_column} is {values[0]:.4g}{suffix} (first of {ranked} ranked results)."
+            f"{basis_column} is {gate_safe_number(values[0])}{suffix} "
+            f"(first of {ranked} ranked results)."
         )
     return QuestionFinding(text=text, evidence=evidence)
 
@@ -2408,8 +2534,8 @@ def _spread_finding(
     return QuestionFinding(
         text=(
             f"{candidate.question_en} Across {count} rows{grouped}, "
-            f"{metric_column} ranges from {_format_number(low)} to "
-            f"{_format_number(high)}{where} (the SQL declares no ordering, so "
+            f"{metric_column} ranges from {gate_safe_number(low)} to "
+            f"{gate_safe_number(high)}{where} (the SQL declares no ordering, so "
             "this is a range, not a ranking)."
         ),
         evidence=[
@@ -2448,7 +2574,7 @@ def _group_size_suffix(row: dict[str, object], size_column: str | None) -> str:
     if size_column is None:
         return ""
     size = _number(row.get(size_column))
-    return "" if size is None else f", {size_column} {size:g}"
+    return "" if size is None else f", {size_column} {gate_safe_number(size)}"
 
 
 # A ranked result whose metric is a row count over few labels is a distribution,

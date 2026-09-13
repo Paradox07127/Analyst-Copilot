@@ -28,9 +28,6 @@ JOB_HANDLERS = {
     "report_generate": "_run_report_generate_job",
     "session_fork": "_run_run_fork_job",
     "question_draft": "_run_question_draft_job",
-    "investigation_plan": "_run_investigation_plan_job",
-    "investigation_execute": "_run_investigation_execute_job",
-    "macro_loop": "_run_macro_loop_job",
     "synthesis_brief_create": "_run_synthesis_brief_job",
     "decision_report_generate": "_run_decision_report_job",
 }

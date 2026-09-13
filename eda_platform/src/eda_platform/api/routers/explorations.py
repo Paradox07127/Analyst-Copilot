@@ -6,11 +6,12 @@ import json
 import time
 from collections.abc import Iterator
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from eda_platform.api.errors import ApiErrorEnvelope
 from eda_platform.api.routers.settings import SESSION_HEADER, session_id_from_header
+from eda_platform.application.dto import ExplorationListView
 from eda_platform.application.services.exploration_service import (
     ExplorationService,
     ExplorationValidationError,
@@ -35,7 +36,6 @@ _ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     409: {"model": ApiErrorEnvelope},
     410: {"model": ApiErrorEnvelope},
     422: {"model": ApiErrorEnvelope},
-    503: {"model": ApiErrorEnvelope},
 }
 
 
@@ -43,18 +43,7 @@ def _service(request: Request) -> ExplorationService:
     return request.app.state.exploration_service
 
 
-def _require_release(request: Request) -> None:
-    # Keep the gate on the router as well as the service. A future endpoint
-    # cannot accidentally expose exploration state without explicitly passing
-    # through the installed production certificate.
-    _service(request).require_release_certificate()
-
-
-router = APIRouter(
-    tags=["explorations"],
-    responses=_ERROR_RESPONSES,
-    dependencies=[Depends(_require_release)],
-)
+router = APIRouter(tags=["explorations"], responses=_ERROR_RESPONSES)
 
 
 def _effective(request: Request, session: str | None):
@@ -103,6 +92,17 @@ def start_exploration(
         payload_policy=effective.payload_policy,
         llm_env=effective.env_overlay,
         idempotency_key=idempotency_key,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/explorations",
+    response_model=ExplorationListView,
+)
+def list_explorations(session_id: str, request: Request) -> ExplorationListView:
+    """List the session's deep dives so the UI never depends on local state."""
+    return ExplorationListView(
+        explorations=list(_service(request).list_for_session(session_id))
     )
 
 

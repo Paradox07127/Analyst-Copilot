@@ -594,11 +594,11 @@ def test_legacy_confidence_labels_load_and_render_unchanged() -> None:
     bundle = ReportBundle.model_validate(_legacy_bundle_payload())
     markdown = report_bundle_to_markdown(bundle)
     assert "- Legacy verified claim." in markdown  # no prefix for "verified"
-    assert "[Low relevance] Legacy low relevance claim." in markdown
+    assert "[Barely related evidence] Legacy low relevance claim." in markdown
     # Cross-review fix 6: HTML matches the markdown legacy rendering.
     html = export_report_html(bundle)
     assert "<li>Legacy verified claim.</li>" in html
-    assert "<li>[Low relevance] Legacy low relevance claim.</li>" in html
+    assert "<li>[Barely related evidence] Legacy low relevance claim.</li>" in html
 
 
 def test_exporters_render_strength_prefixes() -> None:
@@ -613,13 +613,13 @@ def test_exporters_render_strength_prefixes() -> None:
 
     markdown = report_bundle_to_markdown(bundle)
     assert "- Strong claim." in markdown  # strong carries no prefix
-    assert "- [Indicative] Indicative claim." in markdown
-    assert "- [Exploratory — hypothesis-generating] Exploratory claim." in markdown
+    assert "- [Suggestive, not conclusive] Indicative claim." in markdown
+    assert "- [A lead, not a conclusion] Exploratory claim." in markdown
 
     html = export_report_html(bundle)
     assert "<li>Strong claim.</li>" in html
-    assert "<li>[Indicative] Indicative claim.</li>" in html
-    assert "<li>[Exploratory — hypothesis-generating] Exploratory claim.</li>" in html
+    assert "<li>[Suggestive, not conclusive] Indicative claim.</li>" in html
+    assert "<li>[A lead, not a conclusion] Exploratory claim.</li>" in html
 
 
 # --------------------------------------------------------------------------- #
@@ -631,7 +631,7 @@ def test_registry_written_sql_is_strong() -> None:
 
     `_time_coverage_sql` and friends aggregate a named table the platform chose;
     that is the same footing as the profiler scan, which is already strong. The
-    cap was blanket, so these read as "[Indicative]" while stating exact facts.
+    cap was blanket, so these read as merely suggestive while stating exact facts.
     """
     claim = _claim("sql_only", [_SQL_REF])
     label = evidence_strength_label(

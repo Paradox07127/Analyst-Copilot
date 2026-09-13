@@ -12,6 +12,8 @@ export type ExplorationViewDto = Schemas["ExplorationView"];
 export type ExplorationBudgetExtendedDto =
   Schemas["ExplorationBudgetExtended"];
 export type ExplorationTierDto = ExplorationViewDto["thinking_level"];
+export type ExplorationListDto = Schemas["ExplorationListView"];
+export type ExplorationListItemDto = Schemas["ExplorationListItemView"];
 
 /* StreamingResponse payloads are not represented in OpenAPI. This is the one
  * hand-authored transport envelope; its nested data remains opaque. */

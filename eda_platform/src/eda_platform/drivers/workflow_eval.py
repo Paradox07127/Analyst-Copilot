@@ -41,6 +41,7 @@ _SOURCE_SUPPORT_TYPES = {
     ArtifactType.STAT_TEST_RESULT,
     ArtifactType.MODEL_CARD,
     ArtifactType.ANOMALY_SCREEN_RESULT,
+    ArtifactType.SEGMENTATION_RESULT,
     ArtifactType.VALIDATED_FINDING,
 }
 

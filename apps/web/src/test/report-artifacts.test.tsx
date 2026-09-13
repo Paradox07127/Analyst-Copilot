@@ -90,6 +90,85 @@ describe("Report page with real API", () => {
     ).toBeEnabled();
   });
 
+  it("flags a deterministic-fallback report as written without the model", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/report", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          status: "generated",
+          markdown: "# Fallback report\n\nBody.",
+          generated_at: "2026-07-22T12:00:00Z",
+          degraded: true,
+          degraded_reason:
+            "Deterministic fallback (LLM unavailable or repeatedly invalid).",
+        }),
+      ),
+    );
+
+    renderAppAt("/projects/p1/sessions/r1/report");
+
+    expect(
+      await screen.findByText("This report was written without the language model"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/assembled deterministically from verified evidence/),
+    ).toBeInTheDocument();
+  });
+
+  it("explains the failure on the empty state when the analysis failed", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/report", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          status: "none",
+          markdown: "",
+          generated_at: null,
+        }),
+      ),
+      http.get("/api/v1/sessions/:sessionId/jobs", ({ params }) =>
+        HttpResponse.json({
+          session_id: String(params["sessionId"]),
+          jobs: [
+            {
+              job_id: "job_failed_1",
+              session_id: String(params["sessionId"]),
+              project_id: "p1",
+              kind: "auto_eda",
+              status: "failed",
+              cancel_requested: false,
+              created_at: "2026-07-25T10:00:00Z",
+              started_at: "2026-07-25T10:00:01Z",
+              finished_at: "2026-07-25T10:00:02Z",
+              error_code: "TimeoutError",
+              error_message:
+                "Part of the analysis timed out. Run it again; a busy provider or a very large dataset can cause this.",
+              source_session_id: null,
+              events_url: "/api/v1/jobs/job_failed_1/events",
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderAppAt("/projects/p1/sessions/r1/report");
+
+    expect(
+      await screen.findByText(
+        "The analysis failed before a report was written",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Part of the analysis timed out/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No technical report yet")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Trace/ }),
+    ).toHaveAttribute("href", "/projects/p1/sessions/r1/trace");
+    expect(
+      screen.getByRole("button", { name: "Run again" }),
+    ).toBeInTheDocument();
+  });
+
   it("shows a typed error with retry when the report fails", async () => {
     server.use(
       http.get("/api/v1/sessions/:sessionId/report", () =>
@@ -102,7 +181,7 @@ describe("Report page with real API", () => {
 
     renderAppAt("/projects/p1/sessions/r1/report");
     expect(
-      await screen.findByText("Request failed (session_not_found)"),
+      await screen.findByText("session_not_found"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
@@ -117,8 +196,8 @@ const EVIDENCE_REPORT = [
   "",
   "## Executive Summary",
   "",
-  "- [Indicative] Refunds explain 6 of the 8 points of the Q3 drop.",
-  "- [Unverified figures] Cover held at 12.4973 days.",
+  "- [Suggestive, not conclusive] Refunds explain 6 of the 8 points of the Q3 drop.",
+  "- [Figures not re-checked] Cover held at 12.4973 days.",
   "",
   "## Data Map",
   "",
@@ -217,9 +296,13 @@ describe("Report reading chrome", () => {
     serveEvidenceReport();
     renderAppAt("/projects/p1/sessions/r1/report");
 
-    expect(await screen.findByText("Indicative")).toBeInTheDocument();
-    expect(screen.getByText("Unverified figures")).toBeInTheDocument();
-    expect(screen.queryByText(/\[Indicative\]/)).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("Suggestive, not conclusive"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Figures not re-checked")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/\[Suggestive, not conclusive\]/),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByText(/Refunds explain 6 of the 8 points/),
     ).toBeInTheDocument();
@@ -550,7 +633,7 @@ describe("Artifacts deep link (?artifact=)", () => {
       name: "Linked artifact",
     });
     expect(
-      await within(panel).findByText("Request failed (artifact_not_found)"),
+      await within(panel).findByText("artifact_not_found"),
     ).toBeInTheDocument();
   });
 });

@@ -32,7 +32,6 @@ import {
 } from "../../api/client";
 import {
   queryKeys,
-  useCapabilities,
   useProjectUploads,
   useProjects,
   useSettings,
@@ -66,8 +65,16 @@ interface UploadEntry {
   error?: string;
 }
 
+/* Mirrors upload_service.MAX_UPLOAD_BYTES (1 GiB): rejecting an oversize file
+ * before the request starts beats streaming a gigabyte only to get a 413. */
+const MAX_UPLOAD_BYTES = 1 << 30;
+
 function uploadErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    /* Both 413s (the service's own check and the body-size middleware) report
+     * the raw byte count; readers think in GB. */
+    if (error.code === "upload_too_large" || error.code === "request_too_large")
+      return `This file is larger than the ${formatBytes(MAX_UPLOAD_BYTES)} upload limit.`;
     if (error.code === "upload_file_quota")
       return `Project file quota reached. ${error.message}`;
     if (error.code === "upload_project_byte_quota")
@@ -117,7 +124,9 @@ function formatBytes(bytes: number): string {
     value /= 1024;
     unit += 1;
   }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+  const figure =
+    value >= 10 || Number.isInteger(value) ? Math.round(value) : value.toFixed(1);
+  return `${figure} ${units[unit]}`;
 }
 
 function GearGlyph() {
@@ -439,8 +448,6 @@ function NewSessionPanel({
   const openSettings = useOpenSettingsDialog();
   const settings = useSettings();
   const projects = useProjects();
-  const capabilities = useCapabilities();
-  const explorationAvailable = capabilities.data?.exploration_available === true;
 
   const [uploads, setUploads] = useState<UploadEntry[]>([]);
   const [projectChoice, setProjectChoice] = useState<
@@ -559,17 +566,25 @@ function NewSessionPanel({
   };
 
   const validateDataFiles = (files: File[]): File[] => {
+    const issues: string[] = [];
     const csvFiles = files.filter((file) => /\.csv$/i.test(file.name));
     if (csvFiles.length !== files.length) {
-      setFileFeedback(
+      issues.push(
         csvFiles.length === 0
           ? "Choose CSV files only."
           : "Some files were ignored. This analysis accepts CSV files only.",
       );
-    } else {
-      setFileFeedback(null);
     }
-    return csvFiles;
+    const accepted = csvFiles.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+    const oversize = csvFiles.filter((file) => file.size > MAX_UPLOAD_BYTES);
+    if (oversize.length > 0) {
+      const names = oversize.map((file) => file.name).join(", ");
+      issues.push(
+        `${names} ${oversize.length === 1 ? "is" : "are"} larger than the ${formatBytes(MAX_UPLOAD_BYTES)} per-file limit and ${oversize.length === 1 ? "was" : "were"} not added.`,
+      );
+    }
+    setFileFeedback(issues.length > 0 ? issues.join(" ") : null);
+    return accepted;
   };
 
   const onPickFiles = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1130,6 +1145,9 @@ function NewSessionPanel({
               disabled={!projectReady}
               className="sr-only"
             />
+            <span className="text-xs text-status-neutral">
+              {`CSV files up to ${formatBytes(MAX_UPLOAD_BYTES)} each`}
+            </span>
           </div>
           {fileFeedback && (
             <p
@@ -1165,24 +1183,21 @@ function NewSessionPanel({
         </label>
 
         {/* One line, not a second canvas: Context describes the data, this names
-         * a single question to chase afterwards. Hidden without the capability
-         * so the ordinary run screen gains nothing it cannot act on. */}
-        {explorationAvailable && (
-          <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-semibold">
-              Deep dive{" "}
-              <span className="font-normal text-status-neutral">(optional)</span>
-            </span>
-            <input
-              aria-label="Deep dive goal"
-              value={deepDiveGoal}
-              onChange={(event) => setDeepDiveGoal(event.target.value)}
-              maxLength={4000}
-              placeholder="One question for the agent to chase once the run finishes"
-              className="w-full rounded-base border border-border bg-bg p-2.5 text-sm outline-none placeholder:text-status-neutral"
-            />
-          </label>
-        )}
+         * a single question to chase afterwards. */}
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-semibold">
+            Deep dive{" "}
+            <span className="font-normal text-status-neutral">(optional)</span>
+          </span>
+          <input
+            aria-label="Deep dive goal"
+            value={deepDiveGoal}
+            onChange={(event) => setDeepDiveGoal(event.target.value)}
+            maxLength={4000}
+            placeholder="One question for the agent to chase once the run finishes"
+            className="w-full rounded-base border border-border bg-bg p-2.5 text-sm outline-none placeholder:text-status-neutral"
+          />
+        </label>
 
       </div>
 

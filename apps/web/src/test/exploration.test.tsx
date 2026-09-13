@@ -411,46 +411,78 @@ const preparedDto: ExplorationPreparedDto = {
   action_hash: "action_12345678",
   approval_token: "approval_12345678",
   expires_at: "2026-08-02T16:00:00Z",
-  release_certificate_digest: "release_12345678",
 };
 
+function listedExploration(patch: Record<string, unknown> = {}) {
+  return {
+    exploration_id: "expl_listed",
+    session_id: "r1",
+    project_id: "p1",
+    goal: "Investigate regional revenue",
+    mode: "goal_directed",
+    thinking_level: "standard",
+    status: "running",
+    stop_reason: null,
+    created_at: "2026-08-25T10:00:00Z",
+    report_available: false,
+    ...patch,
+  };
+}
+
 describe("E5 exploration API workflow", () => {
-  it("keeps the deep dive entry fail-closed without a trusted release capability", async () => {
-    renderAppWithRouterAt("/projects/p1/sessions/r1/findings");
-    await screen.findByRole("heading", { name: "Findings" });
+  it("opens the Explore launcher with no capability to negotiate", async () => {
+    renderAppWithRouterAt("/projects/p1/sessions/r1/explorations");
     expect(
-      screen.queryByRole("link", { name: "Start a deep dive" }),
-    ).not.toBeInTheDocument();
+      await screen.findByRole("button", { name: "Review authorization" }),
+    ).toBeInTheDocument();
   });
 
-  it("offers the deep dive from Findings, not from the section bar", async () => {
-    server.use(
-      http.get("/api/v1/system/capabilities", () => HttpResponse.json({
-        pdf_export_available: true,
-        pdf_export_hint: "",
-        exploration_available: true,
-      })),
-    );
+  it("offers the deep dive from Findings and from the section bar", async () => {
     renderAppWithRouterAt("/projects/p1/sessions/r1/findings");
     expect(
       await screen.findByRole("link", { name: "Start a deep dive" }),
     ).toHaveAttribute("href", "/projects/p1/sessions/r1/explorations");
-    expect(screen.queryByRole("link", { name: "Explore" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Explore" })).toHaveAttribute(
+      "href",
+      "/projects/p1/sessions/r1/explorations",
+    );
   });
 
   it("points at the started run instead of the launcher once one exists", async () => {
-    server.use(
-      http.get("/api/v1/system/capabilities", () => HttpResponse.json({
-        pdf_export_available: true,
-        pdf_export_hint: "",
-        exploration_available: true,
-      })),
-    );
     window.localStorage.setItem("eda.exploration.run.v1.r1", "expl_9");
     renderAppWithRouterAt("/projects/p1/sessions/r1/findings");
     expect(
       await screen.findByRole("link", { name: "Open the deep dive" }),
     ).toHaveAttribute("href", "/projects/p1/sessions/r1/explorations/expl_9");
+  });
+
+  it("finds a run through the server listing without any local state", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/explorations", () =>
+        HttpResponse.json({ explorations: [listedExploration()] }),
+      ),
+    );
+    renderAppWithRouterAt("/projects/p1/sessions/r1/findings");
+    // No localStorage at all: the listing endpoint alone finds the run back.
+    expect(
+      await screen.findByRole("link", { name: "Open the deep dive" }),
+    ).toHaveAttribute("href", "/projects/p1/sessions/r1/explorations/expl_listed");
+  });
+
+  it("lists the session's deep dives on the launcher page", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/explorations", () =>
+        HttpResponse.json({ explorations: [listedExploration()] }),
+      ),
+    );
+    renderAppWithRouterAt("/projects/p1/sessions/r1/explorations");
+    const list = await screen.findByRole("region", {
+      name: "Deep dives in this session",
+    });
+    expect(
+      within(list).getByRole("link", { name: "Investigate regional revenue" }),
+    ).toHaveAttribute("href", "/projects/p1/sessions/r1/explorations/expl_listed");
+    expect(within(list).getByText("Running")).toBeInTheDocument();
   });
 
   it("carries a goal typed on the new-session screen into goal-directed mode", async () => {
@@ -626,23 +658,35 @@ describe("E5 exploration API workflow", () => {
       http.get("/api/v1/sessions/:sessionId/explorations/:explorationId", () => HttpResponse.json(stopped)),
       http.get(
         "/api/v1/sessions/:sessionId/explorations/:explorationId/report",
-        () => HttpResponse.text("# Exploration report\n\n- exploration_id: expl_1"),
+        () => HttpResponse.text("# Exploration deep dive\n\n- exploration_id: expl_1"),
       ),
     );
     renderAppWithRouterAt("/projects/p1/sessions/r1/explorations/expl_1");
     expect(await screen.findByText("Stopped · terminal")).toBeInTheDocument();
     expect(screen.getAllByText("budget_exhausted").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Confirmatory evidence").length).toBeGreaterThan(0);
-    expect(screen.getByText("Exploratory")).toBeInTheDocument();
+    expect(screen.getAllByText("Exploratory").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Cost $1.25 / $5.00 cap")).toHaveLength(2);
-    // The report is served as markdown by the run's own endpoint; it has no
-    // artifact id, and the old link pointed at one that never existed.
+    // The report is markdown from the run's own endpoint and renders through
+    // the same component as the main report, not a raw <pre> dump.
     expect(
-      await screen.findByText(/- exploration_id: expl_1/),
+      await screen.findByRole("heading", { name: "Exploration deep dive" }),
     ).toBeInTheDocument();
+    expect(screen.getByText(/exploration_id: expl_1/)).toBeInTheDocument();
+    expect(document.querySelector("article.report-markdown")).not.toBeNull();
     expect(screen.queryByText("Open report artifact")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
     expect(document.querySelectorAll("[data-section-id]")).toHaveLength(6);
     expect(FakeEventSource.instances).toHaveLength(0);
+    // A finished run says where its results go next.
+    expect(screen.getByRole("link", { name: "View in Findings" })).toHaveAttribute(
+      "href",
+      "/projects/p1/sessions/r1/findings",
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Regenerate main report with these conclusions",
+      }),
+    ).toBeInTheDocument();
   });
 });

@@ -181,7 +181,7 @@ def test_unlimited_llm_budget_renders_as_unlimited() -> None:
     assert "remaining_llm_call_budget: unlimited" in text
 
 
-# --- recent failures: investigation-loop compaction semantics (5 x 160) ---
+# --- recent failures: compaction semantics (5 x 160) ---
 
 
 def test_failure_history_keeps_the_last_five_compressed_entries() -> None:

@@ -715,8 +715,124 @@ function AnalysisSection({ settings }: { settings: SettingsView }) {
           ))}
         </div>
       </Section>
+      <ResourceLimitsSection settings={settings} />
       {update.isError && <ErrorState error={update.error} />}
     </div>
+  );
+}
+
+const GIB = 1024 ** 3;
+const MILLION = 1_000_000;
+/* Mirrors the server bounds in application/services/settings_service.py; the
+ * server refuses anything outside them, this only stops the trip. */
+const MIN_MEMORY_GB = 0.5;
+const MAX_MEMORY_GB = 64;
+const MIN_ROWS_MILLIONS = 0.1;
+const MAX_ROWS_MILLIONS = 500;
+
+/* The two limits that decide whether a given upload runs at all. Everything
+ * else in the resource policy either never binds before these do or describes
+ * how the estimate is made, so it stays server-owned. */
+function ResourceLimitsSection({ settings }: { settings: SettingsView }) {
+  const update = useUpdateSettings();
+  const savedMemoryGb = settings.max_working_set_bytes / GIB;
+  const savedRowsMillions = settings.max_rows_per_dataset / MILLION;
+  const [memoryGb, setMemoryGb] = useState(String(savedMemoryGb));
+  const [rowsMillions, setRowsMillions] = useState(String(savedRowsMillions));
+  /* Re-seed when the server's answer changes under us — a reset, or the
+   * restore that runs after a server restart. */
+  const [seen, setSeen] = useState(settings.version);
+  if (seen !== settings.version) {
+    setSeen(settings.version);
+    setMemoryGb(String(savedMemoryGb));
+    setRowsMillions(String(savedRowsMillions));
+  }
+
+  const memory = Number(memoryGb);
+  const rows = Number(rowsMillions);
+  const memoryValid =
+    Number.isFinite(memory) && memory >= MIN_MEMORY_GB && memory <= MAX_MEMORY_GB;
+  const rowsValid =
+    Number.isFinite(rows) &&
+    rows >= MIN_ROWS_MILLIONS &&
+    rows <= MAX_ROWS_MILLIONS;
+  const dirty = memory !== savedMemoryGb || rows !== savedRowsMillions;
+
+  return (
+    <Section
+      title="How much this machine may use"
+      description="Checked before an analysis reads any data. If the estimate is over, the run stops and says so instead of starting and running out of memory."
+    >
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!memoryValid || !rowsValid) return;
+          update.mutate({
+            max_working_set_bytes: Math.round(memory * GIB),
+            max_rows_per_dataset: Math.round(rows * MILLION),
+          });
+        }}
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field
+            label="Memory for one analysis (GB)"
+            htmlFor="settings-memory-budget"
+            hint="Default 2 GB. Raise it only up to what this machine actually has free — past that the analysis runs out of memory for real instead of stopping cleanly."
+          >
+            <input
+              id="settings-memory-budget"
+              type="number"
+              step="0.5"
+              min={MIN_MEMORY_GB}
+              max={MAX_MEMORY_GB}
+              className={numberClass}
+              value={memoryGb}
+              aria-invalid={!memoryValid}
+              onChange={(event) => setMemoryGb(event.target.value)}
+            />
+          </Field>
+          <Field
+            label="Largest table (million rows)"
+            htmlFor="settings-max-rows"
+            hint="Default 10 million. A table above this is not analysed even when there is memory for it."
+          >
+            <input
+              id="settings-max-rows"
+              type="number"
+              step="0.1"
+              min={MIN_ROWS_MILLIONS}
+              max={MAX_ROWS_MILLIONS}
+              className={numberClass}
+              value={rowsMillions}
+              aria-invalid={!rowsValid}
+              onChange={(event) => setRowsMillions(event.target.value)}
+            />
+          </Field>
+        </div>
+        <p className={hintClass}>
+          Applies to analyses started from now on. A run already under way keeps
+          the limits it started with.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={update.isPending || !memoryValid || !rowsValid || !dirty}
+          >
+            {update.isPending ? "Saving…" : "Save limits"}
+          </Button>
+          {dirty && <Badge tone="warn">Unsaved changes</Badge>}
+          {(!memoryValid || !rowsValid) && (
+            <span className="text-xs text-status-critical">
+              Memory must be between {MIN_MEMORY_GB} and {MAX_MEMORY_GB} GB, and
+              the table limit between {MIN_ROWS_MILLIONS} and {MAX_ROWS_MILLIONS}{" "}
+              million rows.
+            </span>
+          )}
+        </div>
+      </form>
+    </Section>
   );
 }
 

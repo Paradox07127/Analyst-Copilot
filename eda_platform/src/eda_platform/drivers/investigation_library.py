@@ -126,6 +126,11 @@ def _validated_findings_only(
 
     findings: list[StoredValidatedFinding] = []
     for item in candidates:
+        if item.finding.origin == "exploration":
+            # Exploration findings are verified by the exploration claim gate
+            # at publish time; no investigation record exists for them.
+            findings.append(item)
+            continue
         same_run_records = [
             stored
             for stored in records_by_finding_id.get(item.artifact_id, [])

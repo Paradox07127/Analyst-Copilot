@@ -412,7 +412,7 @@ describe("Skills page", () => {
     await user.click(within(saved).getByRole("button", { name: "Replay" }));
 
     expect(
-      await screen.findByText("Request failed (binding_invalid)"),
+      await screen.findByText("binding_invalid"),
     ).toBeInTheDocument();
     expect(
       screen.getByText("Column(s) nope do not exist in the selected dataset(s)."),
@@ -641,7 +641,202 @@ describe("Skills page seed import", () => {
 
     const alert = await within(seed).findByRole("alert");
     expect(
-      within(alert).getByText("Request failed (binding_invalid)"),
+      within(alert).getByText("binding_invalid"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Skills page user templates", () => {
+  it("creates a template from the New template form", async () => {
+    let createBody: Record<string, unknown> | null = null;
+    server.use(
+      http.post(
+        "/api/v1/projects/:projectId/skill-templates",
+        async ({ request }) => {
+          createBody = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json(
+            {
+              template_id: "user_tmpl_new",
+              source: "user",
+              name: "Top values",
+              question: "Which {group_col} leads?",
+              sql: "SELECT {group_col} FROM {dataset} LIMIT 5",
+              method: "ranking",
+              rationale: "A sorted head answers leader questions.",
+              params: [{ name: "group_col", role: "dimension", description: "" }],
+              when_to_use: "",
+              when_not_to_use: "",
+            },
+            { status: 201 },
+          );
+        },
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderAppAt(PAGE_PATH);
+    await screen.findByRole("heading", { name: "Skills" });
+
+    expect(
+      screen.getByRole("button", { name: "Save template" }),
+    ).toBeDisabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: /Template name/ }), {
+      target: { value: "Top values" },
+    });
+    fireEvent.change(
+      screen.getByRole("textbox", { name: /Question it answers/ }),
+      { target: { value: "Which {group_col} leads?" } },
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: /^SQL/ }), {
+      target: { value: "SELECT {group_col} FROM {dataset} LIMIT 5" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Method" }), {
+      target: { value: "ranking" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Why this method/ }), {
+      target: { value: "A sorted head answers leader questions." },
+    });
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Placeholder 1 name" }),
+      { target: { value: "group_col" } },
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Placeholder 1 role" }),
+      "dimension",
+    );
+    await user.click(screen.getByRole("button", { name: "Save template" }));
+
+    expect(
+      await screen.findByText(/Saved template .Top values./),
+    ).toBeInTheDocument();
+    expect(createBody).toMatchObject({
+      name: "Top values",
+      question: "Which {group_col} leads?",
+      sql: "SELECT {group_col} FROM {dataset} LIMIT 5",
+      method: "ranking",
+      rationale: "A sorted head answers leader questions.",
+      params: [{ name: "group_col", role: "dimension" }],
+    });
+    /* A successful save clears the form for the next template. */
+    expect(
+      screen.getByRole("textbox", { name: /Template name/ }),
+    ).toHaveValue("");
+  });
+
+  it("lists only user templates here and deletes one behind a confirmation", async () => {
+    let deletedPath: string | null = null;
+    server.use(
+      http.delete(
+        "/api/v1/projects/:projectId/skill-templates/:templateId",
+        ({ request }) => {
+          deletedPath = new URL(request.url).pathname;
+          return new HttpResponse(null, { status: 204 });
+        },
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderAppAt(PAGE_PATH);
+    await screen.findByRole("heading", { name: "Skills" });
+    await screen.findByText("Share per category");
+
+    const card = cardFor("Share per category");
+    expect(within(card).getByText("Your template")).toBeInTheDocument();
+    /* The builtin template renders once, as a seed card — not again here. */
+    expect(
+      screen.getAllByRole("listitem").filter((item) =>
+        within(item).queryByText("Group totals and averages"),
+      ),
+    ).toHaveLength(1);
+
+    await user.click(within(card).getByRole("button", { name: "Delete" }));
+    expect(
+      within(card).getByText(/Delete .Share per category.\?/),
+    ).toBeInTheDocument();
+    await user.click(
+      within(card).getAllByRole("button", { name: "Delete" })[0]!,
+    );
+
+    await waitFor(() =>
+      expect(deletedPath).toBe(
+        "/api/v1/projects/p1/skill-templates/user_tmpl_1",
+      ),
+    );
+  });
+
+  it("imports a bound template and shows the trial-run preview", async () => {
+    let importBody: Record<string, unknown> | null = null;
+    let importedTemplate: string | null = null;
+    server.use(
+      http.post(
+        "/api/v1/sessions/:sessionId/skill-templates/:templateId/import",
+        async ({ request, params }) => {
+          importBody = (await request.json()) as Record<string, unknown>;
+          importedTemplate = String(params["templateId"]);
+          return HttpResponse.json(
+            {
+              skill: {
+                skill_id: "skill_imported_template",
+                source: "library",
+                name: "Share per category",
+                description: "From template 'user_tmpl_1' on sample.",
+                question: "What share of value does each name hold?",
+                sql: "SELECT name FROM sample",
+                method: "windowed share",
+                param_columns: ["name", "value"],
+                expected_datasets: ["sample"],
+                params: [],
+                source_session_id: null,
+                created_at: "2026-08-25T09:00:00Z",
+              },
+              row_count: 2,
+              columns: ["name", "share"],
+              rows_preview: [
+                { name: "alpha", share: 0.75 },
+                { name: "beta", share: 0.25 },
+              ],
+              truncated: false,
+            },
+            { status: 201 },
+          );
+        },
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderAppAt(PAGE_PATH);
+    await screen.findByRole("heading", { name: "Skills" });
+    await screen.findByText("Share per category");
+
+    const card = cardFor("Share per category");
+    const importButton = within(card).getByRole("button", {
+      name: /Import & trial-run/,
+    });
+    /* Unbound placeholders gate the import, like a replay. */
+    expect(importButton).toBeDisabled();
+
+    await user.selectOptions(
+      within(card).getByRole("combobox", { name: /group_col/ }),
+      "name",
+    );
+    await user.selectOptions(
+      within(card).getByRole("combobox", { name: /value_col/ }),
+      "value",
+    );
+    await user.click(importButton);
+
+    expect(
+      await within(card).findByText(
+        /Imported .Share per category. into the skill library. Trial run returned 2 row/,
+      ),
+    ).toBeInTheDocument();
+    expect(within(card).getByText("alpha")).toBeInTheDocument();
+    expect(within(card).getByText("0.75")).toBeInTheDocument();
+    expect(importedTemplate).toBe("user_tmpl_1");
+    expect(importBody).toMatchObject({
+      dataset_ids: ["sample"],
+      bindings: { group_col: "name", value_col: "value" },
+    });
   });
 });

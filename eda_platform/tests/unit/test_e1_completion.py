@@ -92,10 +92,17 @@ def _model_frame() -> pd.DataFrame:
     )
 
 
-def test_e1_has_sixteen_fixed_agent_tools() -> None:
+def test_e1_has_nineteen_fixed_agent_tools() -> None:
     names = [tool.name for tool in build_data_tools(_context(_model_frame()))]
-    assert len(names) == len(set(names)) == 16
-    assert {"diagnose_missingness", "run_baseline_model"} <= set(names)
+    # T8a added run_forecast, T8b run_segmentation, T8c run_causal_experiment.
+    assert len(names) == len(set(names)) == 19
+    assert {
+        "diagnose_missingness",
+        "run_baseline_model",
+        "run_forecast",
+        "run_segmentation",
+        "run_causal_experiment",
+    } <= set(names)
     assert "run_open_analysis" not in names
 
 

@@ -43,11 +43,9 @@ from eda_platform.application.services.approval_service import ApprovalService
 from eda_platform.application.services.exploration_service import (
     APPROVAL_KIND_EXPLORATION_START,
     ExplorationRunMetadata,
-    assert_budget_covered_by_certificate,
-    assert_certificate_matches_runtime,
-    assert_policy_covered_by_certificate,
+    assert_budget_within_hard_caps,
     assert_policy_matches_runtime,
-    resolve_configured_release_trust,
+    exploration_runtime_identity,
     resolve_exploration_source_snapshot,
 )
 from eda_platform.core.exploration_budget import ToolCallProjection, apply_budget_increase
@@ -60,6 +58,7 @@ from eda_platform.core.exploration_shadow_store import (
     shadow_run_root,
     validate_shadow_run_path,
 )
+from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.llm import LLMClient, LLMToolCall
 from eda_platform.core.session_loader import load_run
 from eda_platform.core.stat_registry import StatTestRegistry, derive_family_id
@@ -68,7 +67,6 @@ from eda_platform.drivers.exploration import (
     CallableWitnessPort,
     JsonExplorationWorkflowStateStore,
     JsonSupervisorRecoveryStore,
-    exploration_tool_capability_digest,
     run_composed_shadow_exploration,
 )
 from eda_platform.schemas.artifacts import (
@@ -76,14 +74,23 @@ from eda_platform.schemas.artifacts import (
     ArtifactType,
     ColumnProfile,
     DatasetProfile,
+    EvidenceRef,
 )
+from eda_platform.schemas.claims import Claim, split_evidence_ref
 from eda_platform.schemas.exploration import (
     BudgetAmendedEvent,
+    ExplorationFinding,
+    ExplorationFindingClaim,
+    ExplorationFindingSet,
+    ExplorationLoopState,
     ExplorationPolicy,
     InsightFamily,
 )
 from eda_platform.schemas.exploration_budget import ExplorationBudgetPolicy
-from eda_platform.schemas.receipts import load_verified_receipt
+from eda_platform.schemas.insights import InsightRecord
+from eda_platform.schemas.investigations import ValidatedFinding
+from eda_platform.schemas.questions import QuestionFinding
+from eda_platform.schemas.receipts import load_verified_receipt, verify_receipt_digest
 from eda_platform.tools.evidence import PayloadPolicy
 from eda_platform.tools.loader import LoadedDataset
 from eda_platform.tools.sql_runner import build_catalog
@@ -100,7 +107,6 @@ class ExplorationWorkerParams(BaseModel):
     policy: ExplorationPolicy
     data_state_witness: str
     code_fingerprint: str
-    release_certificate_digest: str
     provider: str
     payload_policy: PayloadPolicy
     operation: str
@@ -215,28 +221,19 @@ def run_exploration_worker(
         raise ValueError("exploration worker operation must be start or resume")
     assert_policy_sealed(params.policy)
 
-    release_trust = resolve_configured_release_trust()
-    certificate = release_trust.certificate
-    if certificate is None:
-        raise RuntimeError("the E4a production release certificate is unavailable")
-    assert_certificate_matches_runtime(certificate, release_trust.runtime_identity)
-    if certificate.certificate_digest != params.release_certificate_digest:
-        raise RuntimeError("exploration job release certificate digest changed")
-    if params.provider.casefold() not in {
-        provider.casefold() for provider in certificate.providers
-    }:
-        raise RuntimeError("exploration provider is not certified")
-    if certificate.bindings.code_fingerprint != params.code_fingerprint:
-        raise RuntimeError("exploration code fingerprint is not certified")
-    assert_policy_covered_by_certificate(params.policy, certificate)
-    assert_policy_matches_runtime(params.policy, release_trust.runtime_identity)
+    identity = exploration_runtime_identity()
+    if identity.code_fingerprint != params.code_fingerprint:
+        raise RuntimeError(
+            "the exploration implementation changed since this run was approved"
+        )
+    assert_policy_matches_runtime(params.policy, identity)
 
-    metadata = _load_and_verify_metadata(store, params, certificate.certificate_digest)
+    metadata = _load_and_verify_metadata(store, params)
     effective_budget = params.policy.budget
     for event in _journal_events(store.root, params.exploration_id):
         if isinstance(event, BudgetAmendedEvent):
             effective_budget = apply_budget_increase(effective_budget, event.increase)
-    assert_budget_covered_by_certificate(effective_budget, certificate)
+    assert_budget_within_hard_caps(effective_budget, identity.hard_caps)
     _verify_consumed_approval(store, metadata)
     if str(job.get("project_id", "")) != metadata.project_id:
         raise ValueError("exploration job project does not match its metadata")
@@ -286,9 +283,6 @@ def run_exploration_worker(
     )
     registered = {tool.name: tool for tool in build_data_tools(context)}
     tools = build_read_only_exploration_toolset(registered)
-    actual_tool_digest = exploration_tool_capability_digest(tools)
-    if actual_tool_digest != certificate.bindings.tool_capability_digest:
-        raise RuntimeError("worker read-only tool inventory is not certified")
 
     profiles = _dataset_profiles(artifacts, params.policy.dataset_scope)
     coverage_targets = frozenset(
@@ -394,7 +388,6 @@ def run_exploration_worker(
 def _load_and_verify_metadata(
     store: ArtifactStore,
     params: ExplorationWorkerParams,
-    certificate_digest: str,
 ) -> ExplorationRunMetadata:
     root = shadow_run_root(store.root, params.exploration_id)
     path = validate_shadow_run_path(
@@ -406,7 +399,6 @@ def _load_and_verify_metadata(
         or metadata.source_session_id != params.source_session_id
         or metadata.policy != params.policy
         or metadata.data_state_witness != params.data_state_witness
-        or metadata.release_certificate_digest != certificate_digest
     ):
         raise ValueError("exploration worker params do not match immutable metadata")
     return metadata
@@ -425,8 +417,6 @@ def _verify_consumed_approval(
         str(payload.get("exploration_id", "")) != metadata.exploration_id
         or str(payload.get("policy_fingerprint", ""))
         != metadata.policy.policy_fingerprint
-        or str(payload.get("release_certificate_digest", ""))
-        != metadata.release_certificate_digest
         or str(payload.get("type", "")) != APPROVAL_KIND_EXPLORATION_START
     ):
         raise RuntimeError("consumed exploration approval does not match metadata")
@@ -823,3 +813,282 @@ def _witness_matches(
 def _checkpoint(cancel_check: CancelCheck | None) -> None:
     if cancel_check is not None:
         cancel_check()
+
+
+_GRACEFUL_STOP_REASONS = frozenset({"completed", "budget_exhausted", "no_new_information"})
+
+
+def _claim_receipt_ids(claim: Claim) -> tuple[str, ...]:
+    seen: dict[str, None] = {}
+    for reference in (*claim.evidence_fact_ids, *claim.derivation_ids):
+        seen.setdefault(split_evidence_ref(reference)[0])
+    for receipt_id in claim.statistics_receipt_ids:
+        seen.setdefault(receipt_id)
+    return tuple(seen)
+
+
+_XPL_OBSERVED_CAVEAT = "This is an observed result in the current data, not a causal claim."
+_XPL_ORIGIN_CAVEAT = (
+    "Produced by autonomous deep-dive exploration; the claims passed its "
+    "evidence gates, but no analyst-approved investigation plan backs this finding."
+)
+
+
+def _validated_finding_artifact(
+    insight: InsightRecord,
+    cited_claims: list[tuple[Claim, tuple[str, ...]]],
+    *,
+    exploration_id: str,
+    project_id: str,
+    session_id: str,
+    finding_set_artifact_id: str,
+    receipt_id_by_artifact: Mapping[str, str],
+) -> Artifact:
+    """Transcribe one gate-passed, conclusive exploration insight into the
+    ValidatedFinding shape the Findings library and decision report consume.
+    Ratings mirror the retired investigation rubric: evidence resolves to
+    verified receipts (high), the analysis is a single exploratory pass
+    (medium), and no decision-scoped follow-up ran (low)."""
+    statements = [
+        QuestionFinding(
+            text=claim.claim_text,
+            evidence=[
+                EvidenceRef(
+                    kind="artifact",
+                    artifact_id=artifact_id,
+                    locator=receipt_id_by_artifact.get(artifact_id, "receipt"),
+                )
+                for artifact_id in cited_artifact_ids
+            ],
+        )
+        for claim, cited_artifact_ids in cited_claims
+    ]
+    source_artifact_ids = list(
+        dict.fromkeys(
+            artifact_id for _, cited in cited_claims for artifact_id in cited
+        )
+    )
+    limitations = list(
+        dict.fromkeys(
+            [
+                *insight.limitations,
+                *(
+                    limitation
+                    for claim, _ in cited_claims
+                    for limitation in claim.limitations
+                ),
+                *(
+                    claim.uncertainty
+                    for claim, _ in cited_claims
+                    if claim.uncertainty
+                ),
+                _XPL_OBSERVED_CAVEAT,
+                _XPL_ORIGIN_CAVEAT,
+            ]
+        )
+    )
+    finding = ValidatedFinding(
+        finding_id="xplfinding_"
+        + stable_hash({"exploration_id": exploration_id, "insight_id": insight.insight_id}),
+        investigation_id=exploration_id,
+        question_id=insight.hypothesis_id,
+        question=insight.statement or cited_claims[0][0].claim_text,
+        origin="exploration",
+        value_hypothesis=insight.rationale or "",
+        claim_class="observed",
+        findings=statements,
+        evidence_support="high",
+        analytical_reliability="medium",
+        decision_readiness="low",
+        limitations=limitations,
+        report_eligible=True,
+        report_readiness="eligible_with_limitations",
+        report_readiness_reason=(
+            "Report this finding together with its recorded exploration limitations."
+        ),
+        source_artifact_ids=source_artifact_ids,
+        source_artifact_session_ids={
+            artifact_id: session_id for artifact_id in source_artifact_ids
+        },
+    )
+    return Artifact(
+        id=make_artifact_id(
+            "xplvfind",
+            {"exploration_id": exploration_id, "insight_id": insight.insight_id},
+        ),
+        type=ArtifactType.VALIDATED_FINDING,
+        project_id=project_id,
+        session_id=session_id,
+        parents=[finding_set_artifact_id, *source_artifact_ids],
+        payload=finding.model_dump(mode="json"),
+        evidence=[reference for item in finding.findings for reference in item.evidence],
+        plain_language=(
+            "An evidence-backed finding from a deep-dive exploration, ready for "
+            "the Findings library."
+        ),
+    )
+
+
+def publish_exploration_outputs(
+    store: ArtifactStore,
+    *,
+    project_id: str,
+    session_id: str,
+    source_session_id: str,
+    exploration_id: str,
+    goal: str | None,
+    dataset_scope: tuple[str, ...],
+    state: ExplorationLoopState,
+) -> list[Artifact]:
+    """Publish a gracefully stopped exploration into its derived session:
+    cited receipts, a structured finding set, and the rendered report, all
+    parented back to the source session's dataset profiles so the on-demand
+    report collection can reach them. Content-derived ids make replays
+    idempotent."""
+    if state.status != "stopped" or state.stop_reason not in _GRACEFUL_STOP_REASONS:
+        return []
+    workflow_state = JsonExplorationWorkflowStateStore(
+        shadow_run_root(store.root, exploration_id) / "workflow-state.json"
+    ).load()
+    source_artifacts, _warnings = store.list_artifacts_safe(
+        project_id=project_id, session_id=source_session_id
+    )
+    scoped = set(dataset_scope)
+    profiles = [
+        artifact
+        for artifact in source_artifacts
+        if artifact.type is ArtifactType.DATASET_PROFILE
+    ]
+    profile_ids = [
+        artifact.id
+        for artifact in profiles
+        if not scoped or str(artifact.payload.get("dataset_id", "")) in scoped
+    ] or [artifact.id for artifact in profiles]
+
+    saved: list[Artifact] = []
+    receipt_artifact_ids: dict[str, str] = {}
+
+    def _receipt_artifact_id(receipt_id: str) -> str | None:
+        cached = receipt_artifact_ids.get(receipt_id)
+        if cached is not None:
+            return cached
+        receipt = workflow_state.committed_receipts.get(receipt_id)
+        if receipt is None or not verify_receipt_digest(receipt):
+            return None
+        artifact = Artifact(
+            id=make_artifact_id(
+                "xplreceipt",
+                {"exploration_id": exploration_id, "receipt_id": receipt_id},
+            ),
+            type=ArtifactType.EVIDENCE_RECEIPT,
+            project_id=project_id,
+            session_id=session_id,
+            parents=list(profile_ids),
+            payload=receipt.model_dump(mode="json"),
+        )
+        store.save_artifact(artifact)
+        saved.append(artifact)
+        receipt_artifact_ids[receipt_id] = artifact.id
+        return artifact.id
+
+    findings: list[ExplorationFinding] = []
+    cited_claims_by_insight: dict[str, list[tuple[Claim, tuple[str, ...]]]] = {}
+    for insight in sorted(
+        workflow_state.insights.values(), key=lambda item: item.insight_id
+    ):
+        bundle = workflow_state.admitted_bundles.get(insight.claim_bundle_id)
+        gate = workflow_state.gate_reports.get(insight.claim_bundle_id)
+        if bundle is None or gate is None or not gate.passed:
+            continue
+        claims: list[ExplorationFindingClaim] = []
+        cited_claims: list[tuple[Claim, tuple[str, ...]]] = []
+        for claim in bundle.claims:
+            cited = tuple(
+                dict.fromkeys(
+                    artifact_id
+                    for receipt_id in _claim_receipt_ids(claim)
+                    if (artifact_id := _receipt_artifact_id(receipt_id)) is not None
+                )
+            )
+            if cited:
+                claims.append(
+                    ExplorationFindingClaim(
+                        text=claim.claim_text,
+                        receipt_artifact_ids=cited,
+                    )
+                )
+                cited_claims.append((claim, cited))
+        if not claims:
+            continue
+        cited_claims_by_insight[insight.insight_id] = cited_claims
+        findings.append(
+            ExplorationFinding(
+                insight_id=insight.insight_id,
+                statement=insight.statement,
+                rationale=insight.rationale,
+                status=insight.status,
+                trust_level=insight.trust_level,
+                limitations=insight.limitations,
+                claims=tuple(claims),
+            )
+        )
+
+    finding_set = ExplorationFindingSet(
+        exploration_id=exploration_id,
+        source_session_id=source_session_id,
+        goal=goal,
+        stop_reason=state.stop_reason,
+        findings=tuple(findings),
+    )
+    set_artifact = Artifact(
+        id=make_artifact_id("xplfindings", {"exploration_id": exploration_id}),
+        type=ArtifactType.EXPLORATION_FINDING_SET,
+        project_id=project_id,
+        session_id=session_id,
+        parents=[*profile_ids, *receipt_artifact_ids.values()],
+        payload=finding_set.model_dump(mode="json"),
+    )
+    store.save_artifact(set_artifact)
+    saved.append(set_artifact)
+
+    receipt_id_by_artifact = {
+        artifact_id: receipt_id
+        for receipt_id, artifact_id in receipt_artifact_ids.items()
+    }
+    for insight_id, cited_claims in cited_claims_by_insight.items():
+        insight = workflow_state.insights[insight_id]
+        if insight.status == "inconclusive" or insight.trust_level not in {
+            "supported",
+            "refuted",
+        }:
+            continue
+        finding_artifact = _validated_finding_artifact(
+            insight,
+            cited_claims,
+            exploration_id=exploration_id,
+            project_id=project_id,
+            session_id=session_id,
+            finding_set_artifact_id=set_artifact.id,
+            receipt_id_by_artifact=receipt_id_by_artifact,
+        )
+        store.save_artifact(finding_artifact)
+        saved.append(finding_artifact)
+
+    if state.final_report_ref:
+        report_path = validate_shadow_run_path(
+            store.root, exploration_id, store.root / state.final_report_ref
+        )
+        report_artifact = Artifact(
+            id=make_artifact_id("xplreport", {"exploration_id": exploration_id}),
+            type=ArtifactType.MARKDOWN_REPORT,
+            project_id=project_id,
+            session_id=session_id,
+            parents=[set_artifact.id],
+            payload={
+                "markdown": report_path.read_text(encoding="utf-8"),
+                "exploration_id": exploration_id,
+            },
+        )
+        store.save_artifact(report_artifact)
+        saved.append(report_artifact)
+    return saved

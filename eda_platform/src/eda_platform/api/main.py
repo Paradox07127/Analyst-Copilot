@@ -34,7 +34,6 @@ from eda_platform.api.routers.explorations import router as explorations_router
 from eda_platform.api.routers.findings import router as findings_router
 from eda_platform.api.routers.forks import router as forks_router
 from eda_platform.api.routers.insights import router as insights_router
-from eda_platform.api.routers.investigations import router as investigations_router
 from eda_platform.api.routers.jobs import router as jobs_router
 from eda_platform.api.routers.questions import router as questions_router
 from eda_platform.api.routers.relationships import router as relationships_router
@@ -58,13 +57,9 @@ from eda_platform.application.services.compare_service import CompareService
 from eda_platform.application.services.data_operation_service import DataOperationService
 from eda_platform.application.services.dataset_service import DatasetService
 from eda_platform.application.services.decision_report_service import DecisionReportService
-from eda_platform.application.services.exploration_service import (
-    ExplorationService,
-    resolve_configured_release_trust,
-)
+from eda_platform.application.services.exploration_service import ExplorationService
 from eda_platform.application.services.finding_service import FindingService
 from eda_platform.application.services.insight_service import InsightService
-from eda_platform.application.services.investigation_service import InvestigationService
 from eda_platform.application.services.job_service import (
     JobService,
     recover_job_lifecycle,
@@ -151,23 +146,14 @@ def create_app(
     app.state.artifact_service = ArtifactService(store)
     app.state.insight_service = InsightService(store)
     approval_service = ApprovalService(store)
-    release_trust = resolve_configured_release_trust()
     app.state.exploration_service = ExplorationService(
-        store,
-        approval_service,
-        job_service,
-        release_certificate=release_trust.certificate,
-        trusted_release_public_keys=release_trust.public_keys,
-        trusted_runtime_identity=release_trust.runtime_identity,
+        store, approval_service, job_service
     )
     app.state.cleaning_service = CleaningService(
         store, dataset_service, approval_service, job_service
     )
     question_service = QuestionService(store, approval_service, job_service)
     app.state.question_service = question_service
-    app.state.investigation_service = InvestigationService(
-        store, approval_service, job_service
-    )
     finding_service = FindingService(store)
     app.state.finding_service = finding_service
     semantic_service = SemanticService(store)
@@ -235,7 +221,6 @@ def create_app(
     # reordering every route below them; second path segments are all static,
     # so routing itself does not depend on the order.
     _include_api_router(app, explorations_router)
-    _include_api_router(app, investigations_router)
     _configure_middleware(app, store, deployment)
     # Recover or relaunch durable jobs before run deletion recovery. A delete
     # must never quarantine a run while a recovered worker can still publish.

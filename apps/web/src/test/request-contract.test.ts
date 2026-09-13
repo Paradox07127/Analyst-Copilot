@@ -3,8 +3,6 @@ import {
   api,
   type BoardUpdateRequest,
   type CleaningApplyRequest,
-  type InvestigationDecisionPrepareRequest,
-  type InvestigationPlanRequest,
   type ProposalAcceptRequest,
   type QuestionCardEdit,
   type SeedImportRequest,
@@ -13,7 +11,7 @@ import {
 } from "../api/client";
 
 describe("generated request contracts", () => {
-  it("keeps the eleven historically drifted request shapes generated", () => {
+  it("keeps the historically drifted request shapes generated", () => {
     const cleaning: CleaningApplyRequest = {
       action_hash: "hash",
       approval_token: "token",
@@ -39,14 +37,6 @@ describe("generated request contracts", () => {
     };
     const replay: SkillReplayPrepareRequest = { dataset_ids: ["orders"] };
     const board: BoardUpdateRequest = { expected_version: 2 };
-    const plan: InvestigationPlanRequest = {
-      question_ids: ["question_1"],
-      deep: false,
-    };
-    const decision: InvestigationDecisionPrepareRequest = {
-      decision: "approved",
-      reason: "",
-    };
     const edit: QuestionCardEdit = {
       expected_version: 1,
       question_en: null,
@@ -62,8 +52,6 @@ describe("generated request contracts", () => {
       seed,
       replay,
       board,
-      plan,
-      decision,
       edit,
     }).toBeTruthy();
     expectTypeOf(api.prepareQuestion).toBeCallableWith("run", "question");

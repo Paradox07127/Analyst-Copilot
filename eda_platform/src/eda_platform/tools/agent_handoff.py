@@ -94,6 +94,7 @@ def create_agent_handoff_artifact(
     execution_fingerprint: str,
     input_hashes: dict[str, str],
     generated_at: datetime | None = None,
+    started_at: datetime | None = None,
     external_artifacts: Sequence[Artifact] = (),
     fetch_session_id: str | None = None,
 ) -> Artifact:
@@ -178,8 +179,9 @@ def create_agent_handoff_artifact(
     external_inventory_digest = _inventory_digest(external)
     candidate_parent_ids = sorted({artifact.id for artifact in referenced})
     parent_ids = candidate_parent_ids[:_MAX_HANDOFF_PARENTS]
+    resolved_generated_at = generated_at or datetime.now(UTC)
     payload = AgentHandoffV3(
-        generated_at=generated_at or datetime.now(UTC),
+        generated_at=resolved_generated_at,
         run=HandoffRun(
             project_id=project_id,
             session_id=session_id,
@@ -198,6 +200,8 @@ def create_agent_handoff_artifact(
             lineage_candidate_parent_count=len(candidate_parent_ids),
             lineage_parent_count=len(parent_ids),
             lineage_parents_truncated=len(parent_ids) < len(candidate_parent_ids),
+            started_at=started_at,
+            completed_at=resolved_generated_at,
         ),
         readiness=AgentReadiness(
             status=readiness,

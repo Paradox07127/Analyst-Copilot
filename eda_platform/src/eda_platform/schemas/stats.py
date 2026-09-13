@@ -11,6 +11,9 @@ StatTestType = Literal[
     # Never requested directly: the automatic small-expected-count fallback of
     # chi_square_independence on 2x2 tables.
     "fisher_exact",
+    # Result-only: produced by run_causal_experiment's randomized tier (tier B),
+    # never requestable through run_stat_test.
+    "two_sample_ate",
     "one_way_anova",
     "welch_anova",
     "mann_whitney_u",

@@ -15,6 +15,7 @@ from eda_platform.schemas.workflow_eval import (
 )
 from eda_platform.tools.workflow_eval import (
     aggregate_workflow_eval_trials,
+    build_workflow_eval_environment,
     build_workflow_eval_trial,
     certify_workflow_eval_grader,
     compare_workflow_evaluations,
@@ -625,6 +626,48 @@ def test_aggregate_rejects_mixed_dataset_identities() -> None:
 
     assert not suite.passed
     assert "trial_dataset_mismatch" in suite.gate_failures
+
+
+def test_default_environment_carries_real_build_identity() -> None:
+    """T10: the recorded environment must discriminate, not stamp constants."""
+    environment = build_workflow_eval_environment()
+
+    assert environment.code_revision not in ("", "unknown")
+    assert environment.tool_registry_digest != "unknown"
+    assert environment.sandbox_policy_digest != "unknown"
+    assert environment.prompt_versions
+    assert environment.policy_versions
+    assert environment.environment_id == f"{environment.provider}:{environment.model}"
+
+
+def test_aggregate_rejects_trials_from_different_environments() -> None:
+    """T10: a changed environment (model, prompt, code) must trip the
+    trial_environment_mismatch gate instead of hashing to the same constant."""
+    spec = WorkflowEvalSpec(name="environment_identity")
+    run = grade_workflow_quality(
+        [_profile("ds_sales", "sales.csv"), _report(["sales.csv"]), _metrics()], spec
+    )
+    changed = build_workflow_eval_environment().model_copy(update={"model": "gpt-x"})
+
+    def _trial(repetition: int, environment=None) -> WorkflowEvalTrial:
+        return WorkflowEvalTrial(
+            manifest=compile_workflow_eval_case(
+                spec, repetition=repetition, environment=environment
+            ).manifest,
+            session_id=run.session_id,
+            status="passed",
+        )
+
+    same = aggregate_workflow_eval_trials(
+        spec, results=[run, run], trials=[_trial(1), _trial(2)]
+    )
+    mixed = aggregate_workflow_eval_trials(
+        spec, results=[run, run], trials=[_trial(1), _trial(2, changed)]
+    )
+
+    assert "trial_environment_mismatch" not in same.gate_failures
+    assert not mixed.passed
+    assert "trial_environment_mismatch" in mixed.gate_failures
 
 
 def test_baseline_comparison_rejects_a_different_dataset_identity() -> None:

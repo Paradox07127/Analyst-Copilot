@@ -39,6 +39,11 @@ from eda_platform.core.session_deletion import (
     SessionDeletionRetryableError,
 )
 from eda_platform.core.store import ArtifactStore, ProjectOrderConflictError
+from eda_platform.schemas.artifacts import ArtifactType
+from eda_platform.schemas.resource_metrics import (
+    EdaResourceLimitGuidance,
+    EdaResourcePreflight,
+)
 from eda_platform.schemas.sessions import clip_run_title
 
 DEFAULT_PAGE_LIMIT = 30
@@ -335,7 +340,34 @@ class SessionService:
             source_session_id=source_session_id,
             artifact_type_counts=self._store.artifact_type_counts(summary.project_id, session_id),
             warnings=warnings,
+            resource_limit=self._resource_limit(summary.project_id, session_id)
+            if summary.status == "limited"
+            else None,
         )
+
+    def _resource_limit(
+        self, project_id: str, session_id: str
+    ) -> EdaResourceLimitGuidance | None:
+        """The stop's own numbers, read back from the decision the run persisted."""
+        # Local import: the preflight module pulls pandas, which no run listing
+        # should pay for.
+        from eda_platform.tools.resource_preflight import resource_limit_guidance
+
+        try:
+            artifacts, _ = self._store.list_artifacts_of_types(
+                project_id=project_id,
+                session_id=session_id,
+                artifact_types=[ArtifactType.RESOURCE_PREFLIGHT],
+            )
+        except (OSError, ValueError):
+            return None
+        if not artifacts:
+            return None
+        try:
+            decision = EdaResourcePreflight.model_validate(artifacts[-1].payload)
+        except ValueError:
+            return None
+        return resource_limit_guidance(decision)
 
     def delete_session(self, session_id: str) -> SessionDeleted:
         """Delete a run through the recoverable cross-media coordinator."""

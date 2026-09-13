@@ -145,8 +145,15 @@ _RATIO_FIELD_PATTERN = re.compile(
 
 # Deduplicate claims with matching numbers, columns, and evidence semantics.
 _DEDUP_EXEMPT_SECTIONS = {"Executive Summary"}
-_CROSS_REFERENCE_TEMPLATE = 'See "{section}" for the full statement of this finding.'
 _COLUMN_TOKEN_PATTERN = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+
+# Claim qualifier prefixes. The web report turns each into a badge
+# (ReportBody.tsx QUALIFIERS), so the bracket form is load-bearing; the wording
+# is not, and "Unverified figures"/"Indicative" told a business reader nothing.
+UNVERIFIED_FIGURES_LABEL = "Figures not re-checked"
+EXPLORATORY_LABEL = "A lead, not a conclusion"
+INDICATIVE_LABEL = "Suggestive, not conclusive"
+LOW_RELEVANCE_LABEL = "Barely related evidence"
 
 
 def fraction_digits_for(number: float) -> int:
@@ -526,17 +533,8 @@ def report_bundle_to_markdown(
             lines.append("")
         rendered_claim_lines = 0
         for claim in section.claims:
-            disposition = dispositions.get(id(claim))
-            if disposition is not None:
-                mode, primary_section = disposition
-                if mode == "drop":
-                    continue
-                if mode == "crossref":
-                    lines.append(
-                        f"- {_CROSS_REFERENCE_TEMPLATE.format(section=primary_section)}"
-                    )
-                    rendered_claim_lines += 1
-                    continue
+            if dispositions.get(id(claim), ("", ""))[0] == "drop":
+                continue
             # Narrative shows human-readable claim text only; ids and inline
             # evidence live in the ### Claim Ledger table below (P0-1).
             lines.append(f"- {display_claim_text(claim, section.title)}")
@@ -629,15 +627,15 @@ def display_claim_text(claim: ReportClaim, section_title: str) -> str:
     Shared by the markdown and HTML exporters (P0 parity fix)."""
     text = _claim_display_text(claim)
     if claim.numeric_rollup == "unverified":
-        text = f"[Unverified figures] {text}"
+        text = f"[{UNVERIFIED_FIGURES_LABEL}] {text}"
     # F6 strength tiers: strong carries no prefix; legacy "verified" /
     # "low_relevance" (pre-F6 bundles) keep their old rendering.
     if claim.confidence_label == "exploratory":
-        text = f"[Exploratory — hypothesis-generating] {text}"
+        text = f"[{EXPLORATORY_LABEL}] {text}"
     elif claim.confidence_label == "indicative":
-        text = f"[Indicative] {text}"
+        text = f"[{INDICATIVE_LABEL}] {text}"
     elif claim.confidence_label == "low_relevance":
-        text = f"[Low relevance] {text}"
+        text = f"[{LOW_RELEVANCE_LABEL}] {text}"
     if section_title == _APPENDIX_SECTION:
         return text
     return format_numbers_in_text(scrub_internal_ids(text))
@@ -721,17 +719,15 @@ def _duplicate_claim_dispositions(
         for cluster in _related_clusters(group):
             if len(cluster) < 2:
                 continue
+            # One full statement survives per cluster. A cross-section pointer
+            # used to stand in for the rest, which left a bullet that carried
+            # no finding at all ("See ... for the full statement").
             primary = max(cluster, key=lambda item: len(item[1].text))
-            primary_section = primary[0]
-            crossref_sections: set[str] = set()
             for item in cluster:
-                if item is primary:
-                    dispositions[id(item[1])] = ("primary", primary_section)
-                elif item[0] == primary_section or item[0] in crossref_sections:
-                    dispositions[id(item[1])] = ("drop", primary_section)
-                else:
-                    crossref_sections.add(item[0])
-                    dispositions[id(item[1])] = ("crossref", primary_section)
+                dispositions[id(item[1])] = (
+                    "primary" if item is primary else "drop",
+                    primary[0],
+                )
     return dispositions
 
 

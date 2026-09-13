@@ -19,7 +19,7 @@ from eda_platform.core.process_control import pid_is_alive
 from eda_platform.core.provenance import env_digest
 from eda_platform.core.session_fence import session_key_lock
 from eda_platform.core.trace_correlation import current_trace_job
-from eda_platform.schemas.artifacts import Artifact, ArtifactType
+from eda_platform.schemas.artifacts import RETIRED_ARTIFACT_TYPES, Artifact, ArtifactType
 from eda_platform.schemas.sessions import SessionInfo, SessionManifest, TraceEvent
 
 # A lineage node with more children than this is malformed, not merely large.
@@ -369,8 +369,12 @@ class ArtifactStore:
         only when it identifies exactly one row; ambiguous identity fails
         closed instead of selecting whichever partition was indexed last.
         """
-        sql = "select path from artifacts where artifact_id = ?"
-        params: list[object] = [artifact_id]
+        retired = ",".join("?" for _ in RETIRED_ARTIFACT_TYPES)
+        sql = (
+            "select path from artifacts where artifact_id = ?"
+            f" and artifact_type not in ({retired})"
+        )
+        params: list[object] = [artifact_id, *RETIRED_ARTIFACT_TYPES]
         if project_id is not None:
             sql += " and project_id = ?"
             params.append(project_id)
@@ -389,14 +393,16 @@ class ArtifactStore:
         return Artifact.model_validate_json(self._abs(rows[0][0]).read_text(encoding="utf-8"))
 
     def list_artifacts(self, *, project_id: str, session_id: str) -> list[Artifact]:
+        retired = ",".join("?" for _ in RETIRED_ARTIFACT_TYPES)
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                """
+                f"""
                 select path from artifacts
                 where project_id = ? and session_id = ?
+                  and artifact_type not in ({retired})
                 order by rowid
                 """,
-                (project_id, session_id),
+                (project_id, session_id, *RETIRED_ARTIFACT_TYPES),
             ).fetchall()
         return [
             Artifact.model_validate_json(self._abs(row[0]).read_text(encoding="utf-8"))
@@ -769,6 +775,42 @@ class ArtifactStore:
             "session_id": row[3],
             "path": self._abs(row[4]),
         }
+
+    def artifact_index_rows_in_children(
+        self,
+        artifact_id: str,
+        *,
+        project_id: str,
+        source_session_id: str,
+        limit: int = MAX_SESSION_CHILDREN,
+    ) -> list[dict]:
+        """Rows for one artifact id across the direct lineage children of a run,
+        newest first. Siblings can hold the same content-derived id, so the
+        caller picks rather than getting an ambiguity error."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                select a.artifact_id, a.artifact_type, a.project_id, a.session_id, a.path
+                from artifacts a
+                join sessions s
+                  on s.session_id = a.session_id and s.project_id = a.project_id
+                where a.artifact_id = ? and a.project_id = ?
+                  and s.source_session_id = ? and s.storage_state = 'live'
+                order by a.rowid desc
+                limit ?
+                """,
+                (artifact_id, project_id, source_session_id, limit),
+            ).fetchall()
+        return [
+            {
+                "artifact_id": row[0],
+                "artifact_type": row[1],
+                "project_id": row[2],
+                "session_id": row[3],
+                "path": self._abs(row[4]),
+            }
+            for row in rows
+        ]
 
     def _count_chat_messages(self, project_id: str, session_id: str) -> int:
         chat_path = self.project_dir(project_id) / "chat" / f"{session_id}.jsonl"
@@ -1782,6 +1824,30 @@ class ArtifactStore:
                 (session_id,),
             ).fetchone()
         return None if row is None else self._job_row_to_dict(row)
+
+    def list_jobs_for_session(self, session_id: str) -> list[dict]:
+        """Jobs whose lifecycle run or request scope is this session, newest first.
+
+        Covers both shapes: auto_eda runs directly on the session, while derived
+        runs (cleaning, reports, question exec, …) keep the launching session in
+        `request_scope`. `params_json` rides along so callers can surface the
+        non-secret run linkage without a second query per job.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                select {self._JOB_COLUMNS}, params_json from jobs
+                where session_id = ? or request_scope = ?
+                order by created_at desc, job_id desc
+                """,
+                (session_id, session_id),
+            ).fetchall()
+        jobs: list[dict] = []
+        for row in rows:
+            job = self._job_row_to_dict(row[:-1])
+            job["params_json"] = row[-1]
+            jobs.append(job)
+        return jobs
 
     def list_active_jobs(self) -> list[dict]:
         with closing(self._connect()) as conn:

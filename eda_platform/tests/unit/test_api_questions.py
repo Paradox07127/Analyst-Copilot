@@ -185,6 +185,50 @@ def test_prepare_registers_pending_approval(client: TestClient, source_run: str)
         assert prepared["sql_preview"]
 
 
+def test_confirm_randomized_design_issues_a_verifiable_credential(
+    client: TestClient, source_run: str, workspace: Path
+) -> None:
+    """T8c: the confirm endpoint registers a pending-action credential whose id
+    is the canonical action hash the tool and the claim gate both re-derive."""
+    from eda_platform.tools.causal_experiment import (
+        RANDOMIZED_DESIGN_APPROVAL_KIND,
+        randomized_design_credential_id,
+    )
+
+    store = ArtifactStore(workspace)
+    profile = next(
+        a
+        for a in store.list_artifacts(project_id="demo", session_id=source_run)
+        if a.type is ArtifactType.DATASET_PROFILE
+    )
+    dataset_id = str(profile.payload["dataset_id"])
+    response = client.post(
+        f"/api/v1/sessions/{source_run}/experiment-designs/confirm",
+        json={"dataset_id": dataset_id, "treatment_column": "region"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["credential_id"] == randomized_design_credential_id(
+        dataset_id=dataset_id, treatment_column="region"
+    )
+    row = store.get_pending_action(body["credential_id"], session_id=source_run)
+    assert row is not None
+    assert row["kind"] == RANDOMIZED_DESIGN_APPROVAL_KIND
+    assert row["status"] == "pending"
+
+    unknown_column = client.post(
+        f"/api/v1/sessions/{source_run}/experiment-designs/confirm",
+        json={"dataset_id": dataset_id, "treatment_column": "not_a_column"},
+    )
+    assert unknown_column.status_code == 422
+    assert unknown_column.json()["error"]["code"] == "question_invalid"
+    unknown_dataset = client.post(
+        f"/api/v1/sessions/{source_run}/experiment-designs/confirm",
+        json={"dataset_id": "ds_missing", "treatment_column": "region"},
+    )
+    assert unknown_dataset.status_code == 422
+
+
 def test_prepare_live_mode_approves_autonomous_agent_scope(
     client: TestClient, source_run: str
 ) -> None:

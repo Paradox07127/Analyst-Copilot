@@ -87,7 +87,6 @@ class ExplorationPrepared(BaseModel):
     action_hash: str
     approval_token: str
     expires_at: datetime
-    release_certificate_digest: str
 
 
 class ExplorationJobView(BaseModel):
@@ -253,6 +252,5 @@ class ExplorationRunMetadata(BaseModel):
     project_id: str
     policy: ExplorationPolicy
     data_state_witness: str
-    release_certificate_digest: str
     approval_action_hash: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

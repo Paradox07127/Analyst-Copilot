@@ -40,6 +40,7 @@ IDEMPOTENT_OPERATIONS = frozenset(
         "delete_session_api_v1_sessions__session_id__delete",
         "start_dataset_distributions_api_v1_sessions__session_id__datasets__dataset_id__distributions_post",
         "create_job_api_v1_sessions__session_id__jobs_post",
+        "retry_job_api_v1_jobs__job_id__retry_post",
         "apply_cleaning_api_v1_sessions__session_id__cleaning_apply_post",
         "draft_question_card_api_v1_sessions__session_id__questions_post",
         "execute_question_api_v1_sessions__session_id__questions__question_id__execute_post",
@@ -64,11 +65,6 @@ IDEMPOTENT_OPERATIONS = frozenset(
         "generate_decision_report_api_v1_sessions__session_id__decision_report_generate_post",
         "create_support_doc_api_v1_projects__project_id__support_docs_post",
         "delete_support_doc_api_v1_projects__project_id__support_docs__doc_id__delete",
-        "build_investigation_plans_api_v1_sessions__session_id__investigations_plan_post",
-        "approve_investigation_plan_api_v1_sessions__session_id__investigations__plan_id__approve_post",
-        "reject_investigation_plan_api_v1_sessions__session_id__investigations__plan_id__reject_post",
-        "execute_investigation_plans_api_v1_sessions__session_id__investigations_execute_post",
-        "start_macro_loop_api_v1_sessions__session_id__investigations_macro_loop_post",
         "start_exploration_api_v1_sessions__session_id__explorations_post",
         "resume_exploration_api_v1_sessions__session_id__explorations__exploration_id__resume_post",
         "extend_exploration_budget_api_v1_sessions__session_id__explorations__exploration_id__extend_budget_post",
@@ -109,10 +105,15 @@ REPLAYABLE_VERSIONED_OPERATIONS = frozenset(
 INTRINSIC_OPERATIONS = frozenset(
     {
         "cancel_job_api_v1_jobs__job_id__cancel_post",
+        "cancel_chat_turn_api_v1_sessions__session_id__chat_cancel_post",
         "create_upload_api_v1_projects__project_id__uploads_post",
         "preview_cleaning_api_v1_sessions__session_id__cleaning_preview_post",
         "prepare_question_execution_api_v1_sessions__session_id__questions__question_id__prepare_post",
         "prepare_question_draft_api_v1_sessions__session_id__questions_prepare_draft_post",
+        # Registers a content-derived credential (same shape as prepare): the
+        # credential id is the action hash, so repeating it converges on the
+        # same row and merely re-arms its TTL.
+        "confirm_randomized_design_api_v1_sessions__session_id__experiment_designs_confirm_post",
         "prepare_promotion_api_v1_sessions__session_id__findings__finding_id__prepare_promote_post",
         "prepare_relationship_validation_api_v1_sessions__session_id__relationships__relationship_id__prepare_validate_post",
         "prepare_skill_replay_api_v1_sessions__session_id__skills__skill_id__prepare_post",
@@ -120,9 +121,6 @@ INTRINSIC_OPERATIONS = frozenset(
         # A read that has to be a POST because it must bypass the cache. It
         # creates nothing, so replaying it is harmless.
         "refresh_models_api_v1_settings_models_refresh_post",
-        "prepare_investigation_decision_api_v1_sessions__session_id__investigations__plan_id__prepare_decision_post",
-        "prepare_investigation_execution_api_v1_sessions__session_id__investigations_prepare_execute_post",
-        "prepare_macro_loop_api_v1_sessions__session_id__investigations_prepare_macro_loop_post",
         "prepare_exploration_api_v1_sessions__session_id__explorations_prepare_post",
         "pause_exploration_api_v1_sessions__session_id__explorations__exploration_id__pause_post",
         "cancel_exploration_api_v1_sessions__session_id__explorations__exploration_id__cancel_post",

@@ -61,20 +61,10 @@ from eda_platform.application.services.decision_report_service import (
 from eda_platform.application.services.exploration_service import (
     ExplorationConflictError,
     ExplorationNotFoundError,
-    ExplorationReleaseUnavailableError,
     ExplorationSourceChangedError,
     ExplorationValidationError,
 )
 from eda_platform.application.services.insight_service import ChartNotFoundError
-from eda_platform.application.services.investigation_service import (
-    InvestigationNotDecidableError,
-    InvestigationNotExecutableError,
-    InvestigationNotFoundError,
-    InvestigationRunBusyError,
-    InvestigationSourceChangedError,
-    InvestigationValidationError,
-    MacroLoopNotAuthorizedError,
-)
 from eda_platform.application.services.job_service import (
     JobConflictError,
     JobIdempotencyMismatchError,
@@ -204,12 +194,6 @@ def error_response(
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    @app.exception_handler(ExplorationReleaseUnavailableError)
-    def _exploration_release_unavailable(
-        request: Request, exc: ExplorationReleaseUnavailableError
-    ) -> JSONResponse:
-        return error_response(503, "exploration_release_unavailable", str(exc))
-
     @app.exception_handler(ExplorationNotFoundError)
     def _exploration_not_found(
         request: Request, exc: ExplorationNotFoundError
@@ -438,42 +422,6 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(QuestionValidationError)
     def _question_invalid(request: Request, exc: QuestionValidationError) -> JSONResponse:
         return error_response(422, "question_invalid", str(exc))
-
-    @app.exception_handler(InvestigationNotFoundError)
-    def _investigation_not_found(request: Request, exc: InvestigationNotFoundError) -> JSONResponse:
-        return error_response(404, "investigation_not_found", str(exc))
-
-    @app.exception_handler(InvestigationNotDecidableError)
-    def _investigation_not_decidable(
-        request: Request, exc: InvestigationNotDecidableError
-    ) -> JSONResponse:
-        return error_response(409, "investigation_not_decidable", str(exc))
-
-    @app.exception_handler(InvestigationNotExecutableError)
-    def _investigation_not_executable(
-        request: Request, exc: InvestigationNotExecutableError
-    ) -> JSONResponse:
-        return error_response(409, "investigation_not_executable", str(exc))
-
-    @app.exception_handler(InvestigationSourceChangedError)
-    def _investigation_source_changed(
-        request: Request, exc: InvestigationSourceChangedError
-    ) -> JSONResponse:
-        return error_response(409, "investigation_source_changed", str(exc))
-
-    @app.exception_handler(InvestigationRunBusyError)
-    def _investigation_run_busy(request: Request, exc: InvestigationRunBusyError) -> JSONResponse:
-        return error_response(409, "investigation_session_busy", str(exc))
-
-    @app.exception_handler(MacroLoopNotAuthorizedError)
-    def _macro_loop_not_authorized(
-        request: Request, exc: MacroLoopNotAuthorizedError
-    ) -> JSONResponse:
-        return error_response(409, "macro_loop_not_authorized", str(exc))
-
-    @app.exception_handler(InvestigationValidationError)
-    def _investigation_invalid(request: Request, exc: InvestigationValidationError) -> JSONResponse:
-        return error_response(422, "investigation_invalid", str(exc))
 
     @app.exception_handler(PromotionFindingNotFoundError)
     def _promotion_finding_not_found(

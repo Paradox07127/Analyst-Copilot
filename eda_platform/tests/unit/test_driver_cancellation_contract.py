@@ -45,18 +45,6 @@ DRIVER_ENTRYPOINTS = {
         "eda_platform.agents.question_agent",
         "propose_llm_question_candidates",
     ),
-    "investigation_plan": (
-        "eda_platform.drivers.investigation_orchestrator",
-        "create_investigation_plans",
-    ),
-    "investigation_execute": (
-        "eda_platform.drivers.investigation_orchestrator",
-        "execute_investigation_plans",
-    ),
-    "macro_loop": (
-        "eda_platform.drivers.investigation_orchestrator",
-        "run_macro_loop",
-    ),
     "synthesis_brief_create": (
         "eda_platform.drivers.synthesis_orchestrator",
         "create_synthesis_brief",

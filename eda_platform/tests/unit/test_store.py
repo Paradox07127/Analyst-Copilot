@@ -263,3 +263,51 @@ def test_unfiltered_artifact_pagination_uses_run_order_index(tmp_path) -> None:
     descriptions = [str(row[3]) for row in plan]
     assert any("idx_artifacts_run_order" in description for description in descriptions)
     assert all("TEMP B-TREE" not in description for description in descriptions)
+
+
+def test_retired_artifact_types_do_not_break_run_reads(tmp_path) -> None:
+    """T4b left LoopLedger-era artifacts on disk; reading a run must not crash."""
+    store = ArtifactStore(tmp_path)
+    store.ensure_project("project_demo", name="Demo")
+    store.start_session("project_demo", "run_demo")
+    live = Artifact(
+        id="prof_live",
+        type=ArtifactType.DATASET_PROFILE,
+        project_id="project_demo",
+        session_id="run_demo",
+        payload={"dataset_id": "ds_orders", "rows": 2},
+    )
+    store.save_artifact(live)
+
+    legacy_dir = tmp_path / "projects/project_demo/sessions/run_demo/artifacts"
+    legacy_path = legacy_dir / "ledger_legacy.json"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "id": "ledger_legacy",
+                "type": "LoopLedger",
+                "project_id": "project_demo",
+                "session_id": "run_demo",
+                "payload": {"rounds": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with sqlite3.connect(tmp_path / "state.sqlite") as conn:
+        conn.execute(
+            "insert into artifacts(artifact_id, artifact_type, project_id, session_id, path)"
+            " values (?, ?, ?, ?, ?)",
+            (
+                "ledger_legacy",
+                "LoopLedger",
+                "project_demo",
+                "run_demo",
+                "projects/project_demo/sessions/run_demo/artifacts/ledger_legacy.json",
+            ),
+        )
+
+    listed = store.list_artifacts(project_id="project_demo", session_id="run_demo")
+    assert [artifact.id for artifact in listed] == ["prof_live"]
+
+    with pytest.raises(KeyError):
+        store.get_artifact("ledger_legacy")

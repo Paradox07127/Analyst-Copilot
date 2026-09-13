@@ -87,7 +87,6 @@ class SeedSkillTemplate(BaseModel):
     method: str
     rationale: str
     params: list[SeedParam] = Field(min_length=1)
-    source_url: str = ""
     when_to_use: str = Field(default="", max_length=MAX_USAGE_HINT_CHARS)
     when_not_to_use: str = Field(default="", max_length=MAX_USAGE_HINT_CHARS)
 

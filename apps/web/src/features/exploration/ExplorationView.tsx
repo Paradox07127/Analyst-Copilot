@@ -367,6 +367,16 @@ export function ExplorationRunPanel({ run }: { run: ExplorationRunView }) {
   );
 }
 
+const TRUST_PRESENTATION: Record<
+  ExplorationInsightView["trustLevel"],
+  { label: string; tone: Tone }
+> = {
+  supported: { label: "Evidence supports it", tone: "ok" },
+  contested: { label: "Evidence is contested", tone: "warn" },
+  refuted: { label: "Evidence refutes it", tone: "critical" },
+  unsupported: { label: "Not yet supported", tone: "neutral" },
+};
+
 function InsightList({
   insights,
   empty,
@@ -386,9 +396,23 @@ function InsightList({
             <Badge tone={insight.status === "refuted" ? "critical" : "neutral"}>
               {insight.status}
             </Badge>
+            <Badge
+              tone={TRUST_PRESENTATION[insight.trustLevel].tone}
+              variant="outline"
+              title="How far the committed evidence carries this statement."
+            >
+              {TRUST_PRESENTATION[insight.trustLevel].label}
+            </Badge>
             <span className="text-xs text-status-neutral">{insight.family}</span>
           </div>
           <p className="mt-1 text-sm">{insight.statement}</p>
+          {insight.limitations.length > 0 && (
+            <ul className="mt-1 list-disc pl-5 text-xs text-status-neutral">
+              {insight.limitations.map((limitation) => (
+                <li key={limitation}>{limitation}</li>
+              ))}
+            </ul>
+          )}
         </Card>
       ))}
     </ul>

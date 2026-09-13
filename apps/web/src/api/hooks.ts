@@ -24,12 +24,16 @@ import {
   type ExplorationBudgetIncrease,
   type ExplorationPrepareRequest,
   type ExplorationViewDto,
+  type SessionJobSummary,
   type VerifiedRelationDeleteRequest,
 } from "./client";
 import {
+  clearResourceLimits,
   clearSettingsSelection,
+  readResourceLimits,
   readSettingsSelection,
   restorePatch,
+  writeResourceLimits,
   writeSettingsSelection,
 } from "../features/settings/settings-preference-storage";
 import {
@@ -52,8 +56,10 @@ export const queryKeys = {
   workspaceUsage: (days: number) => ["workspace-usage", days] as const,
   /* A search term extends the key rather than replacing it, so invalidating
    * ["sessions", projectId] still covers every filtered list of that project. */
-  sessions: (projectId: string, q = "") =>
-    (q ? ["sessions", projectId, { q }] : ["sessions", projectId]) as readonly unknown[],
+  sessions: (projectId: string, q = "", includeDerived = false) =>
+    (q || includeDerived
+      ? ["sessions", projectId, { q, derived: includeDerived }]
+      : ["sessions", projectId]) as readonly unknown[],
   session: (sessionId: string) => ["session", sessionId] as const,
   datasets: (sessionId: string) => ["datasets", sessionId] as const,
   datasetSchema: (sessionId: string, datasetId: string) =>
@@ -76,7 +82,6 @@ export const queryKeys = {
   charts: (sessionId: string) => ["charts", sessionId] as const,
   chart: (sessionId: string, chartId: string) => ["chart", sessionId, chartId] as const,
   questions: (sessionId: string) => ["questions", sessionId] as const,
-  investigations: (sessionId: string) => ["investigations", sessionId] as const,
   findings: (sessionId: string) => ["findings", sessionId] as const,
   semantic: (sessionId: string) => ["semantic", sessionId] as const,
   compare: (left: string, right: string) => ["compare", left, right] as const,
@@ -87,8 +92,10 @@ export const queryKeys = {
     filter: "all" | "differences",
   ) => ["compare", "scope", scope, left, right, { filter }] as const,
   skills: (sessionId: string) => ["skills", sessionId] as const,
+  skillTemplates: (projectId: string) => ["skill-templates", projectId] as const,
   relationships: (sessionId: string) => ["relationships", sessionId] as const,
   job: (jobId: string) => ["job", jobId] as const,
+  sessionJobs: (sessionId: string) => ["session-jobs", sessionId] as const,
   chatMessages: (sessionId: string) => ["chat-messages", sessionId] as const,
   chatPendingPlans: (sessionId: string) => ["chat-pending-plans", sessionId] as const,
   board: (projectId: string, boardId: string) =>
@@ -115,6 +122,7 @@ export const queryKeys = {
   capabilities: ["system", "capabilities"] as const,
   exploration: (sessionId: string, explorationId: string) =>
     ["exploration", sessionId, explorationId] as const,
+  explorations: (sessionId: string) => ["explorations", sessionId] as const,
 };
 
 export const CHAT_PAGE_SIZE = 50;
@@ -231,13 +239,23 @@ export function useRenameSession(projectId: string) {
 /* enabled: the rail mounts one of these per project, so a workspace with a
  * dozen projects fired a dozen list requests on every navigation — including
  * for groups the user has collapsed and cannot see. */
-export function useSessions(projectId: string, q = "", enabled = true) {
+export function useSessions(
+  projectId: string,
+  q = "",
+  enabled = true,
+  includeDerived = false,
+) {
   return useInfiniteQuery({
-    queryKey: queryKeys.sessions(projectId, q),
+    queryKey: queryKeys.sessions(projectId, q, includeDerived),
     queryFn: ({ pageParam, signal }) =>
       api.listSessions(
         projectId,
-        { limit: SESSIONS_PAGE_SIZE, cursor: pageParam, q: q || undefined },
+        {
+          limit: SESSIONS_PAGE_SIZE,
+          cursor: pageParam,
+          q: q || undefined,
+          include_derived: includeDerived || undefined,
+        },
         signal,
       ),
     initialPageParam: undefined as string | undefined,
@@ -253,6 +271,16 @@ export function useSessionDetail(sessionId: string) {
     queryKey: queryKeys.session(sessionId),
     queryFn: ({ signal }) => api.getSession(sessionId, signal),
     enabled: Boolean(sessionId),
+  });
+}
+
+/* The server-side listing is how a deep dive is found back after a cleared
+ * cache or a device switch; localStorage only pre-fills forms. */
+export function useExplorations(sessionId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.explorations(sessionId),
+    queryFn: ({ signal }) => api.listExplorations(sessionId, signal),
+    enabled: enabled && Boolean(sessionId),
   });
 }
 
@@ -297,6 +325,9 @@ function setExploration(
     queryKeys.exploration(view.session_id, view.exploration_id),
     view,
   );
+  void queryClient.invalidateQueries({
+    queryKey: queryKeys.explorations(view.session_id),
+  });
 }
 
 export function useStartExploration(sessionId: string) {
@@ -540,10 +571,70 @@ export function useSkills(sessionId: string) {
   });
 }
 
+export function useSkillTemplates(projectId: string) {
+  return useQuery({
+    queryKey: queryKeys.skillTemplates(projectId),
+    queryFn: ({ signal }) => api.listSkillTemplates(projectId, signal),
+  });
+}
+
 export function useRelationships(sessionId: string) {
   return useQuery({
     queryKey: queryKeys.relationships(sessionId),
     queryFn: ({ signal }) => api.getRelationships(sessionId, signal),
+  });
+}
+
+/* Job history for one session: how a fresh client learns that the main
+ * analysis failed, what the worker's human reason was, and which job a
+ * "Run again" should retry. */
+export function useSessionJobs(sessionId: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.sessionJobs(sessionId),
+    queryFn: ({ signal }) => api.listSessionJobs(sessionId, signal),
+    enabled: enabled && Boolean(sessionId),
+  });
+}
+
+export interface PrimaryRunFailure {
+  job: SessionJobSummary;
+  cancelled: boolean;
+  /** The worker's human failure sentence (error_translation). */
+  reason: string | null;
+}
+
+/* The newest main-analysis job of a session, when it settled failed or
+ * cancelled. A newer successful auto_eda run makes an older failure stale. */
+export function usePrimaryRunFailure(
+  sessionId: string,
+  enabled = true,
+): PrimaryRunFailure | null {
+  const jobs = useSessionJobs(sessionId, enabled);
+  if (!enabled) return null;
+  const newest = (jobs.data?.jobs ?? []).find(
+    (job) => job.kind === "auto_eda",
+  );
+  if (!newest || (newest.status !== "failed" && newest.status !== "cancelled")) {
+    return null;
+  }
+  return {
+    job: newest,
+    cancelled: newest.status === "cancelled",
+    reason: newest.error_message ?? null,
+  };
+}
+
+/* Re-queues a failed/cancelled main analysis with its original parameters. */
+export function useRetryJob(sessionId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { jobId: string; idempotencyKey: string }) =>
+      api.retryJob(input.jobId, input.idempotencyKey),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.sessionJobs(sessionId),
+      });
+    },
   });
 }
 
@@ -802,6 +893,7 @@ export function useDecisionCoverage(sessionId: string) {
  * run yields a different spec every time the controls change. */
 export function useBuildCustomChart(sessionId: string, projectId = "") {
   const { startTracking } = useJobActivity();
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: CustomChartRequest) =>
       runDataOperation(
@@ -814,6 +906,14 @@ export function useBuildCustomChart(sessionId: string, projectId = "") {
         (jobId, signal) => api.getCustomChartResult(jobId, signal),
         (started) => startTracking(operationActivity(started, projectId)),
       ),
+    onSuccess: (view) => {
+      /* A save lands a new CHART_SPEC artifact in the session. */
+      if (view.saved_chart_id) {
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.charts(sessionId),
+        });
+      }
+    },
   });
 }
 
@@ -846,9 +946,11 @@ export function useSettings() {
      * exactly the state a restarted server comes back in. Once the patch lands
      * it reads "session" and this stops being true. */
     if (!view || view.source !== "env" || settingsRestoreAttempted) return;
-    const selection = readSettingsSelection();
-    if (!selection) return;
-    const patch = restorePatch(view, selection);
+    const patch = restorePatch(
+      view,
+      readSettingsSelection(),
+      readResourceLimits(),
+    );
     if (!patch) return;
     settingsRestoreAttempted = true;
     restore.mutate(patch);
@@ -916,6 +1018,7 @@ export function useUpdateSettings() {
     onSuccess: (view: SettingsView) => {
       queryClient.setQueryData(queryKeys.settings, view);
       writeSettingsSelection(view);
+      writeResourceLimits(view);
     },
   });
 }
@@ -932,6 +1035,7 @@ export function useResetSettings() {
       /* Reset means "go back to the server env"; a remembered selection would
        * put the old one straight back on the next load. */
       clearSettingsSelection();
+      clearResourceLimits();
       settingsRestoreAttempted = true;
     },
   });

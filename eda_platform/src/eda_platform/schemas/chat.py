@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from eda_platform.schemas.artifacts import Artifact
 from eda_platform.schemas.plans import AnalysisPlan, Intent
 
-ChatTurnStatus = Literal["answer", "awaiting_approval", "refused", "error"]
+ChatTurnStatus = Literal["answer", "awaiting_approval", "refused", "error", "cancelled"]
 
 
 class SqlResultValidation(BaseModel):

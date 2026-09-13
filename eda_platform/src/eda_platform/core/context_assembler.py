@@ -32,7 +32,7 @@ DEFAULT_SECTION_CHAR_LIMITS: Mapping[str, int] = {
     "insight_ledger": 2_000,
 }
 
-# Failure compaction mirrors agents/investigation_loop.py (5 entries x 160 chars).
+# Failure compaction: keep the last few failures, each clipped short.
 FAILURE_HISTORY_LIMIT = 5
 FAILURE_ENTRY_MAX_CHARS = 160
 

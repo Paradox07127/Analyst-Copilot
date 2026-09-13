@@ -208,3 +208,59 @@ def test_delete_run_refuses_path_traversal(tmp_path: Path) -> None:
 
     assert victim.exists()  # the escape target survived
     assert (victim / "data.csv").read_text(encoding="utf-8") == "keep me"
+
+
+def test_load_derived_result_artifacts_collects_question_results(tmp_path: Path) -> None:
+    """Chat context must see conclusions from derived question runs — and only
+    conclusions: previews/receipts stay in their own session."""
+    from datetime import UTC, datetime
+
+    from eda_platform.core.session_loader import load_derived_result_artifacts
+    from eda_platform.schemas.artifacts import Artifact, ArtifactType
+    from eda_platform.schemas.sessions import SessionManifest
+
+    workspace = tmp_path / "ws"
+    store = ArtifactStore(workspace)
+    store.ensure_project("proj_load", "Load")
+
+    def manifest(session_id: str, source: str | None) -> SessionManifest:
+        return SessionManifest(
+            session_id=session_id,
+            project_id="proj_load",
+            input_hashes={},
+            code_version="test",
+            created_at=datetime.now(UTC),
+            source_session_id=source,
+        )
+
+    def artifact(artifact_id: str, session_id: str, artifact_type: ArtifactType) -> Artifact:
+        return Artifact(
+            id=artifact_id,
+            type=artifact_type,
+            project_id="proj_load",
+            session_id=session_id,
+            payload={"question_id": "q1", "status": "succeeded", "findings": []},
+        )
+
+    store.start_session("proj_load", "run_src")
+    store.write_manifest(manifest("run_src", None))
+    store.start_session("proj_load", "qsess_run_src_1")
+    store.write_manifest(manifest("qsess_run_src_1", "run_src"))
+    store.start_session("proj_load", "run_other")
+    store.write_manifest(manifest("run_other", None))
+
+    store.save_artifact(
+        artifact("qexec_1", "qsess_run_src_1", ArtifactType.QUESTION_EXECUTION_RESULT)
+    )
+    # Noise in the same derived run: not a result artifact, must not travel.
+    store.save_artifact(artifact("sql_noise_1", "qsess_run_src_1", ArtifactType.SQL_RESULT))
+    # A result artifact in an unrelated run: wrong lineage, must not travel.
+    store.save_artifact(
+        artifact("qexec_other", "run_other", ArtifactType.QUESTION_EXECUTION_RESULT)
+    )
+
+    collected = load_derived_result_artifacts(
+        store, project_id="proj_load", session_id="run_src"
+    )
+
+    assert [item.id for item in collected] == ["qexec_1"]

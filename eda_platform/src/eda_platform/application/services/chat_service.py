@@ -44,6 +44,7 @@ from eda_platform.application.dto import (
     ChatPendingPlanList,
     ChatPlanRejected,
     ChatStreamEvent,
+    ChatTurnCancelled,
 )
 from eda_platform.application.services.approval_service import (
     ApprovalExpiredError,
@@ -196,6 +197,7 @@ class _TurnSession:
     truncated: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
     next_seq: int = 1
+    cancel_requested: threading.Event = field(default_factory=threading.Event)
 
     def append(self, event_type: str, data: dict[str, Any]) -> None:
         with self.lock:
@@ -483,6 +485,33 @@ class ChatService:
             )
         return ChatPendingPlanList(session_id=session_id, plans=plans)
 
+    def cancel_turn(self, session_id: str) -> ChatTurnCancelled:
+        """Ask the run's in-flight turn to stop at its next tool-loop checkpoint.
+
+        Cooperative on purpose: an LLM call already in flight finishes, then the
+        loop observes the flag and the turn settles through its normal stream
+        with a user-readable "stopped" message. No live turn is not an error —
+        the turn may have finished in the race — so the ack just says so.
+        """
+        self._project_for_run(session_id)
+        with self._sessions_lock:
+            live = next(
+                (
+                    session
+                    for session in self._sessions.values()
+                    if session.session_id == session_id and not session.done
+                ),
+                None,
+            )
+        if live is None:
+            return ChatTurnCancelled(session_id=session_id)
+        live.cancel_requested.set()
+        return ChatTurnCancelled(
+            session_id=session_id,
+            message_id=live.message_id,
+            cancel_requested=True,
+        )
+
     def events_after(self, session_id: str, message_id: str, after_seq: int) -> ChatStreamPage:
         session = self._session(session_id, message_id)
         return session.after(after_seq)
@@ -526,7 +555,10 @@ class ChatService:
     ) -> None:
         # Local import: the driver pulls the full agent stack, which must not be
         # paid at API import time (same rationale as worker/runner).
-        from eda_platform.core.session_loader import load_run
+        from eda_platform.core.session_loader import (
+            load_derived_result_artifacts,
+            load_run,
+        )
         from eda_platform.drivers.chat import run_chat_turn
 
         session.append(
@@ -550,6 +582,21 @@ class ChatService:
                     },
                 )
                 return
+            # Question executions land on derived runs; without their result
+            # artifacts chat cannot answer "what did that question conclude".
+            known_ids = {artifact.id for artifact in result.artifacts}
+            context_artifacts = [
+                *result.artifacts,
+                *(
+                    artifact
+                    for artifact in load_derived_result_artifacts(
+                        self._store,
+                        project_id=session.project_id,
+                        session_id=session.session_id,
+                    )
+                    if artifact.id not in known_ids
+                ),
+            ]
             session.append(
                 "progress",
                 {"stage": "executing" if approved is not None else "planning"},
@@ -592,11 +639,12 @@ class ChatService:
                 project_id=session.project_id,
                 session_id=session.session_id,
                 llm=llm,  # type: ignore[arg-type]
-                artifacts=result.artifacts,
+                artifacts=context_artifacts,
                 store=traced,
                 approved_plan=approved[0] if approved else None,
                 approved_action_hash=approved[1] if approved else None,
                 payload_policy=effective.payload_policy,
+                cancel_check=session.cancel_requested.is_set,
             )
         except Exception as exc:  # last-resort guard: never leak a traceback
             logger.exception("Chat turn %s failed", session.message_id)

@@ -19,6 +19,7 @@ import {
   isJobKind,
 } from "../../api/job-invalidation";
 import {
+  jobFailure,
   phaseProgress,
   TERMINAL_PHASES,
   useJobEvents,
@@ -26,6 +27,7 @@ import {
   type JobEventsState,
   type JobPhase,
 } from "../../api/job-events";
+import { RunAgainButton } from "../../components/run-again";
 import { SessionQualitySummary } from "../../components/session-quality-summary";
 import {
   useJobActivity,
@@ -49,14 +51,6 @@ const PHASE_LABELS: Record<JobPhase, string> = {
 
 /* Terminal and asking nothing of the user — the only runs safe to fold away. */
 const QUIET_PHASES: ReadonlySet<JobPhase> = new Set(["completed", "cancelled"]);
-
-const CANCELLABLE_KINDS = new Set([
-  "auto_eda",
-  "cleaning_preview",
-  "cleaning_apply",
-  "dataset_distributions",
-  "custom_chart",
-]);
 
 const LAUNCHER_POSITION_KEY = "eda.layout.activity-position";
 const LAUNCHER_SIZE = 48;
@@ -853,6 +847,7 @@ function RunRow({
   const phase = snapshot?.state.phase ?? "connecting";
   const terminal = TERMINAL_PHASES.has(phase);
   const resultSessionId = trackedJob.resultSessionId ?? trackedJob.sessionId;
+  const failure = snapshot ? jobFailure(snapshot.state) : null;
   return (
     <li
       className={`rounded-lg border p-3 transition-colors ${
@@ -883,6 +878,11 @@ function RunRow({
           <Marquee className="mt-1 block font-mono text-[11px] text-status-neutral">
             {trackedJob.jobId} · {resultSessionId}
           </Marquee>
+          {failure && (
+            <span className="mt-1 block text-[11px] leading-4 text-status-critical">
+              {failure.message}
+            </span>
+          )}
           {snapshot && snapshot.state.events.length > 0 && (
             <span className="mt-1 block text-[11px] text-status-neutral">
               {snapshot.state.events.length} events received
@@ -1099,19 +1099,20 @@ function AgentActivityCenter() {
             <SessionQualitySummary metrics={metrics.data} compact />
           )}
           <div className="flex flex-wrap items-center gap-2">
-            {selectedKind !== undefined &&
-              CANCELLABLE_KINDS.has(selectedKind) && (
-                <CancelButton
+            {/* The backend's cancel_job is kind-agnostic and every worker
+              * handler receives a cancel_check, so any live run may be
+              * stopped; only settled runs have nothing left to cancel. */}
+            <CancelButton jobId={activeJob.jobId} disabled={selectedTerminal} />
+            {/* Retry is main-analysis only; derived kinds have their own
+              * launch surfaces with their own approvals. */}
+            {selectedKind === "auto_eda" &&
+              (selectedPhase === "failed" || selectedPhase === "cancelled") && (
+                <RunAgainButton
                   jobId={activeJob.jobId}
-                  disabled={selectedTerminal}
+                  sessionId={activeJob.sessionId}
+                  projectId={activeJob.projectId}
+                  sourceSessionId={activeJob.sourceSessionId}
                 />
-              )}
-            {selectedKind !== undefined &&
-              !CANCELLABLE_KINDS.has(selectedKind) &&
-              !selectedTerminal && (
-                <span className="text-xs text-status-neutral">
-                  Cannot be cancelled mid-run.
-                </span>
               )}
             {selectedTerminal && (
               <button

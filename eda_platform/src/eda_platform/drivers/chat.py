@@ -86,6 +86,7 @@ def run_chat_turn(
     code_limits: SandboxLimits | None = None,
     code_budget: Budget | None = None,
     payload_policy: PayloadPolicy = "schema+aggregates",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> ChatTurnResult:
     catalog = build_catalog(datasets)
 
@@ -196,6 +197,7 @@ def run_chat_turn(
                 code_budget=code_budget,
                 payload_policy=payload_policy,
                 timeout_seconds=timeout_seconds,
+                cancel_check=cancel_check,
             )
         except ToolCallingUnsupportedError as exc:
             # The provider itself refused the tools payload, so falling through
@@ -251,10 +253,17 @@ def run_chat_turn(
             artifacts=list(used),
         )
     if intent.kind == "refine_analysis":
+        # Only non-tool-calling providers reach this branch; tool-capable
+        # models handle refinements inside the agent loop above.
         return ChatTurnResult(
             intent=intent,
             status="answer",
-            message="Analysis refinement will be handled after the initial SQL chat path.",
+            message=(
+                "The model configured for this session cannot revise an earlier "
+                "analysis mid-conversation. Ask again as a complete, standalone "
+                "question (including the change you want), or run it as a new "
+                "analysis from the Questions page."
+            ),
         )
     if intent.kind == "open_analysis":
         return _execute_open_analysis(
@@ -378,6 +387,7 @@ def _run_agentic_chat_turn(
     code_budget: Budget | None,
     payload_policy: PayloadPolicy,
     timeout_seconds: float,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> ChatTurnResult:
     """Run the second-generation chat agent over typed local capabilities.
 
@@ -430,6 +440,7 @@ def _run_agentic_chat_turn(
         llm=llm,
         tools=build_data_tools(context),
         trace=emit,
+        cancel_check=cancel_check,
     )
     try:
         result = runtime.run(
@@ -461,6 +472,17 @@ def _run_agentic_chat_turn(
             message=(
                 "The agent tool loop could not complete this request. "
                 f"Reason: {_short_reason(exc)}."
+            ),
+        )
+
+    if result.status == "cancelled":
+        return ChatTurnResult(
+            intent=intent,
+            status="cancelled",
+            artifacts=cast(list[Artifact], result.artifacts),
+            message=(
+                "Stopped at your request. This turn ended before a final answer; "
+                "ask again to continue."
             ),
         )
 

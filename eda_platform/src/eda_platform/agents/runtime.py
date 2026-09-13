@@ -135,6 +135,7 @@ class AgentRuntime:
         answer_validator: AnswerValidator | None = None,
         max_answer_rewrites: int = 1,
         trace: TraceSink | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         if max_steps < 1 or max_tool_calls < 1:
             raise ValueError("Agent runtime limits must be positive.")
@@ -152,6 +153,7 @@ class AgentRuntime:
         self._answer_validator = answer_validator
         self._max_answer_rewrites = max_answer_rewrites
         self._trace = trace
+        self._cancel_check = cancel_check
 
     def run(self, *, system_prompt: str, user_message: str) -> AgentRunResult:
         run_id = "agentrun_" + uuid.uuid4().hex
@@ -166,6 +168,21 @@ class AgentRuntime:
         last_rejection = ""
 
         for step in range(1, self._max_steps + 1):
+            # Between-step checkpoint: a stop request never interrupts a call
+            # already in flight, it only prevents the next one from starting.
+            if self._cancel_check is not None and self._cancel_check():
+                self._emit(
+                    "agent_cancelled",
+                    "agent_runtime",
+                    {"step": step, "tool_calls": tool_calls},
+                )
+                return AgentRunResult(
+                    status="cancelled",
+                    artifacts=_unique_artifacts(all_artifacts),
+                    tool_calls=tool_calls,
+                    tool_names=tool_names,
+                    error="The turn was stopped before its next step.",
+                )
             response = self._llm.tool_call(
                 task=self._task,
                 messages=messages,

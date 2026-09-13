@@ -72,6 +72,13 @@ describe("Launchpad support documents", () => {
         name: "Delete support document readme.txt",
       }),
     );
+    /* Deletion is two-step now: the click opens a confirmation dialog. */
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete readme.txt?",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete document" }),
+    );
     await waitFor(() =>
       expect(screen.queryByText("readme.txt")).not.toBeInTheDocument(),
     );

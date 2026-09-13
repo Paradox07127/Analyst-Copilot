@@ -118,6 +118,11 @@ const ComparePage = lazy(() =>
     default: module.Component,
   })),
 );
+const ExplorationPage = lazy(() =>
+  import("../../features/exploration/ExplorationPage").then((module) => ({
+    default: module.Component,
+  })),
+);
 
 function LoadingPane() {
   return (
@@ -237,6 +242,8 @@ function PaneRoutes({
           <Route path="charts" element={<ChartsPage />} />
           <Route path="relationships" element={<RelationshipsPage />} />
           <Route path="questions" element={<QuestionsPage />} />
+          <Route path="explorations" element={<ExplorationPage />} />
+          <Route path="explorations/:explorationId" element={<ExplorationPage />} />
           <Route path="findings" element={<FindingsPage />} />
           <Route path="semantic" element={<KnowledgePage />} />
           <Route path="cleaning" element={<CleaningPage />} />

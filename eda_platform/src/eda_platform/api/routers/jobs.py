@@ -18,7 +18,13 @@ from pydantic import BaseModel, Field
 
 from eda_platform.api.errors import ApiErrorEnvelope
 from eda_platform.api.routers.settings import SESSION_HEADER, session_id_from_header
-from eda_platform.application.dto import JobCreated, JobEvent, JobStatus, PrecleaningOptions
+from eda_platform.application.dto import (
+    JobCreated,
+    JobEvent,
+    JobStatus,
+    PrecleaningOptions,
+    SessionJobList,
+)
 from eda_platform.application.ports import TERMINAL_JOB_STATUSES
 from eda_platform.application.services.job_service import (
     TERMINAL_EVENT_TYPES,
@@ -82,6 +88,7 @@ def create_job(
         generate_report=body.generate_report,
         dataset_workers=body.dataset_workers,
         resource_limit_action=body.resource_limit_action,
+        resource_overrides=effective.resource_overrides,
         llm=body.llm,
         payload_policy=effective.payload_policy,
         llm_env=effective.env_overlay,
@@ -100,6 +107,12 @@ def create_job(
     )
 
 
+@router.get("/sessions/{session_id}/jobs", response_model=SessionJobList)
+def list_session_jobs(session_id: str, request: Request) -> SessionJobList:
+    """Job history for one session, so a fresh client can re-attach to runs."""
+    return _service(request).list_session_jobs(session_id)
+
+
 @router.get("/jobs/{job_id}", response_model=JobStatus)
 def get_job(job_id: str, request: Request) -> JobStatus:
     return _service(request).get_job(job_id)
@@ -108,6 +121,32 @@ def get_job(job_id: str, request: Request) -> JobStatus:
 @router.post("/jobs/{job_id}/cancel", response_model=JobStatus)
 def cancel_job(job_id: str, request: Request) -> JobStatus:
     return _service(request).cancel_job(job_id)
+
+
+@router.post("/jobs/{job_id}/retry", status_code=201, response_model=JobCreated)
+def retry_job(
+    job_id: str,
+    request: Request,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    x_eda_session: str | None = Header(None, alias=SESSION_HEADER),
+) -> JobCreated:
+    """Re-queue a failed/cancelled auto_eda job with its original parameters.
+
+    Secrets are not persisted with the job, so the LLM env overlay is resolved
+    from the caller's current Settings, exactly as at first launch.
+    """
+    effective = request.app.state.settings_service.resolve(session_id_from_header(x_eda_session))
+    status = _service(request).retry_job(
+        job_id,
+        llm_env=effective.env_overlay,
+        idempotency_key=idempotency_key,
+    )
+    return JobCreated(
+        job_id=status.job_id,
+        session_id=status.session_id,
+        status=status.status,
+        events_url=status.events_url,
+    )
 
 
 @router.get("/jobs/{job_id}/events")

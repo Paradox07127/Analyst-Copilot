@@ -1139,3 +1139,4 @@ def test_oversized_transcript_line_is_counted_and_shown_as_a_placeholder(
     placeholder = body["messages"][1]
     assert placeholder["status"] == "omitted"
     assert "too large" in placeholder["content"].lower()
+

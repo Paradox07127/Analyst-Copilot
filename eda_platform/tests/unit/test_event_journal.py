@@ -1,6 +1,6 @@
 """Generic JSONL event journal: mechanism tests on a minimal toy domain.
 
-The investigation and exploration journals are thin subclasses; these tests
+The exploration journal is a thin subclass; these tests
 pin the shared mechanics (fsync append, torn-tail recovery, attempt-epoch
 fencing, snapshot cache) independently of any domain reducer.
 """

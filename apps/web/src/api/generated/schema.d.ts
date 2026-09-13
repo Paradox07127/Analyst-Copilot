@@ -259,7 +259,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Session Jobs
+         * @description Job history for one session, so a fresh client can re-attach to runs.
+         */
+        get: operations["list_session_jobs_api_v1_sessions__session_id__jobs_get"];
         put?: never;
         /** Create Job */
         post: operations["create_job_api_v1_sessions__session_id__jobs_post"];
@@ -297,6 +301,29 @@ export interface paths {
         put?: never;
         /** Cancel Job */
         post: operations["cancel_job_api_v1_jobs__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Job
+         * @description Re-queue a failed/cancelled auto_eda job with its original parameters.
+         *
+         *     Secrets are not persisted with the job, so the LLM env overlay is resolved
+         *     from the caller's current Settings, exactly as at first launch.
+         */
+        post: operations["retry_job_api_v1_jobs__job_id__retry_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -496,6 +523,26 @@ export interface paths {
          *     re-evaluates feasibility on the edited card.
          */
         patch: operations["edit_question_card_api_v1_sessions__session_id__questions__question_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/experiment-designs/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm Randomized Design
+         * @description Issue the credential that admits run_causal_experiment's randomized tier.
+         */
+        post: operations["confirm_randomized_design_api_v1_sessions__session_id__experiment_designs_confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/sessions/{session_id}/questions/prepare-draft": {
@@ -1266,6 +1313,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/chat/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Chat Turn
+         * @description Stop the in-flight turn at its next checkpoint; the stream reports the end.
+         */
+        post: operations["cancel_chat_turn_api_v1_sessions__session_id__chat_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/chat/pending-plans": {
         parameters: {
             query?: never;
@@ -1773,7 +1840,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Explorations
+         * @description List the session's deep dives so the UI never depends on local state.
+         */
+        get: operations["list_explorations_api_v1_sessions__session_id__explorations_get"];
         put?: never;
         /** Start Exploration */
         post: operations["start_exploration_api_v1_sessions__session_id__explorations_post"];
@@ -1899,167 +1970,6 @@ export interface paths {
         get: operations["stream_exploration_events_api_v1_sessions__session_id__explorations__exploration_id__events_get"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Investigations */
-        get: operations["list_investigations_api_v1_sessions__session_id__investigations_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/plan": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Build Investigation Plans
-         * @description Plan building is deterministic and spends no model budget, so it needs
-         *     no approval — only the job system's idempotency key.
-         */
-        post: operations["build_investigation_plans_api_v1_sessions__session_id__investigations_plan_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/{plan_id}/prepare-decision": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Prepare Investigation Decision */
-        post: operations["prepare_investigation_decision_api_v1_sessions__session_id__investigations__plan_id__prepare_decision_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/{plan_id}/approve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Approve Investigation Plan */
-        post: operations["approve_investigation_plan_api_v1_sessions__session_id__investigations__plan_id__approve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/{plan_id}/reject": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Reject Investigation Plan */
-        post: operations["reject_investigation_plan_api_v1_sessions__session_id__investigations__plan_id__reject_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/prepare-execute": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Prepare Investigation Execution */
-        post: operations["prepare_investigation_execution_api_v1_sessions__session_id__investigations_prepare_execute_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/execute": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Execute Investigation Plans */
-        post: operations["execute_investigation_plans_api_v1_sessions__session_id__investigations_execute_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/prepare-macro-loop": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Prepare Macro Loop
-         * @description The response states how many follow-up rounds approving this authorizes;
-         *     the depth comes from the session's thinking level, not from the request.
-         */
-        post: operations["prepare_macro_loop_api_v1_sessions__session_id__investigations_prepare_macro_loop_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{session_id}/investigations/macro-loop": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Start Macro Loop */
-        post: operations["start_macro_loop_api_v1_sessions__session_id__investigations_macro_loop_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2378,7 +2288,7 @@ export interface components {
          * ArtifactType
          * @enum {string}
          */
-        ArtifactType: "DatasetProfile" | "RawDatasetProfile" | "QualityIssueSet" | "QualityContextSet" | "ChartSpec" | "RawChartSpec" | "RawDataPreview" | "MarkdownReport" | "ReportBundle" | "ReportAudit" | "HtmlReport" | "SqlResult" | "CodeExecutionResult" | "PiiReport" | "ChatTurnPlan" | "Table" | "SessionSummary" | "RelationshipCandidateSet" | "RelationshipValidationSet" | "ErDiagram" | "ValueMap" | "QuestionCandidateSet" | "InvestigationPlan" | "InvestigationApproval" | "ValidatedFinding" | "InvestigationRecord" | "SynthesisBrief" | "DecisionReport" | "DeepInvestigationResult" | "DecisionCoverage" | "QuestionExecutionResult" | "CleaningRecipe" | "CleaningPreview" | "StatTestResult" | "ModelCard" | "AnomalyScreenResult" | "SessionMetrics" | "ResourcePreflight" | "ColumnRoleSet" | "EvidenceInterleaveTranscript" | "FollowUpProposalSet" | "LoopLedger" | "EdaHandoff" | "AgentHandoff" | "EvidenceReceipt" | "WorkflowEvalTrial";
+        ArtifactType: "DatasetProfile" | "RawDatasetProfile" | "QualityIssueSet" | "QualityContextSet" | "ChartSpec" | "RawChartSpec" | "RawDataPreview" | "MarkdownReport" | "ReportBundle" | "ReportAudit" | "HtmlReport" | "SqlResult" | "CodeExecutionResult" | "PiiReport" | "ChatTurnPlan" | "Table" | "SessionSummary" | "RelationshipCandidateSet" | "RelationshipValidationSet" | "ErDiagram" | "ValueMap" | "QuestionCandidateSet" | "InvestigationPlan" | "ValidatedFinding" | "InvestigationRecord" | "SynthesisBrief" | "DecisionReport" | "DecisionCoverage" | "QuestionExecutionResult" | "CleaningRecipe" | "CleaningPreview" | "StatTestResult" | "ModelCard" | "AnomalyScreenResult" | "SegmentationResult" | "SessionMetrics" | "ResourcePreflight" | "ColumnRoleSet" | "EvidenceInterleaveTranscript" | "EdaHandoff" | "AgentHandoff" | "EvidenceReceipt" | "ExplorationFindingSet" | "WorkflowEvalTrial";
         /**
          * AutoEdaResourceUsage
          * @description Nested SessionMetrics v6 payload; defaults keep legacy runs readable.
@@ -2831,6 +2741,21 @@ export interface components {
              * @enum {string}
              */
             llm: "env" | "offline";
+        };
+        /**
+         * ChatTurnCancelled
+         * @description Ack for a stop request; the turn itself settles through its stream.
+         */
+        ChatTurnCancelled: {
+            /** Session Id */
+            session_id: string;
+            /** Message Id */
+            message_id?: string | null;
+            /**
+             * Cancel Requested
+             * @default false
+             */
+            cancel_requested: boolean;
         };
         /**
          * CleaningApplied
@@ -3643,6 +3568,11 @@ export interface components {
              * @default false
              */
             drop_outliers: boolean;
+            /**
+             * Save To Charts
+             * @default false
+             */
+            save_to_charts: boolean;
         };
         /**
          * CustomChartView
@@ -3675,6 +3605,8 @@ export interface components {
             spec: {
                 [key: string]: unknown;
             };
+            /** Saved Chart Id */
+            saved_chart_id?: string | null;
         };
         /**
          * DataOperationStarted
@@ -4318,6 +4250,78 @@ export interface components {
             /** Verified Working Set Bytes */
             verified_working_set_bytes?: number | null;
         };
+        /**
+         * EdaResourceLimitGuidance
+         * @description Why a run stopped at the resource gate, in numbers a user can act on.
+         *
+         *     Derived from :class:`EdaResourcePreflight`; carried alongside it so the API
+         *     and the UI never have to re-derive the arithmetic behind the decision.
+         */
+        EdaResourceLimitGuidance: {
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "accepted" | "limited" | "rejected";
+            /** Reason Codes */
+            reason_codes?: string[];
+            /**
+             * Dataset Count
+             * @default 0
+             */
+            dataset_count: number;
+            /**
+             * Estimated Working Set Bytes
+             * @default 0
+             */
+            estimated_working_set_bytes: number;
+            /** Max Working Set Bytes */
+            max_working_set_bytes: number;
+            /**
+             * Over Budget Bytes
+             * @default 0
+             */
+            over_budget_bytes: number;
+            /**
+             * Largest Dataset Name
+             * @default
+             */
+            largest_dataset_name: string;
+            /**
+             * Largest Dataset Bytes
+             * @default 0
+             */
+            largest_dataset_bytes: number;
+            /**
+             * Largest Dataset Rows
+             * @default 0
+             */
+            largest_dataset_rows: number;
+            /** Max Rows Per Dataset */
+            max_rows_per_dataset: number;
+            /**
+             * Precleaning Enabled
+             * @default false
+             */
+            precleaning_enabled: boolean;
+            /**
+             * Working Set Without Precleaning Bytes
+             * @default 0
+             */
+            working_set_without_precleaning_bytes: number;
+            /**
+             * Disabling Precleaning Would Fit
+             * @default false
+             */
+            disabling_precleaning_would_fit: boolean;
+            /** Suggested Max Working Set Bytes */
+            suggested_max_working_set_bytes: number;
+        };
         /** EntityNoteView */
         EntityNoteView: {
             /** Name */
@@ -4525,6 +4529,52 @@ export interface components {
             status: string;
         };
         /**
+         * ExplorationListItemView
+         * @description One row of a session's deep-dive history, light enough to list.
+         */
+        ExplorationListItemView: {
+            /** Exploration Id */
+            exploration_id: string;
+            /** Session Id */
+            session_id: string;
+            /** Project Id */
+            project_id: string;
+            /** Goal */
+            goal: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "open" | "goal_directed";
+            /**
+             * Thinking Level
+             * @enum {string}
+             */
+            thinking_level: "quick" | "standard" | "deep";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "pause_requested" | "paused" | "stopped";
+            /** Stop Reason */
+            stop_reason?: ("completed" | "budget_exhausted" | "cancelled" | "failed" | "state_witness_changed" | "no_new_information") | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Report Available
+             * @default false
+             */
+            report_available: boolean;
+        };
+        /** ExplorationListView */
+        ExplorationListView: {
+            /** Explorations */
+            explorations?: components["schemas"]["ExplorationListItemView"][];
+        };
+        /**
          * ExplorationPolicy
          * @description Immutable per-run policy; the fingerprint covers every field but itself.
          */
@@ -4598,8 +4648,6 @@ export interface components {
              * Format: date-time
              */
             expires_at: string;
-            /** Release Certificate Digest */
-            release_certificate_digest: string;
         };
         /** ExplorationReportView */
         ExplorationReportView: {
@@ -5090,155 +5138,6 @@ export interface components {
             /** Evidence Independence Key */
             evidence_independence_key?: string | null;
         };
-        /** InvestigationDecisionPrepareRequest */
-        InvestigationDecisionPrepareRequest: {
-            /**
-             * Decision
-             * @enum {string}
-             */
-            decision: "approved" | "rejected";
-            /**
-             * Reason
-             * @default
-             */
-            reason: string;
-        };
-        /**
-         * InvestigationDecisionPrepared
-         * @description Pending approval for approving or rejecting one plan.
-         *
-         *     The approval binds the plan's content fingerprint: a plan rebuilt after
-         *     this call no longer matches and the decision fails closed.
-         */
-        InvestigationDecisionPrepared: {
-            /** Session Id */
-            session_id: string;
-            /** Plan Id */
-            plan_id: string;
-            /** Plan Session Id */
-            plan_session_id: string;
-            /** Decision */
-            decision: string;
-            /**
-             * Reason
-             * @default
-             */
-            reason: string;
-            /** Action Hash */
-            action_hash: string;
-            /** Approval Token */
-            approval_token: string;
-            /**
-             * Expires At
-             * Format: date-time
-             */
-            expires_at: string;
-            plan: components["schemas"]["InvestigationPlanView"];
-        };
-        /** InvestigationDecisionRecorded */
-        InvestigationDecisionRecorded: {
-            /** Session Id */
-            session_id: string;
-            /** Plan Id */
-            plan_id: string;
-            /** Decision */
-            decision: string;
-            /** Approval Artifact Id */
-            approval_artifact_id: string;
-            plan: components["schemas"]["InvestigationPlanView"];
-        };
-        /**
-         * InvestigationDecisionRequest
-         * @description No decision or reason field: the decision runs what the approval bound.
-         */
-        InvestigationDecisionRequest: {
-            /** Action Hash */
-            action_hash: string;
-            /** Approval Token */
-            approval_token: string;
-        };
-        /** InvestigationExecutePrepareRequest */
-        InvestigationExecutePrepareRequest: {
-            /** Plan Ids */
-            plan_ids: string[];
-            /**
-             * Llm
-             * @default env
-             * @enum {string}
-             */
-            llm: "env" | "offline";
-        };
-        /**
-         * InvestigationExecuteRequest
-         * @description No plan ids: execution runs exactly the set the approval froze.
-         */
-        InvestigationExecuteRequest: {
-            /** Action Hash */
-            action_hash: string;
-            /** Approval Token */
-            approval_token: string;
-        };
-        /**
-         * InvestigationExecutionPrepared
-         * @description Pending approval for executing a set of approved plans.
-         *
-         *     Execution runs the approved methods and interprets findings with the model,
-         *     so the approval binds the exact plan set and the LLM mode.
-         */
-        InvestigationExecutionPrepared: {
-            /** Session Id */
-            session_id: string;
-            /** Plan Session Id */
-            plan_session_id: string;
-            /** Plan Ids */
-            plan_ids?: string[];
-            /** Action Hash */
-            action_hash: string;
-            /** Approval Token */
-            approval_token: string;
-            /**
-             * Expires At
-             * Format: date-time
-             */
-            expires_at: string;
-            /**
-             * Llm Mode
-             * @default env
-             */
-            llm_mode: string;
-            /** Plans */
-            plans?: components["schemas"]["InvestigationPlanView"][];
-        };
-        /**
-         * InvestigationExecutionStarted
-         * @description The derived ``ixsess_*`` run carrying a plan-execution job.
-         *
-         *     Findings and records land on the plan run; the derived run carries only the
-         *     lifecycle, so a failed execution never flips the source run to failed.
-         */
-        InvestigationExecutionStarted: {
-            /** Session Id */
-            session_id: string;
-            /** Plan Session Id */
-            plan_session_id: string;
-            /** Execution Session Id */
-            execution_session_id: string;
-            /** Plan Ids */
-            plan_ids?: string[];
-            job: components["schemas"]["JobCreated"];
-        };
-        /** InvestigationGateView */
-        InvestigationGateView: {
-            /** Name */
-            name: string;
-            /** Status */
-            status: string;
-            /**
-             * Reason
-             * @default
-             */
-            reason: string;
-        };
         /** InvestigationLogEntry */
         InvestigationLogEntry: {
             /** Artifact Id */
@@ -5260,162 +5159,6 @@ export interface components {
             reason: string;
             /** Next Action */
             next_action: string;
-        };
-        /**
-         * InvestigationPlanBuildStarted
-         * @description The derived ``ipsess_*`` run carrying a plan-building job.
-         *
-         *     Plan building is deterministic and spends no model budget, so it needs no
-         *     approval; the plans it writes land on their own ``investigation_*`` run,
-         *     which the job reports in an ``investigation.planned`` trace event.
-         */
-        InvestigationPlanBuildStarted: {
-            /** Session Id */
-            session_id: string;
-            /** Execution Session Id */
-            execution_session_id: string;
-            /** Question Ids */
-            question_ids?: string[];
-            /**
-             * Deep
-             * @default false
-             */
-            deep: boolean;
-            job: components["schemas"]["JobCreated"];
-        };
-        /** InvestigationPlanRequest */
-        InvestigationPlanRequest: {
-            /** Question Ids */
-            question_ids: string[];
-            /**
-             * Deep
-             * @default false
-             */
-            deep: boolean;
-        };
-        /**
-         * InvestigationPlanView
-         * @description One investigation plan plus its decision and terminal outcome.
-         */
-        InvestigationPlanView: {
-            /** Plan Id */
-            plan_id: string;
-            /** Plan Session Id */
-            plan_session_id: string;
-            /** Investigation Id */
-            investigation_id: string;
-            /** Question Id */
-            question_id: string;
-            /** Question */
-            question: string;
-            /**
-             * Method Family
-             * @default
-             */
-            method_family: string;
-            /**
-             * Method Recipe
-             * @default
-             */
-            method_recipe: string;
-            /**
-             * Card Version
-             * @default 1
-             */
-            card_version: number;
-            /**
-             * Status
-             * @default pending
-             */
-            status: string;
-            /**
-             * Plan Status
-             * @default planned
-             */
-            plan_status: string;
-            /**
-             * Execution Ready
-             * @default false
-             */
-            execution_ready: boolean;
-            /** Allowed Tools */
-            allowed_tools?: string[];
-            /** Target Datasets */
-            target_datasets?: string[];
-            /** Method Requirements */
-            method_requirements?: string[];
-            /** Validation Gates */
-            validation_gates?: components["schemas"]["InvestigationGateView"][];
-            /**
-             * Candidate Fingerprint
-             * @default
-             */
-            candidate_fingerprint: string;
-            /**
-             * Deep Investigation
-             * @default false
-             */
-            deep_investigation: boolean;
-            /**
-             * Decision Reason
-             * @default
-             */
-            decision_reason: string;
-            /** Outcome Status */
-            outcome_status?: string | null;
-            /**
-             * Outcome Reason
-             * @default
-             */
-            outcome_reason: string;
-            /** Finding Texts */
-            finding_texts?: string[];
-            /** Report Readiness */
-            report_readiness?: string | null;
-            /**
-             * Can Approve
-             * @default false
-             */
-            can_approve: boolean;
-            /**
-             * Can Reject
-             * @default false
-             */
-            can_reject: boolean;
-            /**
-             * Can Execute
-             * @default false
-             */
-            can_execute: boolean;
-        };
-        /**
-         * InvestigationsView
-         * @description Every plan derived from this run, newest plan run first.
-         */
-        InvestigationsView: {
-            /** Session Id */
-            session_id: string;
-            /** Project Id */
-            project_id: string;
-            /**
-             * Analysis Depth
-             * @default 0
-             */
-            analysis_depth: number;
-            /**
-             * Deep Investigation Enabled
-             * @default false
-             */
-            deep_investigation_enabled: boolean;
-            /**
-             * Macro Loop Authorized
-             * @default false
-             */
-            macro_loop_authorized: boolean;
-            /** Plans */
-            plans?: components["schemas"]["InvestigationPlanView"][];
-            /** Macro Loops */
-            macro_loops?: components["schemas"]["MacroLoopView"][];
         };
         /** JobCreateRequest */
         JobCreateRequest: {
@@ -5710,145 +5453,6 @@ export interface components {
              * @default
              */
             response_preview: string;
-        };
-        /** MacroLoopPrepareRequest */
-        MacroLoopPrepareRequest: {
-            /** Plan Session Id */
-            plan_session_id: string;
-            /**
-             * Llm
-             * @default env
-             * @enum {string}
-             */
-            llm: "env" | "offline";
-        };
-        /**
-         * MacroLoopPrepared
-         * @description Pending approval for the Ultra macro loop over one executed plan run.
-         *
-         *     Approving this authorizes the loop to generate and execute follow-up
-         *     questions on its own for up to ``rounds_cap`` rounds, spending model budget
-         *     without a further prompt.
-         */
-        MacroLoopPrepared: {
-            /** Session Id */
-            session_id: string;
-            /** Plan Session Id */
-            plan_session_id: string;
-            /** Action Hash */
-            action_hash: string;
-            /** Approval Token */
-            approval_token: string;
-            /**
-             * Expires At
-             * Format: date-time
-             */
-            expires_at: string;
-            /** Depth */
-            depth: number;
-            /** Rounds Cap */
-            rounds_cap: number;
-            /** Questions Per Round */
-            questions_per_round: number;
-            /**
-             * Llm Mode
-             * @default env
-             */
-            llm_mode: string;
-        };
-        /** MacroLoopRequest */
-        MacroLoopRequest: {
-            /** Action Hash */
-            action_hash: string;
-            /** Approval Token */
-            approval_token: string;
-        };
-        /** MacroLoopRoundView */
-        MacroLoopRoundView: {
-            /** Round Id */
-            round_id: number;
-            /**
-             * New Validated Findings
-             * @default 0
-             */
-            new_validated_findings: number;
-            /**
-             * Redundant Findings
-             * @default 0
-             */
-            redundant_findings: number;
-            /**
-             * Discarded Findings
-             * @default 0
-             */
-            discarded_findings: number;
-            /**
-             * Executed Questions
-             * @default 0
-             */
-            executed_questions: number;
-            /**
-             * Tokens
-             * @default 0
-             */
-            tokens: number;
-            /**
-             * Exit Reason
-             * @default continue
-             */
-            exit_reason: string;
-            /**
-             * Disposition
-             * @default keep
-             */
-            disposition: string;
-        };
-        /**
-         * MacroLoopStarted
-         * @description The derived ``mlsess_*`` run carrying a macro-loop job.
-         */
-        MacroLoopStarted: {
-            /** Session Id */
-            session_id: string;
-            /** Plan Session Id */
-            plan_session_id: string;
-            /** Execution Session Id */
-            execution_session_id: string;
-            /** Depth */
-            depth: number;
-            /** Rounds Cap */
-            rounds_cap: number;
-            job: components["schemas"]["JobCreated"];
-        };
-        /**
-         * MacroLoopView
-         * @description One persisted macro-loop ledger for a plan run.
-         */
-        MacroLoopView: {
-            /** Plan Session Id */
-            plan_session_id: string;
-            /**
-             * Depth
-             * @default 0
-             */
-            depth: number;
-            /** Rounds */
-            rounds?: components["schemas"]["MacroLoopRoundView"][];
-            /**
-             * Admitted Finding Count
-             * @default 0
-             */
-            admitted_finding_count: number;
-            /**
-             * Total Tokens
-             * @default 0
-             */
-            total_tokens: number;
-            /**
-             * Exit Reason
-             * @default
-             */
-            exit_reason: string;
         };
         /** MeaningProposalView */
         MeaningProposalView: {
@@ -6587,6 +6191,40 @@ export interface components {
             questions?: components["schemas"]["QuestionSummary"][];
         };
         /**
+         * RandomizedDesignConfirmRequest
+         * @description The user's explicit declaration that assignment in this column was
+         *     randomized; it cannot be inferred from the data or set by the agent.
+         */
+        RandomizedDesignConfirmRequest: {
+            /** Dataset Id */
+            dataset_id: string;
+            /** Treatment Column */
+            treatment_column: string;
+        };
+        /**
+         * RandomizedDesignConfirmed
+         * @description User-issued credential: assignment in this column was randomized.
+         *
+         *     The credential admits run_causal_experiment's randomized tier (T8c tier B)
+         *     for this dataset + treatment column until it expires; the tool re-verifies
+         *     it and records its id on the evidence receipt.
+         */
+        RandomizedDesignConfirmed: {
+            /** Session Id */
+            session_id: string;
+            /** Dataset Id */
+            dataset_id: string;
+            /** Treatment Column */
+            treatment_column: string;
+            /** Credential Id */
+            credential_id: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+        };
+        /**
          * RawChartView
          * @description A before-cleaning chart with its complete vega-lite spec.
          */
@@ -6973,6 +6611,13 @@ export interface components {
             markdown: string;
             /** Generated At */
             generated_at?: string | null;
+            /**
+             * Degraded
+             * @default false
+             */
+            degraded: boolean;
+            /** Degraded Reason */
+            degraded_reason?: string | null;
         };
         /** SCQAView */
         SCQAView: {
@@ -7250,6 +6895,7 @@ export interface components {
             };
             /** Warnings */
             warnings?: string[];
+            resource_limit?: components["schemas"]["EdaResourceLimitGuidance"] | null;
         };
         /**
          * SessionForkRequest
@@ -7289,6 +6935,48 @@ export interface components {
             /** Decision */
             decision: string;
             job: components["schemas"]["JobCreated"];
+        };
+        /** SessionJobList */
+        SessionJobList: {
+            /** Session Id */
+            session_id: string;
+            /** Jobs */
+            jobs?: components["schemas"]["SessionJobSummary"][];
+        };
+        /**
+         * SessionJobSummary
+         * @description One row of a session's job history; params reduced to their run linkage.
+         */
+        SessionJobSummary: {
+            /** Job Id */
+            job_id: string;
+            /** Session Id */
+            session_id: string;
+            /** Project Id */
+            project_id: string;
+            /** Kind */
+            kind: string;
+            /** Status */
+            status: string;
+            /**
+             * Cancel Requested
+             * @default false
+             */
+            cancel_requested: boolean;
+            /** Created At */
+            created_at?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Error Code */
+            error_code?: string | null;
+            /** Error Message */
+            error_message?: string | null;
+            /** Source Session Id */
+            source_session_id?: string | null;
+            /** Events Url */
+            events_url: string;
         };
         /**
          * SessionMetricsView
@@ -7629,21 +7317,6 @@ export interface components {
              */
             domain_metrics_skipped: number;
             /**
-             * Macro Loop Rounds
-             * @default 0
-             */
-            macro_loop_rounds: number;
-            /**
-             * Macro Loop New Findings
-             * @default 0
-             */
-            macro_loop_new_findings: number;
-            /**
-             * Macro Loop Discard Rounds
-             * @default 0
-             */
-            macro_loop_discard_rounds: number;
-            /**
              * Question Answered
              * @default 0
              */
@@ -7730,6 +7403,23 @@ export interface components {
             };
             /** Generated At */
             generated_at?: string | null;
+            /**
+             * Exploration Runs
+             * @default 0
+             */
+            exploration_runs: number;
+            /**
+             * Exploration Llm Calls
+             * @default 0
+             */
+            exploration_llm_calls: number;
+            /**
+             * Exploration Total Tokens
+             * @default 0
+             */
+            exploration_total_tokens: number;
+            /** Exploration Est Cost Usd */
+            exploration_est_cost_usd?: number | null;
         };
         /** SessionStepMetricRow */
         SessionStepMetricRow: {
@@ -7820,6 +7510,10 @@ export interface components {
             usd_per_1k_completion?: number | null;
             /** Analysis Depth */
             analysis_depth?: number | null;
+            /** Max Working Set Bytes */
+            max_working_set_bytes?: number | null;
+            /** Max Rows Per Dataset */
+            max_rows_per_dataset?: number | null;
             /** Dev Mode */
             dev_mode?: boolean | null;
             /** Api Key */
@@ -7897,6 +7591,16 @@ export interface components {
              * @default 0
              */
             analysis_depth: number;
+            /**
+             * Max Working Set Bytes
+             * @default 2147483648
+             */
+            max_working_set_bytes: number;
+            /**
+             * Max Rows Per Dataset
+             * @default 10000000
+             */
+            max_rows_per_dataset: number;
             /**
              * Dev Mode
              * @default false
@@ -8342,16 +8046,6 @@ export interface components {
              * @default
              */
             pdf_export_hint: string;
-            /**
-             * Exploration Available
-             * @default false
-             */
-            exploration_available: boolean;
-            /**
-             * Exploration Hint
-             * @default
-             */
-            exploration_hint: string;
         };
         /**
          * TraceEventPage
@@ -9879,6 +9573,73 @@ export interface operations {
             };
         };
     };
+    list_session_jobs_api_v1_sessions__session_id__jobs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionJobList"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
     create_job_api_v1_sessions__session_id__jobs_post: {
         parameters: {
             query?: never;
@@ -10056,6 +9817,85 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobStatus"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    retry_job_api_v1_jobs__job_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+                "X-EDA-Session"?: string | null;
+            };
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobCreated"];
                 };
             };
             /** @description Bad Request */
@@ -11000,6 +10840,95 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["QuestionSummary"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the global size limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    confirm_randomized_design_api_v1_sessions__session_id__experiment_designs_confirm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RandomizedDesignConfirmRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RandomizedDesignConfirmed"];
                 };
             };
             /** @description Remote deployment CSRF policy rejected the request. */
@@ -14576,6 +14505,91 @@ export interface operations {
             };
         };
     };
+    cancel_chat_turn_api_v1_sessions__session_id__chat_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatTurnCancelled"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
     list_chat_pending_plans_api_v1_sessions__session_id__chat_pending_plans_get: {
         parameters: {
             query?: never;
@@ -16702,8 +16716,57 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description Service Unavailable */
-            503: {
+        };
+    };
+    list_explorations_api_v1_sessions__session_id__explorations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExplorationListView"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16794,15 +16857,6 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
         };
     };
     get_exploration_api_v1_sessions__session_id__explorations__exploration_id__get: {
@@ -16855,15 +16909,6 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16945,15 +16990,6 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17045,15 +17081,6 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
         };
     };
     cancel_exploration_api_v1_sessions__session_id__explorations__exploration_id__cancel_post: {
@@ -17128,15 +17155,6 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17227,15 +17245,6 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
         };
     };
     get_exploration_report_api_v1_sessions__session_id__explorations__exploration_id__report_get: {
@@ -17288,15 +17297,6 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17360,816 +17360,6 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    list_investigations_api_v1_sessions__session_id__investigations_get: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-EDA-Session"?: string | null;
-            };
-            path: {
-                session_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InvestigationsView"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    build_investigation_plans_api_v1_sessions__session_id__investigations_plan_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "Idempotency-Key"?: string | null;
-                "X-EDA-Session"?: string | null;
-            };
-            path: {
-                session_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InvestigationPlanRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InvestigationPlanBuildStarted"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    prepare_investigation_decision_api_v1_sessions__session_id__investigations__plan_id__prepare_decision_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                session_id: string;
-                plan_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InvestigationDecisionPrepareRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InvestigationDecisionPrepared"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    approve_investigation_plan_api_v1_sessions__session_id__investigations__plan_id__approve_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                /** @description Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response. */
-                "Idempotency-Key"?: string;
-            };
-            path: {
-                session_id: string;
-                plan_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InvestigationDecisionRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InvestigationDecisionRecorded"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    reject_investigation_plan_api_v1_sessions__session_id__investigations__plan_id__reject_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                /** @description Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response. */
-                "Idempotency-Key"?: string;
-            };
-            path: {
-                session_id: string;
-                plan_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InvestigationDecisionRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InvestigationDecisionRecorded"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    prepare_investigation_execution_api_v1_sessions__session_id__investigations_prepare_execute_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                session_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InvestigationExecutePrepareRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InvestigationExecutionPrepared"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    execute_investigation_plans_api_v1_sessions__session_id__investigations_execute_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "Idempotency-Key"?: string | null;
-                "X-EDA-Session"?: string | null;
-            };
-            path: {
-                session_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InvestigationExecuteRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InvestigationExecutionStarted"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    prepare_macro_loop_api_v1_sessions__session_id__investigations_prepare_macro_loop_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "X-EDA-Session"?: string | null;
-            };
-            path: {
-                session_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MacroLoopPrepareRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MacroLoopPrepared"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-        };
-    };
-    start_macro_loop_api_v1_sessions__session_id__investigations_macro_loop_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "Idempotency-Key"?: string | null;
-                "X-EDA-Session"?: string | null;
-            };
-            path: {
-                session_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MacroLoopRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MacroLoopStarted"];
-                };
-            };
-            /** @description Remote deployment CSRF policy rejected the request. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Gone */
-            410: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Request body exceeds the global size limit. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Unprocessable Content */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
                 headers: {
                     [name: string]: unknown;
                 };

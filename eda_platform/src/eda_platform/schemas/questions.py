@@ -115,13 +115,15 @@ class QuestionAnswerContract(BaseModel):
 _METHOD_ANSWER_REQUIREMENTS: dict[
     AnalysisMode, tuple[str, ArtifactType, str]
 ] = {
-    # Diagnostics establish trend/stationarity but do not produce a forecast.
-    # These stay closed until dedicated typed adapters are registered.
+    # Satisfied by the typed run_forecast adapter (agents/data_tools.py);
+    # analyze_time_series diagnostics alone still cannot answer a forecast.
     "forecast": ("forecast_model", ArtifactType.TABLE, "run_forecast"),
     "prediction": ("ml_baseline", ArtifactType.MODEL_CARD, "run_baseline_model"),
+    # Satisfied by the typed run_segmentation adapter (agents/data_tools.py);
+    # a generic code-execution result can no longer stand in for it.
     "segmentation": (
         "segmentation_model",
-        ArtifactType.CODE_EXECUTION_RESULT,
+        ArtifactType.SEGMENTATION_RESULT,
         "run_segmentation",
     ),
     "anomaly": (
@@ -138,6 +140,40 @@ _METHOD_ANSWER_REQUIREMENTS: dict[
         "run_causal_experiment",
     ),
 }
+
+
+# Analysis modes whose fallback query is still a description of the same rows
+# the method would have read, so publishing it with a disclosure is honest.
+# Deliberately excludes forecast, prediction and causal_experiment: those answer
+# about what was never observed, and a query cannot describe that at all.
+DEGRADABLE_ANALYSIS_MODES: frozenset[str] = frozenset({"anomaly", "segmentation"})
+
+_METHOD_PLAIN_NAMES: dict[str, str] = {
+    "anomaly_detection": "an outlier screen",
+    "segmentation_model": "a clustering run",
+}
+
+
+_MAX_DISCLOSURE_QUESTION_CHARS = 120
+
+
+def method_degradation_disclosure(method_id: str, question: str) -> str | None:
+    """The line the report shows instead of discarding a computed result.
+
+    It lands in Limitations and Risks alongside the other execution
+    disclosures, so it has to name the question it belongs to.
+    """
+    plain_name = _METHOD_PLAIN_NAMES.get(method_id)
+    if plain_name is None:
+        return None
+    subject = question.strip()
+    if len(subject) > _MAX_DISCLOSURE_QUESTION_CHARS:
+        subject = subject[: _MAX_DISCLOSURE_QUESTION_CHARS - 1].rstrip() + "…"
+    return (
+        f'"{subject}" asks for {plain_name}, and the run answered it with a '
+        "database query instead. Its figures are what the query returned; read "
+        "them as a first look, not as a settled result."
+    )
 
 
 def method_answer_contract(
@@ -460,7 +496,10 @@ class QuestionExecutionResult(BaseModel):
     evidence_artifact_ids: list[str] = Field(default_factory=list)
     plan_summary: str = ""
     answer_contract: QuestionAnswerContract | None = None
-    contract_status: Literal["passed", "failed", "not_required"] = "not_required"
+    # "unverified": the answer was published from the fallback evidence with a
+    # disclosure, because discarding a computed result and telling the reader
+    # nothing was produced is worse than publishing it qualified (T15-a).
+    contract_status: Literal["passed", "failed", "not_required", "unverified"] = "not_required"
     sql: str | None = None
     sql_result_artifact_id: str | None = None
     chart_artifact_id: str | None = None

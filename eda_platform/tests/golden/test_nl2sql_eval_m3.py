@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from eda_platform.schemas.plans import AnalysisPlan, Intent
 from eda_platform.tools.loader import load_csv
-from eda_platform.tools.nl2sql_eval import NL2SQLEvalCase, run_nl2sql_eval_case
+from nl2sql_eval import NL2SQLEvalCase, run_nl2sql_eval_case
 
 T = TypeVar("T", bound=BaseModel)
 

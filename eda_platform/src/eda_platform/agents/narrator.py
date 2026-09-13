@@ -10,7 +10,7 @@ from the claims' own evidence, so the model never authors an artifact id.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
@@ -68,6 +68,9 @@ class NarrationOutcome:
     written: int = 0
     rejected: int = 0
     skipped: int = 0
+    # One entry per discarded draft: {"section": title, "reason": code}. Purely
+    # observability — the caller turns these into a trace event.
+    discards: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def attempted(self) -> int:
@@ -79,17 +82,23 @@ def narrate_report(bundle: ReportBundle, *, llm: LLMClient | None) -> NarrationO
     if llm is None or is_offline_client(llm):
         return NarrationOutcome(skipped=len(bundle.sections))
     written = rejected = skipped = 0
+    discards: list[dict[str, str]] = []
     for section in bundle.sections:
         if not _is_narratable(section):
             skipped += 1
             continue
-        narrative = _narrate_section(section, llm=llm)
+        narrative, discard_reason = _narrate_section(section, llm=llm)
         if narrative is None:
             rejected += 1
+            discards.append(
+                {"section": section.title, "reason": discard_reason or "unknown"}
+            )
             continue
         section.narrative = narrative
         written += 1
-    return NarrationOutcome(written=written, rejected=rejected, skipped=skipped)
+    return NarrationOutcome(
+        written=written, rejected=rejected, skipped=skipped, discards=discards
+    )
 
 
 def _eligible_claims(section: ReportSection) -> list[ReportClaim]:
@@ -100,7 +109,10 @@ def _is_narratable(section: ReportSection) -> bool:
     return len(_eligible_claims(section)) >= _MIN_CLAIMS_TO_NARRATE
 
 
-def _narrate_section(section: ReportSection, *, llm: LLMClient) -> str | None:
+def _narrate_section(
+    section: ReportSection, *, llm: LLMClient
+) -> tuple[str | None, str | None]:
+    """The section's narrative, or (None, reason) naming why the draft died."""
     claims = _eligible_claims(section)
     shown = claims[:_MAX_CLAIMS_IN_PAYLOAD]
     payload = {
@@ -113,26 +125,26 @@ def _narrate_section(section: ReportSection, *, llm: LLMClient) -> str | None:
     except Exception:
         # A report that renders as bullets is the working product; a narration
         # failure must never cost the reader the section.
-        return None
+        return None, "llm_error"
     # A client that answers with some other shape has not answered.
     if not isinstance(draft, _NarrativeDraft):
-        return None
+        return None, "invalid_response_shape"
     text = " ".join(draft.text.split())
     if not text or len(text) > _MAX_NARRATIVE_CHARS:
-        return None
+        return None, "empty_or_oversized_text"
     by_id = {claim.id: claim for claim in shown}
     cited = list(dict.fromkeys(draft.cited_claim_ids))
     # An id the model invented means it was not reading the claims it was
     # given, which disqualifies the prose as well as the citation.
     if not cited or any(claim_id not in by_id for claim_id in cited):
-        return None
+        return None, "uncited_or_unknown_claim"
     if not borrowed_numbers_only(text, shown):
-        return None
+        return None, "unverifiable_figure"
     # The prose is model output going into a markdown document whose headings
     # drive the table of contents and whose code spans become evidence buttons.
     # Only the citation we build ourselves is allowed to carry either.
     citation = _citation_suffix([by_id[claim_id] for claim_id in cited])
-    return f"{_as_plain_paragraph(text)}{citation}"
+    return f"{_as_plain_paragraph(text)}{citation}", None
 
 
 # The prose is collapsed to one line, so only its first character can still open

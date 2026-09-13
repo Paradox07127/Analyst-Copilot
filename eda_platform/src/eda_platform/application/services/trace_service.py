@@ -84,6 +84,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRACE_LIMIT = 100
 MAX_TRACE_LIMIT = 500
 
+# One cumulative deep-dive spend snapshot per exploration attempt, written by
+# the worker at publish time; the shadow ledger itself never enters this trace.
+EXPLORATION_COST_EVENT = "exploration_cost"
+
 # The usage rollup counts every session, so it reads a project's runs in one
 # unpaged sweep. A local-first workspace does not reach this; the cap only
 # stops one runaway project from turning the home page into a full-table read.
@@ -313,8 +317,40 @@ class TraceService:
                 "source": source,
                 "event_count": event_count,
                 "generated_at": generated_at,
+                **self._exploration_spend(project_id, session_id),
             }
         )
+
+    def _exploration_spend(
+        self, project_id: str, session_id: str
+    ) -> dict[str, object]:
+        """Latest deep-dive spend snapshot per run; snapshots are cumulative,
+        so summing all of them would double-charge a resumed run."""
+        events = self._store.list_trace_events(
+            project_id=project_id,
+            session_id=session_id,
+            event_types=(EXPLORATION_COST_EVENT,),
+        )
+        latest = {event.name: event for event in events}
+        if not latest:
+            return {}
+        costs = [
+            float(event.summary["est_cost_usd"])
+            for event in latest.values()
+            if event.summary.get("est_cost_usd") is not None
+        ]
+        return {
+            "exploration_runs": len(latest),
+            "exploration_llm_calls": sum(
+                _metric_int(event.summary.get("llm_calls"))
+                for event in latest.values()
+            ),
+            "exploration_total_tokens": sum(
+                _metric_int(event.summary.get("total_tokens"))
+                for event in latest.values()
+            ),
+            "exploration_est_cost_usd": round(sum(costs), 6) if costs else None,
+        }
 
     def record_client_failure(
         self,

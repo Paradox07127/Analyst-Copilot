@@ -29,6 +29,7 @@ from eda_platform.application.dto import (
     ChatPendingPlanList,
     ChatPlanRejected,
     ChatStreamEvent,
+    ChatTurnCancelled,
 )
 from eda_platform.application.services.chat_service import ChatService
 
@@ -89,6 +90,12 @@ def send_chat_message(
         llm=body.llm,
         effective_settings=effective,
     )
+
+
+@router.post("/sessions/{session_id}/chat/cancel", response_model=ChatTurnCancelled)
+def cancel_chat_turn(session_id: str, request: Request) -> ChatTurnCancelled:
+    """Stop the in-flight turn at its next checkpoint; the stream reports the end."""
+    return _service(request).cancel_turn(session_id)
 
 
 @router.get("/sessions/{session_id}/chat/pending-plans", response_model=ChatPendingPlanList)

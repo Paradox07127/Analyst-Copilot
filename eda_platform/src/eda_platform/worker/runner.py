@@ -58,6 +58,11 @@ from eda_platform.infrastructure.launch_gate import (
 )
 from eda_platform.schemas.sessions import TraceEvent
 from eda_platform.tools.evidence import PayloadPolicy
+from eda_platform.worker.error_translation import (
+    LLMNotConfiguredError,
+    describe_worker_failure,
+    durable_error_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +155,6 @@ def run_job(
                 handler = _run_run_fork_job
             elif job["kind"] == "question_draft":
                 handler = _run_question_draft_job
-            elif job["kind"] == "investigation_plan":
-                handler = _run_investigation_plan_job
-            elif job["kind"] == "investigation_execute":
-                handler = _run_investigation_execute_job
-            elif job["kind"] == "macro_loop":
-                handler = _run_macro_loop_job
             elif job["kind"] == "synthesis_brief_create":
                 handler = _run_synthesis_brief_job
             elif job["kind"] == "decision_report_generate":
@@ -185,17 +184,30 @@ def run_job(
         _finish(store, job, "cancelled", lifecycle=lifecycle, claim=claim)
     except Exception as exc:
         logger.exception("Job %s failed", job_id)
+        failure = describe_worker_failure(exc)
         _finish(
             store,
             job,
             "failed",
-            error_code=_durable_error_code(exc),
-            error_message=_sanitize_error(str(exc), workspace)[:500],
+            error_code=failure.error_code,
+            error_message=_sanitize_error(failure.message, workspace)[:500],
+            error_detail=(
+                _sanitize_error(failure.detail, workspace)[:500]
+                if failure.detail
+                else None
+            ),
             lifecycle=lifecycle,
             claim=claim,
         )
     else:
-        _finish(store, job, "completed", lifecycle=lifecycle, claim=claim)
+        _finish(
+            store,
+            job,
+            "completed",
+            lifecycle=lifecycle,
+            claim=claim,
+            summary=_completion_summary(store, job, params),
+        )
     finally:
         heartbeat.__exit__(None, None, None)
 
@@ -207,10 +219,90 @@ def _run_started_at(store: ArtifactStore, project_id: str, session_id: str) -> d
 
 def _durable_error_code(exc: Exception) -> str:
     """Return the stable API code a worker persists across process boundaries."""
-    code = getattr(exc, "error_code", None)
-    if isinstance(code, str) and code:
-        return code
-    return type(exc).__name__
+    return durable_error_code(exc)
+
+
+# Trace event types that mean "the job finished, but a capability it was queued
+# for fell back". Deliberately explicit: budget_degraded and semantic_bootstrap
+# carry their own signals and must not repaint a whole job as degraded.
+_DEGRADED_EVENT_REASONS = {
+    "question_llm_skipped": "Question discovery ran without the language model.",
+    "report_degraded": "The report fell back to deterministic generation.",
+}
+
+
+def _completion_summary(
+    store: ArtifactStore, job: dict, params: dict
+) -> dict[str, Any] | None:
+    """What the job.completed event should say beyond "it finished"."""
+    summary: dict[str, Any] = {}
+    degraded = _degraded_completion_summary(store, job, params)
+    if degraded:
+        summary.update(degraded)
+    limit = _resource_limit_summary(store, job)
+    if limit:
+        summary["resource_limit"] = limit
+    return summary or None
+
+
+def _resource_limit_summary(store: ArtifactStore, job: dict) -> dict[str, Any] | None:
+    """The preflight stop's own numbers, so the client never has to guess them.
+
+    Read back from the artifact the driver persisted rather than passed out of
+    the handler: the terminal event is written by the caller of the handler.
+    """
+    from eda_platform.schemas.artifacts import ArtifactType
+    from eda_platform.schemas.resource_metrics import EdaResourcePreflight
+    from eda_platform.tools.resource_preflight import resource_limit_guidance
+
+    try:
+        artifacts, _ = store.list_artifacts_of_types(
+            project_id=str(job["project_id"]),
+            session_id=str(job["session_id"]),
+            artifact_types=[ArtifactType.RESOURCE_PREFLIGHT],
+        )
+        if not artifacts:
+            return None
+        guidance = resource_limit_guidance(
+            EdaResourcePreflight.model_validate(artifacts[-1].payload)
+        )
+    except Exception:
+        # Observability only: a failed read must never fail a finished job.
+        return None
+    return None if guidance is None else guidance.model_dump(mode="json")
+
+
+def _degraded_completion_summary(
+    store: ArtifactStore, job: dict, params: dict
+) -> dict[str, Any] | None:
+    """Degradation flag for the job.completed event, or None for a clean run.
+
+    A job the caller queued as offline is not degraded by running offline, so
+    only jobs queued for a live LLM are scanned.
+    """
+    if params.get("llm") == "offline":
+        return None
+    reasons: list[str] = []
+    try:
+        rows = store.list_job_trace_rows_after(
+            job_id=str(job["job_id"]), after_id=0, limit=2000
+        )
+        for _row_id, payload in rows:
+            with suppress(ValueError):
+                event = TraceEvent.model_validate_json(payload)
+                fallback = _DEGRADED_EVENT_REASONS.get(event.event_type)
+                if fallback is None or event.summary.get("degraded") is not True:
+                    continue
+                reason = event.summary.get("reason")
+                text = reason if isinstance(reason, str) and reason else fallback
+                if text not in reasons:
+                    reasons.append(text)
+    except Exception:
+        # Observability only: a failed scan must never fail a finished job.
+        return None
+    if not reasons:
+        return None
+    return {"degraded": True, "degraded_reasons": reasons}
 
 
 def _job_cancellation_token(
@@ -367,6 +459,47 @@ def _run_auto_eda_job(
                 temp_file.parent.rmdir()
 
 
+def exploration_spend_rollup(
+    store: ArtifactStore, exploration_id: str
+) -> dict[str, object] | None:
+    """Sum the shadow ledger's provider-billed usage; None when nothing billed.
+
+    Reads the run's own llm-budget.jsonl instead of copying its event stream
+    into the product trace -- shadow isolation is intentional, only the totals
+    cross over.
+    """
+    from eda_platform.core.exploration_shadow_store import shadow_run_root
+    from eda_platform.core.llm_ledger import LLM_USAGE_EVENT
+    from eda_platform.drivers.exploration import JsonlShadowBudgetStore
+
+    try:
+        path = shadow_run_root(store.root, exploration_id) / "llm-budget.jsonl"
+        events = JsonlShadowBudgetStore(path).events()
+    except (OSError, ValueError):
+        return None
+    billed = [event for event in events if event.event_type == LLM_USAGE_EVENT]
+    if not billed:
+        return None
+
+    def total(key: str) -> int:
+        values = (event.summary.get(key) for event in billed)
+        return sum(int(value) for value in values if isinstance(value, (int, float)))
+
+    costs = [
+        float(event.summary["estimated_cost_usd"])
+        for event in billed
+        if event.summary.get("estimated_cost_usd") is not None
+    ]
+    return {
+        "llm_calls": len(billed),
+        "prompt_tokens": total("prompt_tokens"),
+        "completion_tokens": total("completion_tokens"),
+        "cached_tokens": total("cached_tokens"),
+        "total_tokens": total("total_tokens"),
+        "est_cost_usd": round(sum(costs), 6) if costs else None,
+    }
+
+
 def _run_exploration_job(
     store: ArtifactStore,
     workspace: str,
@@ -376,9 +509,13 @@ def _run_exploration_job(
     cancel_check: CancelCheck | None = None,
 ) -> None:
     """Execute the certified E4a root while the journal owns product status."""
+    from eda_platform.application.services.trace_service import EXPLORATION_COST_EVENT
     from eda_platform.core.exploration_journal import JsonlExplorationJournal
     from eda_platform.core.exploration_shadow_store import shadow_run_root
-    from eda_platform.worker.exploration import run_exploration_worker
+    from eda_platform.worker.exploration import (
+        publish_exploration_outputs,
+        run_exploration_worker,
+    )
 
     _checkpoint(cancel_check)
     source_session_id = str(params.get("source_session_id", ""))
@@ -404,6 +541,21 @@ def _run_exploration_job(
     ).rebuild()
     if state is None:
         raise RuntimeError("exploration worker returned without a journal state")
+    published = publish_exploration_outputs(
+        store,
+        project_id=str(job["project_id"]),
+        session_id=str(job["session_id"]),
+        source_session_id=source_session_id,
+        exploration_id=exploration_id,
+        goal=str(goal) if goal else None,
+        dataset_scope=(
+            tuple(str(item) for item in policy.get("dataset_scope", ()))
+            if isinstance(policy, dict)
+            else ()
+        ),
+        state=state,
+    )
+    rollup = exploration_spend_rollup(store, exploration_id)
     emit_job_event(
         store,
         job,
@@ -413,8 +565,28 @@ def _run_exploration_job(
             "exploration_status": state.status,
             "stop_reason": state.stop_reason,
             "journal_seq": state.last_seq,
+            "published_artifact_count": len(published),
+            **(rollup or {}),
         },
     )
+    if rollup is not None:
+        # A cumulative snapshot keyed by journal seq: a resumed run publishes a
+        # newer one, and the metrics reader keeps only the latest per run.
+        store.append_trace(
+            str(job["project_id"]),
+            TraceEvent(
+                session_id=source_session_id,
+                event_type=EXPLORATION_COST_EVENT,
+                name=exploration_id,
+                event_key=f"{EXPLORATION_COST_EVENT}:{exploration_id}:{state.last_seq}",
+                finished_at=datetime.now(UTC),
+                summary={
+                    "exploration_id": exploration_id,
+                    "exploration_status": state.status,
+                    **rollup,
+                },
+            ),
+        )
 
 
 def _preclean_options(params: dict) -> dict[str, Any] | None:
@@ -1289,218 +1461,6 @@ def _unscored_user_card(question: str, artifacts: list[Any]) -> Any:
     )
 
 
-def _run_investigation_plan_job(
-    store: ArtifactStore,
-    workspace: str,
-    job: dict,
-    params: dict,
-    *,
-    cancel_check: CancelCheck | None = None,
-) -> None:
-    """Build reviewable investigation plans for the selected questions.
-
-    `create_investigation_plans` mints its own ``investigation_*`` plan run and
-    leaves it in ``awaiting_approval``; this job's session_id is a separate
-    lifecycle run, so finishing here never overwrites that status.
-    """
-    # Same local-import rationale as the other kinds: keep spawn bootstrap cheap.
-    from eda_platform.drivers.investigation_orchestrator import create_investigation_plans
-    from eda_platform.schemas.artifacts import ArtifactType
-
-    _checkpoint(cancel_check)
-    project_id = str(job["project_id"])
-    source_session_id = str(params["source_session_id"])
-    question_ids = [str(item) for item in params.get("question_ids", [])]
-    if not question_ids:
-        raise ValueError("plan building needs at least one question")
-    _start_derived_run(
-        store,
-        job,
-        source_session_id=source_session_id,
-        title=f"Plan {len(question_ids)} question(s)",
-    )
-    planned = create_investigation_plans(
-        project_id=project_id,
-        source_session_id=source_session_id,
-        question_ids=question_ids,
-        workspace=workspace,
-        deep=bool(params.get("deep", False)),
-        cancel_check=cancel_check,
-    )
-    _checkpoint(cancel_check)
-    emit_job_event(
-        store,
-        job,
-        "investigation.planned",
-        {
-            "source_session_id": source_session_id,
-            "plan_session_id": planned.session_id,
-            "plan_count": sum(
-                artifact.type is ArtifactType.INVESTIGATION_PLAN for artifact in planned.artifacts
-            ),
-        },
-    )
-
-
-def _run_investigation_execute_job(
-    store: ArtifactStore,
-    workspace: str,
-    job: dict,
-    params: dict,
-    *,
-    cancel_check: CancelCheck | None = None,
-) -> None:
-    """Execute the approved plans of one plan run.
-
-    Findings, records and the run's completed status land on ``plan_session_id``;
-    this job's own derived run only carries the lifecycle.
-    """
-    # Same local-import rationale as the other kinds: keep spawn bootstrap cheap.
-    from eda_platform.drivers.investigation_orchestrator import execute_investigation_plans
-    from eda_platform.schemas.artifacts import ArtifactType
-
-    _checkpoint(cancel_check)
-    project_id = str(job["project_id"])
-    source_session_id = str(params["source_session_id"])
-    plan_session_id = str(params["plan_session_id"])
-    plan_ids = [str(item) for item in params.get("plan_ids", [])]
-    _verify_plan_fingerprints(store, project_id, plan_session_id, params)
-    _start_derived_run(
-        store,
-        job,
-        source_session_id=source_session_id,
-        title=f"Investigate {len(plan_ids)} plan(s)",
-    )
-    result = execute_investigation_plans(
-        project_id=project_id,
-        plan_session_id=plan_session_id,
-        plan_ids=plan_ids,
-        workspace=workspace,
-        llm=_build_llm(params),
-        cancel_check=cancel_check,
-    )
-    _checkpoint(cancel_check)
-    emit_job_event(
-        store,
-        job,
-        "investigation.executed",
-        {
-            "plan_session_id": plan_session_id,
-            "finding_count": sum(
-                artifact.type is ArtifactType.VALIDATED_FINDING for artifact in result.artifacts
-            ),
-            "skipped": [skip.reason for skip in result.skipped],
-        },
-    )
-
-
-def _verify_plan_fingerprints(
-    store: ArtifactStore, project_id: str, plan_session_id: str, params: dict
-) -> None:
-    """Last line of defence: recompute each plan's content fingerprint right
-    before executing. The API checked it when the approval was consumed, but a
-    rebuilt plan between enqueue and pickup must fail closed."""
-    from eda_platform.drivers.investigation_orchestrator import _plan_fingerprint
-    from eda_platform.schemas.artifacts import ArtifactType
-    from eda_platform.schemas.investigations import InvestigationPlan
-
-    expected = params.get("plan_fingerprints")
-    expected = expected if isinstance(expected, dict) else {}
-    artifacts = {
-        artifact.id: artifact
-        for artifact in store.list_artifacts(project_id=project_id, session_id=plan_session_id)
-        if artifact.type is ArtifactType.INVESTIGATION_PLAN
-    }
-    for plan_id in [str(item) for item in params.get("plan_ids", [])]:
-        artifact = artifacts.get(plan_id)
-        if artifact is None:
-            raise ValueError("investigation plan changed since approval")
-        plan = InvestigationPlan.model_validate(artifact.payload)
-        if _plan_fingerprint(plan) != str(expected.get(plan_id, "")):
-            raise ValueError("investigation plan changed since approval")
-
-
-def _run_macro_loop_job(
-    store: ArtifactStore,
-    workspace: str,
-    job: dict,
-    params: dict,
-    *,
-    cancel_check: CancelCheck | None = None,
-) -> None:
-    """Run the Ultra macro loop over an executed plan run.
-
-    `run_macro_loop` refuses without a matching pre-authorization artifact on
-    the plan run, which the API writes only after the user approves this exact
-    depth — so a hand-made job row cannot start follow-up rounds.
-    """
-    # Same local-import rationale as the other kinds: keep spawn bootstrap cheap.
-    from eda_platform.core.budget import SessionBudgetPolicy
-    from eda_platform.core.llm_ledger import (
-        BUDGET_EVENT_TYPES,
-        meter_llm_client,
-        restore_run_budget_state,
-    )
-    from eda_platform.drivers.investigation_orchestrator import run_macro_loop
-
-    _checkpoint(cancel_check)
-    project_id = str(job["project_id"])
-    source_session_id = str(params["source_session_id"])
-    plan_session_id = str(params["plan_session_id"])
-    depth = int(params.get("depth", 0))
-    _start_derived_run(
-        store, job, source_session_id=source_session_id, title=f"Macro loop (depth {depth})"
-    )
-    budget_policy = SessionBudgetPolicy()
-    session_budget = restore_run_budget_state(
-        budget_policy,
-        store.list_trace_events(
-            project_id=project_id,
-            session_id=plan_session_id,
-            event_types=BUDGET_EVENT_TYPES,
-        ),
-        run_started_at=_run_started_at(store, project_id, plan_session_id),
-    )
-
-    def emit_usage(event: TraceEvent) -> None:
-        store.append_trace(project_id, event)
-
-    run_llm = meter_llm_client(
-        _build_llm(params),
-        session_id=plan_session_id,
-        emit=emit_usage,
-        budget=session_budget,
-        session_dir=store.session_dir(project_id, plan_session_id),
-    )
-    result = run_macro_loop(
-        project_id=project_id,
-        plan_session_id=plan_session_id,
-        workspace=workspace,
-        llm=run_llm,
-        depth=depth,
-        budget_policy=budget_policy,
-        restored_session_budget=session_budget,
-        cancel_check=cancel_check,
-    )
-    _checkpoint(cancel_check)
-    if result is None:
-        raise ValueError("the macro loop needs analysis depth 2 or higher")
-    followup = [row for row in result.ledger.rounds if row.round_id > 0]
-    emit_job_event(
-        store,
-        job,
-        "macro_loop.finished",
-        {
-            "plan_session_id": plan_session_id,
-            "exit_reason": result.exit_reason,
-            "followup_rounds": len(followup),
-            "new_validated_findings": sum(row.new_validated_findings for row in followup),
-            "tokens": sum(row.tokens for row in result.ledger.rounds),
-            "ledger_artifact_id": result.ledger_artifact_id,
-        },
-    )
-
-
 def _replay_targets(
     project_id: str, source_session_id: str, workspace: str, dataset_ids: list[str]
 ) -> list[Any]:
@@ -1549,7 +1509,7 @@ def _build_llm(
         if settings.provider is LLMProvider.OFFLINE and not llm_provider_explicitly_configured():
             # Recovered jobs lose their per-job env overlay; without this guard
             # they would silently complete offline while looking successful.
-            raise RuntimeError(
+            raise LLMNotConfiguredError(
                 "This job was queued for a live LLM but no provider configuration "
                 "reached the worker; refusing to run silently offline. Set "
                 "EDA_LLM_PROVIDER (or .env) or queue the job with llm='offline'."
@@ -1614,6 +1574,8 @@ def _finish(
     *,
     error_code: str | None = None,
     error_message: str | None = None,
+    error_detail: str | None = None,
+    summary: dict[str, Any] | None = None,
     lifecycle: JobLifecycleRepository | None = None,
     claim: LaunchClaim | None = None,
 ) -> None:
@@ -1624,6 +1586,8 @@ def _finish(
         status,
         error_code=error_code,
         error_message=error_message,
+        error_detail=error_detail,
+        summary=summary,
     )
     lifecycle.materialize_trace(str(job["job_id"]))
 

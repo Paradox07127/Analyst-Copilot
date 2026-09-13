@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "./msw/server";
-import { queueDataOperation } from "./msw/handlers";
+import { customChartView, queueDataOperation } from "./msw/handlers";
 import { renderAppAt, renderAppWithRouterAt } from "./render";
 
 /* vega-embed does real DOM measurement/canvas work that jsdom cannot do; the
@@ -884,6 +884,45 @@ describe("Custom chart builder", () => {
     await waitFor(() => expect(sentBody).not.toBeNull());
     expect(sentBody!["y_column"]).toBeNull();
     expect(sentBody!["drop_outliers"]).toBe(false);
+  });
+
+  it("saves the built chart and reports it landed in this session's charts", async () => {
+    const user = userEvent.setup();
+    const sentBodies: Array<Record<string, unknown>> = [];
+    server.use(
+      http.post(
+        "/api/v1/sessions/:sessionId/charts/custom",
+        async ({ request, params }) => {
+          const body = (await request.json()) as Record<string, unknown>;
+          sentBodies.push(body);
+          return queueDataOperation(
+            String(params["sessionId"]),
+            `job_chart_save_${sentBodies.length}`,
+            customChartView(
+              String(params["sessionId"]),
+              body as Parameters<typeof customChartView>[1],
+            ),
+          );
+        },
+      ),
+    );
+
+    renderAppAt(chartsUrl);
+    await openBuilder(user);
+    expect(
+      screen.queryByRole("button", { name: "Save to charts" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Build chart" }));
+    const save = await screen.findByRole("button", { name: "Save to charts" });
+    await user.click(save);
+
+    expect(
+      await screen.findByText(/now appears in this session's charts/i),
+    ).toBeInTheDocument();
+    expect(sentBodies).toHaveLength(2);
+    expect(sentBodies[0]!["save_to_charts"]).toBe(false);
+    expect(sentBodies[1]!["save_to_charts"]).toBe(true);
   });
 
   it("disables the outlier checkbox only while Y is Row count", async () => {

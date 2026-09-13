@@ -7,10 +7,34 @@ by Y", so a count distribution reported "the strongest is No (total_employees
 
 from __future__ import annotations
 
-from eda_platform.drivers.investigation_orchestrator import _probe_finding_numbers_supported
 from eda_platform.drivers.question_exec import _ranked_finding
-from eda_platform.schemas.questions import QuestionCandidate, QuestionScore
+from eda_platform.schemas.questions import QuestionCandidate, QuestionFinding, QuestionScore
 from eda_platform.tools.report_validator import extract_numbers
+
+
+def _finding_numbers_supported(finding: QuestionFinding) -> bool:
+    """Every number in a finding's text must match its own evidence values.
+
+    Migrated from the retired investigation orchestrator's probe gate; kept as
+    the oracle for `_ranked_finding`'s phrasing regression below.
+    """
+    allowed: list[tuple[float, bool]] = []
+    for reference in finding.evidence:
+        value = reference.value
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            allowed.append((float(value), reference.unit == "percent"))
+    for number, is_percent in extract_numbers(finding.text):
+        supported = False
+        for target, target_is_percent in allowed:
+            if is_percent != target_is_percent:
+                continue
+            tolerance = max(abs(target) * 0.01, 0.01)
+            if abs(number - target) <= tolerance:
+                supported = True
+                break
+        if not supported:
+            return False
+    return True
 
 
 def _candidate(question: str, dataset: str) -> QuestionCandidate:
@@ -50,7 +74,7 @@ def test_count_distribution_is_answered_as_shares_not_a_ranking() -> None:
     assert "1,470" in finding.text
     assert "strongest" not in finding.text
     # Derived shares must be evidence-backed or the validator prunes the claim.
-    assert _probe_finding_numbers_supported(finding)
+    assert _finding_numbers_supported(finding)
 
 
 def test_magnitude_rankings_keep_the_ranking_phrasing() -> None:

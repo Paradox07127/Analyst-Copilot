@@ -32,6 +32,7 @@ from eda_platform.application.dto import (
     QuestionExecutionSummary,
     QuestionSummary,
     QuestionsView,
+    RandomizedDesignConfirmed,
 )
 from eda_platform.application.services.approval_service import (
     ApprovalService,
@@ -48,8 +49,12 @@ from eda_platform.drivers.card_edit import (
     edit_candidate,
 )
 from eda_platform.drivers.question_exec import generate_batch_session_id
-from eda_platform.schemas.artifacts import ArtifactType
+from eda_platform.schemas.artifacts import ArtifactType, DatasetProfile
 from eda_platform.schemas.questions import QuestionCandidate, QuestionCandidateSet
+from eda_platform.tools.causal_experiment import (
+    RANDOMIZED_DESIGN_APPROVAL_KIND,
+    randomized_design_action,
+)
 
 APPROVAL_KIND_QUESTION = "question_execute"
 APPROVAL_KIND_DRAFT = "question_draft"
@@ -311,6 +316,76 @@ class QuestionService:
             question=text,
             llm_mode=llm,
         )
+
+    def confirm_randomized_design(
+        self,
+        session_id: str,
+        *,
+        dataset_id: str,
+        treatment_column: str,
+    ) -> RandomizedDesignConfirmed:
+        """Register the user's declaration that assignment was randomized.
+
+        Randomization cannot be proven from the data, so this credential is the
+        only admission path to run_causal_experiment's randomized tier. It is a
+        pending-action row (same integrity guards as approvals) that the tool
+        reads without consuming; re-confirming re-arms it with a fresh TTL.
+        """
+        dataset_id = dataset_id.strip()
+        treatment_column = treatment_column.strip()
+        if not dataset_id or not treatment_column:
+            raise QuestionValidationError(
+                "A randomized-design confirmation needs a dataset_id and the "
+                "treatment (assignment) column."
+            )
+        project_id = self._project_for_run(session_id)
+        profile = self._dataset_profile(project_id, session_id, dataset_id)
+        if profile is None:
+            raise QuestionValidationError(
+                f"Dataset {dataset_id!r} has no profile in this session; load "
+                "and profile the data before confirming its experiment design."
+            )
+        if treatment_column not in {
+            column.name for column in profile.columns_detail
+        }:
+            raise QuestionValidationError(
+                f"Column {treatment_column!r} does not exist in dataset "
+                f"{dataset_id!r}, so its assignment cannot be confirmed."
+            )
+        digest, _generation, expires_at = self._approvals.register(
+            kind=RANDOMIZED_DESIGN_APPROVAL_KIND,
+            session_id=session_id,
+            project_id=project_id,
+            action=randomized_design_action(
+                dataset_id=dataset_id, treatment_column=treatment_column
+            ),
+            payload={
+                "project_id": project_id,
+                "session_id": session_id,
+                "dataset_id": dataset_id,
+                "treatment_column": treatment_column,
+            },
+        )
+        return RandomizedDesignConfirmed(
+            session_id=session_id,
+            dataset_id=dataset_id,
+            treatment_column=treatment_column,
+            credential_id=digest,
+            expires_at=expires_at,
+        )
+
+    def _dataset_profile(
+        self, project_id: str, session_id: str, dataset_id: str
+    ) -> DatasetProfile | None:
+        for artifact in self._store.list_artifacts(
+            project_id=project_id, session_id=session_id
+        ):
+            if (
+                artifact.type is ArtifactType.DATASET_PROFILE
+                and artifact.payload.get("dataset_id") == dataset_id
+            ):
+                return DatasetProfile.model_validate(artifact.payload)
+        return None
 
     def draft(
         self,

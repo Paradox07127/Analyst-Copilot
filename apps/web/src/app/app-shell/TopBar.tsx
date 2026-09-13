@@ -79,7 +79,8 @@ function jobPhaseLabel(
   if (degraded) return `${name} · degraded`;
   if (phase === "limited") return `${name} · resource limited`;
   if (phase === "completed") return `${name} · complete`;
-  if (phase === "failed" || phase === "cancelled") return `${name} · stopped`;
+  if (phase === "failed") return `${name} · failed`;
+  if (phase === "cancelled") return `${name} · stopped`;
   if (phase === "queued" || phase === "connecting") return `${name} · queued`;
   return `${name} · ${currentPhase?.label ?? "working"}`;
 }
@@ -372,7 +373,8 @@ export function TopBar({
   const sessionId = splitContext?.sessionId ?? route.sessionId;
   const atHome = pathname === "/projects";
   const llm = useLlmStatus();
-  const { trackedJobs, jobSnapshots } = useJobActivity();
+  const { trackedJobs, jobSnapshots, launcherVisible, setLauncherVisible } =
+    useJobActivity();
   const [theme, setThemeState] = useState<Theme>(() => getEffectiveTheme());
   const runDetail = useSessionDetail(sessionId ?? "");
 
@@ -494,6 +496,16 @@ export function TopBar({
             </Marquee>
           </span>
         )}
+        {/* Only while hidden: the panel's own toggle was the single way back,
+          * and it is only reachable through the shortcut nobody remembers. */}
+        {!launcherVisible && (
+          <IconButton
+            label="Show activity button"
+            onClick={() => setLauncherVisible(true)}
+          >
+            <ActivityGlyph />
+          </IconButton>
+        )}
         <IconButton
           label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
           onClick={toggleTheme}
@@ -516,6 +528,14 @@ export function TopBar({
         </IconButton>
       </div>
     </header>
+  );
+}
+
+function ActivityGlyph() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </svg>
   );
 }
 

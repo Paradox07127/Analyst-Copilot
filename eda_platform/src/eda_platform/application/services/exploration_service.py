@@ -6,15 +6,17 @@ import json
 import os
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Literal
 
-from eda_platform.application.dto import JobStatus
+from eda_platform.application.dto import (
+    ExplorationListItemView,
+    JobStatus,
+)
 from eda_platform.application.services.approval_service import (
     ApprovalService,
     payload_digest,
@@ -30,17 +32,13 @@ from eda_platform.core.exploration_journal import (
 from eda_platform.core.exploration_profiles import (
     EXPLORATION_PROFILE_VERSION,
     EXPLORATION_STATISTICAL_POLICY_VERSION,
+    ExplorationHardCaps,
     build_exploration_policy,
-)
-from eda_platform.core.exploration_release_gate import (
-    E4A_RELEASE_GATE_VERSION,
-    TRUSTED_E4A_RELEASE_PUBLIC_KEYS,
-    E4aEvidenceBindings,
-    E4aHardCaps,
-    E4aReleaseCertificate,
-    verify_e4a_release_certificate,
+    exploration_code_fingerprint,
+    exploration_hard_caps,
 )
 from eda_platform.core.exploration_shadow_store import (
+    SHADOW_DIRECTORY,
     ShadowExplorationStore,
     shadow_run_root,
     validate_shadow_run_path,
@@ -90,36 +88,39 @@ from eda_platform.schemas.sessions import TraceEvent
 APPROVAL_KIND_EXPLORATION_START = "exploration_start"
 EXPLORATION_JOB_KIND = "exploration_run"
 EXPLORATION_SESSION_PREFIX = "explsess_"
-EXPLORATION_RELEASE_CERTIFICATE_ENV = "EDA_EXPLORATION_RELEASE_CERTIFICATE_PATH"
-EXPLORATION_RELEASE_TRUSTED_KEYS_ENV = "EDA_EXPLORATION_RELEASE_TRUSTED_KEYS"
 EXPLORATION_EVENTS_PAGE_LIMIT = 500
-_ED25519_PUBLIC_KEY_BYTES = 32
-_MAX_CERTIFICATE_BYTES = 2 << 20
 _AMENDMENT_APPROVER = "system:e4b-api"
 
 
 @dataclass(frozen=True, slots=True)
 class ExplorationRuntimeIdentity:
-    """Build-pinned identities that a signed release must match exactly."""
+    """What this build exposes to a run, recomputed from the live code."""
 
-    release_gate_version: str
-    bindings: E4aEvidenceBindings
-    hard_caps: E4aHardCaps
+    tool_capability_digest: str
+    code_fingerprint: str
+    hard_caps: ExplorationHardCaps
     scoring_policy_version: str
     statistical_policy_version: str
 
 
-# Production packaging must replace this with the image's pinned identity. A
-# certificate or workspace file can never nominate its own trusted runtime.
-TRUSTED_EXPLORATION_RUNTIME_IDENTITY: ExplorationRuntimeIdentity | None = None
+def exploration_runtime_identity() -> ExplorationRuntimeIdentity:
+    """Derive the run identity from the live tool surface and policy versions."""
+    from eda_platform.drivers.exploration import (
+        live_exploration_tool_capability_digest,
+    )
+
+    tool_digest = live_exploration_tool_capability_digest()
+    return ExplorationRuntimeIdentity(
+        tool_capability_digest=tool_digest,
+        code_fingerprint=exploration_code_fingerprint(tool_digest),
+        hard_caps=exploration_hard_caps(),
+        scoring_policy_version=EXPLORATION_PROFILE_VERSION,
+        statistical_policy_version=EXPLORATION_STATISTICAL_POLICY_VERSION,
+    )
 
 
 class ExplorationServiceError(Exception):
     pass
-
-
-class ExplorationReleaseUnavailableError(ExplorationServiceError):
-    """The operator has not installed a valid production release certificate."""
 
 
 class ExplorationNotFoundError(ExplorationServiceError):
@@ -186,128 +187,6 @@ def _file_identity(path: Path) -> tuple[int, int, int, int]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
-@dataclass(frozen=True, slots=True)
-class ExplorationReleaseTrust:
-    """What one composition root is allowed to trust for E4b, resolved once."""
-
-    certificate: E4aReleaseCertificate | None
-    public_keys: Mapping[str, bytes]
-    runtime_identity: ExplorationRuntimeIdentity | None
-
-
-def operator_pinned_release_public_keys() -> Mapping[str, bytes]:
-    """Read issuer keys an operator pinned in the environment.
-
-    The shipped map stays empty on purpose: neither a workspace file nor the
-    certificate may nominate its own trust root. The process environment is a
-    different class of input -- it is owned by whoever starts the server, the
-    same authority that supplies the certificate path -- so a local operator can
-    open E4b without patching the production constant. A malformed value raises
-    instead of falling back to the empty map: a typo in a trust root must be
-    loud, never a silent downgrade to "no trust".
-    """
-    raw = os.environ.get(EXPLORATION_RELEASE_TRUSTED_KEYS_ENV, "").strip()
-    if not raw:
-        return TRUSTED_E4A_RELEASE_PUBLIC_KEYS
-    keys: dict[str, bytes] = {}
-    for item in raw.split(","):
-        key_id, separator, hex_key = item.strip().partition(":")
-        if not separator or not key_id.strip():
-            raise ValueError(
-                f"{EXPLORATION_RELEASE_TRUSTED_KEYS_ENV} entries must be "
-                "'<key_id>:<hex_public_key>'"
-            )
-        try:
-            public_key = bytes.fromhex(hex_key.strip())
-        except ValueError as exc:
-            raise ValueError(
-                f"{EXPLORATION_RELEASE_TRUSTED_KEYS_ENV} public key for "
-                f"{key_id.strip()!r} is not hexadecimal"
-            ) from exc
-        if len(public_key) != _ED25519_PUBLIC_KEY_BYTES:
-            raise ValueError(
-                f"{EXPLORATION_RELEASE_TRUSTED_KEYS_ENV} public key for "
-                f"{key_id.strip()!r} must be {_ED25519_PUBLIC_KEY_BYTES} bytes"
-            )
-        keys[key_id.strip()] = public_key
-    return MappingProxyType(keys)
-
-
-def _operator_pinned_runtime_identity(
-    certificate: E4aReleaseCertificate,
-) -> ExplorationRuntimeIdentity:
-    """Bind the installed certificate to this build's own version constants.
-
-    The bindings and caps come from the certificate because the operator that
-    pinned its issuer key is vouching for them. The three version fields come
-    from the running code, so a certificate issued under a different gate,
-    scoring or statistical policy is still rejected -- and the worker still
-    recomputes the tool digest against the live tool inventory.
-    """
-    return ExplorationRuntimeIdentity(
-        release_gate_version=E4A_RELEASE_GATE_VERSION,
-        bindings=certificate.bindings,
-        hard_caps=certificate.hard_caps,
-        scoring_policy_version=EXPLORATION_PROFILE_VERSION,
-        statistical_policy_version=EXPLORATION_STATISTICAL_POLICY_VERSION,
-    )
-
-
-def resolve_configured_release_trust() -> ExplorationReleaseTrust:
-    """Resolve certificate, issuer keys and runtime identity as one decision."""
-    public_keys = operator_pinned_release_public_keys()
-    pinned_by_operator = public_keys is not TRUSTED_E4A_RELEASE_PUBLIC_KEYS
-    identity = TRUSTED_EXPLORATION_RUNTIME_IDENTITY
-    raw = os.environ.get(EXPLORATION_RELEASE_CERTIFICATE_ENV, "").strip()
-    if not raw:
-        return ExplorationReleaseTrust(None, public_keys, identity)
-    try:
-        path = Path(raw).expanduser()
-        if not path.is_file() or path.stat().st_size > _MAX_CERTIFICATE_BYTES:
-            return ExplorationReleaseTrust(None, public_keys, identity)
-        certificate = E4aReleaseCertificate.model_validate_json(path.read_bytes())
-        verified = verify_e4a_release_certificate(
-            certificate,
-            trusted_public_keys=public_keys,
-        )
-        if pinned_by_operator and identity is None:
-            identity = _operator_pinned_runtime_identity(verified)
-        assert_certificate_matches_runtime(verified, identity)
-        return ExplorationReleaseTrust(verified, public_keys, identity)
-    except (OSError, ValueError):
-        return ExplorationReleaseTrust(None, public_keys, identity)
-
-
-def load_configured_release_certificate(
-    *,
-    trusted_release_public_keys: Mapping[str, bytes] | None = None,
-    trusted_runtime_identity: ExplorationRuntimeIdentity | None = None,
-) -> E4aReleaseCertificate | None:
-    """Load the operator-installed certificate; any ambiguity leaves E4b closed."""
-    if trusted_release_public_keys is None and trusted_runtime_identity is None:
-        return resolve_configured_release_trust().certificate
-    raw = os.environ.get(EXPLORATION_RELEASE_CERTIFICATE_ENV, "").strip()
-    if not raw:
-        return None
-    try:
-        path = Path(raw).expanduser()
-        if not path.is_file() or path.stat().st_size > _MAX_CERTIFICATE_BYTES:
-            return None
-        certificate = E4aReleaseCertificate.model_validate_json(path.read_bytes())
-        verified = verify_e4a_release_certificate(
-            certificate,
-            trusted_public_keys=(
-                TRUSTED_E4A_RELEASE_PUBLIC_KEYS
-                if trusted_release_public_keys is None
-                else trusted_release_public_keys
-            ),
-        )
-        assert_certificate_matches_runtime(verified, trusted_runtime_identity)
-        return verified
-    except (OSError, ValueError):
-        return None
-
-
 class ExplorationService:
     def __init__(
         self,
@@ -315,23 +194,13 @@ class ExplorationService:
         approvals: ApprovalService,
         jobs: JobService,
         *,
-        release_certificate: E4aReleaseCertificate | None,
-        trusted_release_public_keys: Mapping[str, bytes] = (
-            TRUSTED_E4A_RELEASE_PUBLIC_KEYS
-        ),
-        trusted_runtime_identity: ExplorationRuntimeIdentity | None = (
-            TRUSTED_EXPLORATION_RUNTIME_IDENTITY
-        ),
+        runtime_identity: ExplorationRuntimeIdentity | None = None,
         source_snapshot_resolver: SourceSnapshotResolver | None = None,
     ) -> None:
         self._store = store
         self._approvals = approvals
         self._jobs = jobs
-        self._release_certificate = release_certificate
-        self._trusted_release_public_keys = MappingProxyType(
-            dict(trusted_release_public_keys)
-        )
-        self._trusted_runtime_identity = trusted_runtime_identity
+        self._runtime_identity = runtime_identity
         self._source_snapshot_resolver = (
             source_snapshot_resolver or self._resolve_source_snapshot
         )
@@ -339,38 +208,11 @@ class ExplorationService:
             tuple[Path, tuple[int, int, int, int], _WorkflowProjectionParts] | None
         ) = None
 
-    def require_release_certificate(
-        self, *, provider: str | None = None
-    ) -> E4aReleaseCertificate:
-        """Revalidate on every entry, including reads and each SSE poll."""
-        certificate = self._release_certificate
-        if certificate is None:
-            raise ExplorationReleaseUnavailableError(
-                "Exploration API is disabled until a production E4a release "
-                "certificate is installed."
-            )
-        try:
-            validated = verify_e4a_release_certificate(
-                certificate,
-                trusted_public_keys=self._trusted_release_public_keys,
-            )
-            assert_certificate_matches_runtime(
-                validated, self._trusted_runtime_identity
-            )
-        except (TypeError, ValueError) as exc:
-            raise ExplorationReleaseUnavailableError(
-                "The installed E4a release certificate failed integrity validation."
-            ) from exc
-        providers = {item.casefold() for item in validated.providers}
-        if not providers:
-            raise ExplorationReleaseUnavailableError(
-                "The installed E4a release certificate contains no production provider."
-            )
-        if provider is not None and provider.casefold() not in providers:
-            raise ExplorationReleaseUnavailableError(
-                f"Provider {provider!r} is not covered by the installed E4a release certificate."
-            )
-        return validated
+    @property
+    def runtime_identity(self) -> ExplorationRuntimeIdentity:
+        if self._runtime_identity is None:
+            self._runtime_identity = exploration_runtime_identity()
+        return self._runtime_identity
 
     def prepare(
         self,
@@ -382,17 +224,17 @@ class ExplorationService:
         thinking_level: ExplorationTier,
         provider: str,
     ) -> ExplorationPrepared:
-        certificate = self.require_release_certificate(provider=provider)
+        identity = self.runtime_identity
         snapshot = self._source_snapshot_resolver(session_id, dataset_ids)
         policy = build_exploration_policy(
             tier=thinking_level,
             dataset_scope=snapshot.dataset_ids,
-            tool_capability_digest=certificate.bindings.tool_capability_digest,
+            tool_capability_digest=identity.tool_capability_digest,
             mode=mode,
             goal=goal,
         )
-        assert_policy_matches_runtime(policy, self._trusted_runtime_identity)
-        assert_policy_covered_by_certificate(policy, certificate)
+        assert_policy_matches_runtime(policy, identity)
+        assert_budget_within_hard_caps(policy.budget, identity.hard_caps)
         exploration_id = f"expl_{uuid.uuid4().hex}"
         prepared_at = datetime.now(UTC)
         action = {
@@ -402,7 +244,6 @@ class ExplorationService:
             "project_id": snapshot.project_id,
             "policy_fingerprint": policy.policy_fingerprint,
             "data_state_witness": snapshot.data_state_witness,
-            "release_certificate_digest": certificate.certificate_digest,
             "provider": provider.casefold(),
             "prepared_at": prepared_at.isoformat(),
         }
@@ -435,7 +276,6 @@ class ExplorationService:
             action_hash=digest,
             approval_token=approval_token,
             expires_at=expires_at,
-            release_certificate_digest=certificate.certificate_digest,
         )
 
     def start(
@@ -449,7 +289,6 @@ class ExplorationService:
         llm_env: dict[str, str] | None,
         idempotency_key: str | None,
     ) -> ExplorationStarted:
-        certificate = self.require_release_certificate(provider=provider)
         return self._approvals.run_idempotent_producer(
             action_hash,
             session_id=session_id,
@@ -458,7 +297,6 @@ class ExplorationService:
                 session_id,
                 action_hash=action_hash,
                 approval_token=approval_token,
-                certificate=certificate,
                 provider=provider,
                 payload_policy=payload_policy,
                 llm_env=llm_env,
@@ -473,7 +311,6 @@ class ExplorationService:
         *,
         action_hash: str,
         approval_token: str,
-        certificate: E4aReleaseCertificate,
         provider: str,
         payload_policy: str | None,
         llm_env: dict[str, str] | None,
@@ -492,7 +329,6 @@ class ExplorationService:
                     exploration_id=exploration_id,
                     action_hash=action_hash,
                     approval_payload_digest=digest,
-                    release_certificate_digest=certificate.certificate_digest,
                     provider=provider,
                     payload_policy=payload_policy,
                 )
@@ -516,7 +352,6 @@ class ExplorationService:
                 session_id,
                 action_hash=action_hash,
                 payload=payload,
-                certificate=certificate,
                 provider=provider,
             )
 
@@ -534,7 +369,7 @@ class ExplorationService:
         journal.initialize(
             exploration_id=metadata.exploration_id,
             policy=metadata.policy,
-            code_fingerprint=certificate.bindings.code_fingerprint,
+            code_fingerprint=self.runtime_identity.code_fingerprint,
             data_state_witness=metadata.data_state_witness,
         )
         approval_payload_digest = payload_digest(payload)
@@ -543,7 +378,6 @@ class ExplorationService:
             exploration_id=metadata.exploration_id,
             action_hash=action_hash,
             approval_payload_digest=approval_payload_digest,
-            release_certificate_digest=certificate.certificate_digest,
             provider=provider_name,
             payload_policy=payload_policy,
         )
@@ -555,8 +389,7 @@ class ExplorationService:
                 exploration_id=metadata.exploration_id,
                 policy=metadata.policy.model_dump(mode="json"),
                 data_state_witness=metadata.data_state_witness,
-                code_fingerprint=certificate.bindings.code_fingerprint,
-                release_certificate_digest=certificate.certificate_digest,
+                code_fingerprint=self.runtime_identity.code_fingerprint,
                 provider=provider_name,
                 payload_policy=payload_policy,
                 llm_env=llm_env,
@@ -573,11 +406,55 @@ class ExplorationService:
         )
 
     def get(self, session_id: str, exploration_id: str) -> ExplorationView:
-        certificate = self.require_release_certificate()
-        metadata = self._metadata(
-            session_id, exploration_id, certificate=certificate
-        )
-        return self._view(metadata)
+        return self._view(self._metadata(session_id, exploration_id))
+
+    def list_for_session(
+        self, session_id: str
+    ) -> tuple[ExplorationListItemView, ...]:
+        """The session's deep-dive history, newest first.
+
+        Tolerant on purpose: a run whose metadata or journal is unreadable is
+        skipped instead of failing the whole listing, because this endpoint is
+        how the UI finds runs back after losing its local state.
+        """
+        shadow_root = self._store.root / SHADOW_DIRECTORY
+        items: list[ExplorationListItemView] = []
+        try:
+            candidates = sorted(shadow_root.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return ()
+        for run_root in candidates:
+            metadata_path = run_root / "api-request.json"
+            try:
+                metadata = ExplorationRunMetadata.model_validate_json(
+                    metadata_path.read_bytes()
+                )
+            except (OSError, ValueError):
+                continue
+            if metadata.source_session_id != session_id:
+                continue
+            try:
+                state = self._journal(metadata.exploration_id).rebuild()
+            except Exception:  # noqa: BLE001 - one broken journal must not hide the rest
+                continue
+            if state is None:
+                continue
+            items.append(
+                ExplorationListItemView(
+                    exploration_id=metadata.exploration_id,
+                    session_id=metadata.source_session_id,
+                    project_id=metadata.project_id,
+                    goal=metadata.policy.goal or "Explore freely",
+                    mode=metadata.policy.mode,
+                    thinking_level=metadata.policy.thinking_level,
+                    status=state.status,
+                    stop_reason=state.stop_reason,
+                    created_at=metadata.created_at,
+                    report_available=state.final_report_ref is not None,
+                )
+            )
+        items.sort(key=lambda item: item.created_at, reverse=True)
+        return tuple(items)
 
     def pause(self, session_id: str, exploration_id: str) -> ExplorationView:
         metadata = self._metadata(session_id, exploration_id)
@@ -599,13 +476,11 @@ class ExplorationService:
         llm_env: dict[str, str] | None,
         idempotency_key: str | None,
     ) -> ExplorationStarted:
-        certificate = self.require_release_certificate(provider=provider)
-        metadata = self._metadata(session_id, exploration_id, certificate=certificate)
+        metadata = self._metadata(session_id, exploration_id)
         content = {
             "operation": "resume",
             "source_session_id": session_id,
             "exploration_id": exploration_id,
-            "release_certificate_digest": certificate.certificate_digest,
             "provider": provider.casefold(),
             "payload_policy": payload_policy,
         }
@@ -660,8 +535,7 @@ class ExplorationService:
                 exploration_id=exploration_id,
                 policy=metadata.policy.model_dump(mode="json"),
                 data_state_witness=metadata.data_state_witness,
-                code_fingerprint=certificate.bindings.code_fingerprint,
-                release_certificate_digest=certificate.certificate_digest,
+                code_fingerprint=self.runtime_identity.code_fingerprint,
                 provider=provider.casefold(),
                 payload_policy=payload_policy,
                 llm_env=llm_env,
@@ -703,10 +577,7 @@ class ExplorationService:
         reason: str,
         idempotency_key: str,
     ) -> ExplorationBudgetExtended:
-        certificate = self.require_release_certificate()
-        metadata = self._metadata(
-            session_id, exploration_id, certificate=certificate
-        )
+        metadata = self._metadata(session_id, exploration_id)
         journal = self._journal(exploration_id)
         key = idempotency_key.strip()
         if not key:
@@ -737,7 +608,9 @@ class ExplorationService:
                 events = journal.events()
                 effective = _effective_budget(metadata.policy.budget, events)
                 proposed = apply_budget_increase(effective, increase)
-                assert_budget_covered_by_certificate(proposed, certificate)
+                assert_budget_within_hard_caps(
+                    proposed, self.runtime_identity.hard_caps
+                )
                 amended = journal.amend_budget(
                     amendment_id=amendment_id, increase=increase
                 )
@@ -783,7 +656,6 @@ class ExplorationService:
         *,
         action_hash: str,
         payload: dict[str, Any],
-        certificate: E4aReleaseCertificate,
         provider: str,
     ) -> tuple[ExplorationRunMetadata, str]:
         if str(payload.get("source_session_id", "")) != session_id:
@@ -796,12 +668,6 @@ class ExplorationService:
             raise ExplorationValidationError(
                 "provider settings changed since exploration approval"
             )
-        if str(payload.get("release_certificate_digest", "")) != (
-            certificate.certificate_digest
-        ):
-            raise ExplorationReleaseUnavailableError(
-                "the approval is bound to a different E4a release certificate"
-            )
         try:
             policy = ExplorationPolicy.model_validate(payload.get("policy"))
             assert_policy_sealed(policy)
@@ -813,12 +679,10 @@ class ExplorationService:
             raise ExplorationValidationError(
                 "the approved exploration policy fingerprint does not match"
             )
-        if policy.tool_capability_digest != certificate.bindings.tool_capability_digest:
-            raise ExplorationReleaseUnavailableError(
-                "the approved tool capability digest is not covered by the certificate"
-            )
-        assert_policy_covered_by_certificate(policy, certificate)
-        assert_policy_matches_runtime(policy, self._trusted_runtime_identity)
+        assert_policy_matches_runtime(policy, self.runtime_identity)
+        assert_budget_within_hard_caps(
+            policy.budget, self.runtime_identity.hard_caps
+        )
         snapshot = self._source_snapshot_resolver(session_id, policy.dataset_scope)
         expected_witness = str(payload.get("data_state_witness", ""))
         if snapshot.data_state_witness != expected_witness:
@@ -841,7 +705,6 @@ class ExplorationService:
                 project_id=project_id,
                 policy=policy,
                 data_state_witness=expected_witness,
-                release_certificate_digest=certificate.certificate_digest,
                 approval_action_hash=action_hash,
                 created_at=created_at,
             ),
@@ -852,10 +715,7 @@ class ExplorationService:
         self,
         session_id: str,
         exploration_id: str,
-        *,
-        certificate: E4aReleaseCertificate | None = None,
     ) -> ExplorationRunMetadata:
-        current = certificate or self.require_release_certificate()
         path = self._metadata_path(exploration_id)
         try:
             metadata = ExplorationRunMetadata.model_validate_json(path.read_bytes())
@@ -867,24 +727,13 @@ class ExplorationService:
             ) from exc
         if metadata.exploration_id != exploration_id or metadata.source_session_id != session_id:
             raise ExplorationNotFoundError(exploration_id)
-        if metadata.release_certificate_digest != current.certificate_digest:
-            raise ExplorationReleaseUnavailableError(
-                "the exploration is bound to a different E4a release certificate"
-            )
-        if metadata.policy.tool_capability_digest != current.bindings.tool_capability_digest:
-            raise ExplorationReleaseUnavailableError(
-                "the exploration tool capability digest is not covered by the certificate"
-            )
-        assert_policy_covered_by_certificate(metadata.policy, current)
-        assert_policy_matches_runtime(
-            metadata.policy, self._trusted_runtime_identity
-        )
-        assert_budget_covered_by_certificate(
+        assert_policy_matches_runtime(metadata.policy, self.runtime_identity)
+        assert_budget_within_hard_caps(
             _effective_budget(
                 metadata.policy.budget,
                 self._journal(exploration_id).events(),
             ),
-            current,
+            self.runtime_identity.hard_caps,
         )
         try:
             assert_policy_sealed(metadata.policy)
@@ -1393,7 +1242,6 @@ class ExplorationService:
         exploration_id: str,
         action_hash: str,
         approval_payload_digest: str,
-        release_certificate_digest: str,
         provider: str,
         payload_policy: str | None,
     ) -> dict[str, object]:
@@ -1403,7 +1251,6 @@ class ExplorationService:
             "exploration_id": exploration_id,
             "action_hash": action_hash,
             "approval_payload_digest": approval_payload_digest,
-            "release_certificate_digest": release_certificate_digest,
             "provider": provider.casefold(),
             "payload_policy": payload_policy,
         }
@@ -1488,99 +1335,40 @@ def resolve_exploration_source_snapshot(
     )
 
 
-def assert_policy_covered_by_certificate(
-    policy: ExplorationPolicy,
-    certificate: E4aReleaseCertificate,
-) -> None:
-    """Refuse product caps larger than those exercised by certified evidence."""
-    assert_budget_covered_by_certificate(policy.budget, certificate)
-
-
-def assert_certificate_matches_runtime(
-    certificate: E4aReleaseCertificate,
-    trusted: ExplorationRuntimeIdentity | None,
-) -> None:
-    """Require the signed evidence to name the exact deployed build and caps."""
-    if trusted is None:
-        raise ValueError("trusted exploration runtime identity is unavailable")
-    if trusted.release_gate_version != E4A_RELEASE_GATE_VERSION:
-        raise ValueError("trusted runtime release-gate version is stale")
-    if certificate.gate_version != trusted.release_gate_version:
-        raise ValueError("certificate release-gate version does not match runtime")
-    if certificate.bindings != trusted.bindings:
-        raise ValueError("certificate evidence/build/tool bindings do not match runtime")
-    if certificate.hard_caps != trusted.hard_caps:
-        raise ValueError("certificate hard caps do not match runtime")
-    if trusted.scoring_policy_version != EXPLORATION_PROFILE_VERSION:
-        raise ValueError("trusted runtime exploration profile does not match code")
-    if (
-        trusted.statistical_policy_version
-        != EXPLORATION_STATISTICAL_POLICY_VERSION
-    ):
-        raise ValueError("trusted runtime statistical policy does not match code")
-
-
 def assert_policy_matches_runtime(
     policy: ExplorationPolicy,
-    trusted: ExplorationRuntimeIdentity | None,
+    runtime: ExplorationRuntimeIdentity,
 ) -> None:
-    if trusted is None:
-        raise ExplorationReleaseUnavailableError(
-            "The trusted exploration runtime identity is unavailable."
-        )
+    """Refuse a sealed policy that no longer describes the running build."""
     if (
-        policy.tool_capability_digest != trusted.bindings.tool_capability_digest
-        or policy.scoring_policy_version != trusted.scoring_policy_version
-        or policy.statistical_policy_version != trusted.statistical_policy_version
+        policy.tool_capability_digest != runtime.tool_capability_digest
+        or policy.scoring_policy_version != runtime.scoring_policy_version
+        or policy.statistical_policy_version != runtime.statistical_policy_version
     ):
-        raise ExplorationReleaseUnavailableError(
-            "The exploration policy does not match the trusted runtime identity."
+        raise ExplorationConflictError(
+            "The exploration policy does not match this build's tool surface "
+            "or policy versions."
         )
 
 
-def assert_budget_covered_by_certificate(
+def assert_budget_within_hard_caps(
     budget: ExplorationBudgetPolicy,
-    certificate: E4aReleaseCertificate,
+    caps: ExplorationHardCaps,
 ) -> None:
-    """Refuse effective (including amended) caps beyond certified evidence."""
-    caps = certificate.hard_caps
+    """Refuse an effective (including amended) cap beyond the build ceiling."""
     checks: tuple[tuple[str, int | float | Decimal | None, Decimal], ...] = (
         ("llm requests", budget.llm.max_requests, Decimal(caps.max_llm_requests)),
-        (
-            "total tokens",
-            budget.llm.max_total_tokens,
-            Decimal(caps.max_total_tokens),
-        ),
-        (
-            "cost",
-            budget.llm.max_cost_usd,
-            Decimal(str(caps.max_cost_usd)),
-        ),
-        (
-            "wall time",
-            budget.llm.max_wall_seconds,
-            Decimal(str(caps.max_wall_seconds)),
-        ),
-        (
-            "tool calls",
-            budget.max_successful_tool_calls,
-            Decimal(caps.max_tool_calls),
-        ),
-        (
-            "rows scanned",
-            budget.max_rows_scanned,
-            Decimal(caps.max_rows_scanned),
-        ),
-        (
-            "result cells",
-            budget.max_result_cells,
-            Decimal(caps.max_cells_scanned),
-        ),
+        ("total tokens", budget.llm.max_total_tokens, Decimal(caps.max_total_tokens)),
+        ("cost", budget.llm.max_cost_usd, caps.max_cost_usd),
+        ("wall time", budget.llm.max_wall_seconds, caps.max_wall_seconds),
+        ("tool calls", budget.max_successful_tool_calls, Decimal(caps.max_tool_calls)),
+        ("rows scanned", budget.max_rows_scanned, Decimal(caps.max_rows_scanned)),
+        ("result cells", budget.max_result_cells, Decimal(caps.max_cells_scanned)),
     )
-    for name, value, certified_maximum in checks:
-        if value is None or Decimal(str(value)) > certified_maximum:
-            raise ExplorationReleaseUnavailableError(
-                f"The {name} policy cap is not covered by the E4a release certificate."
+    for name, value, ceiling in checks:
+        if value is None or Decimal(str(value)) > ceiling:
+            raise ExplorationValidationError(
+                f"The {name} cap is above the exploration hard limit."
             )
 
 

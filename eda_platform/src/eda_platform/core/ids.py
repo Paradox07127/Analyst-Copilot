@@ -76,10 +76,10 @@ def is_internal_session_id(session_id: str) -> bool:
 # question batches (`qsess_`), skill replays (`ssess_`), relationship
 # validations (`rvsess_`), relationship discovery (`rdsess_`), on-demand report
 # generation (`rpsess_`) and what-if forks (`fksess_`, the job's lifecycle run —
-# the forked analysis itself gets an ordinary `run_` id). The investigation
-# governance loop adds card drafting (`qdsess_`), plan building (`ipsess_`),
-# plan execution (`ixsess_`), the macro loop (`mlsess_`) and the plan runs
-# themselves (`investigation_`, minted by the orchestrator). The Decision Story
+# the forked analysis itself gets an ordinary `run_` id). Card drafting uses
+# `qdsess_`; the retired investigation branch minted `ipsess_`, `ixsess_`,
+# `mlsess_` and `investigation_` runs, which stay listed so legacy workspaces
+# keep hiding them from top-level run listings. The Decision Story
 # slice adds brief drafting (`sbsess_`) and decision-report generation
 # (`drsess_`); both are lifecycle-only, because their drivers write onto runs
 # they mint themselves. They are real, deep-linkable runs, but listing them

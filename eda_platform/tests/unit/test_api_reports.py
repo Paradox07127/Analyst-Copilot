@@ -71,6 +71,8 @@ def test_get_report_none_is_200(client: TestClient) -> None:
         "status": "none",
         "markdown": "",
         "generated_at": None,
+        "degraded": False,
+        "degraded_reason": None,
     }
 
 

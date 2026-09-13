@@ -31,12 +31,10 @@ class ArtifactType(StrEnum):
     VALUE_MAP = "ValueMap"
     QUESTION_CANDIDATE_SET = "QuestionCandidateSet"
     INVESTIGATION_PLAN = "InvestigationPlan"
-    INVESTIGATION_APPROVAL = "InvestigationApproval"
     VALIDATED_FINDING = "ValidatedFinding"
     INVESTIGATION_RECORD = "InvestigationRecord"
     SYNTHESIS_BRIEF = "SynthesisBrief"
     DECISION_REPORT = "DecisionReport"
-    DEEP_INVESTIGATION_RESULT = "DeepInvestigationResult"
     DECISION_COVERAGE = "DecisionCoverage"
     QUESTION_EXECUTION_RESULT = "QuestionExecutionResult"
     CLEANING_RECIPE = "CleaningRecipe"
@@ -44,16 +42,28 @@ class ArtifactType(StrEnum):
     STAT_TEST_RESULT = "StatTestResult"
     MODEL_CARD = "ModelCard"
     ANOMALY_SCREEN_RESULT = "AnomalyScreenResult"
+    SEGMENTATION_RESULT = "SegmentationResult"
     SESSION_METRICS = "SessionMetrics"
     RESOURCE_PREFLIGHT = "ResourcePreflight"
     COLUMN_ROLE_SET = "ColumnRoleSet"
     EVIDENCE_INTERLEAVE_TRANSCRIPT = "EvidenceInterleaveTranscript"
-    FOLLOW_UP_PROPOSAL_SET = "FollowUpProposalSet"
-    LOOP_LEDGER = "LoopLedger"
     EDA_HANDOFF = "EdaHandoff"
     AGENT_HANDOFF = "AgentHandoff"
     EVIDENCE_RECEIPT = "EvidenceReceipt"
+    EXPLORATION_FINDING_SET = "ExplorationFindingSet"
     WORKFLOW_EVAL_TRIAL = "WorkflowEvalTrial"
+
+
+# Persisted by the retired investigation branch (removed 2026-08, T4b); old
+# workspaces still hold these rows, so store reads must skip them, not crash.
+RETIRED_ARTIFACT_TYPES = frozenset(
+    {
+        "InvestigationApproval",
+        "DeepInvestigationResult",
+        "FollowUpProposalSet",
+        "LoopLedger",
+    }
+)
 
 
 class EvidenceRef(BaseModel):

@@ -7,9 +7,13 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from eda_platform.schemas.exploration import ExplorationRunStatus, ExplorationStopReason
 from eda_platform.schemas.handoff import AgentHandoffV3
 from eda_platform.schemas.publication import PublicationFreshness, PublicationReadiness
-from eda_platform.schemas.resource_metrics import AutoEdaResourceUsage
+from eda_platform.schemas.resource_metrics import (
+    AutoEdaResourceUsage,
+    EdaResourceLimitGuidance,
+)
 
 
 class ProjectSummary(BaseModel):
@@ -50,6 +54,9 @@ class SessionDetail(SessionSummary):
     source_session_id: str | None = None
     artifact_type_counts: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    resource_limit: EdaResourceLimitGuidance | None = None
+    """Present only on a run the resource gate stopped, so the page that opens
+    after a reload can still explain the stop and the ways out."""
 
 
 class Page[T](BaseModel):
@@ -109,6 +116,9 @@ class ReportView(BaseModel):
     status: str
     markdown: str
     generated_at: datetime | None = None
+    degraded: bool = False
+    """True when the stored report came from the deterministic fallback."""
+    degraded_reason: str | None = None
 
 
 class ArtifactSummary(BaseModel):
@@ -172,6 +182,30 @@ class JobCreated(BaseModel):
     session_id: str
     status: str
     events_url: str
+
+
+class SessionJobSummary(BaseModel):
+    """One row of a session's job history; params reduced to their run linkage."""
+
+    job_id: str
+    session_id: str
+    project_id: str
+    kind: str
+    status: str
+    cancel_requested: bool = False
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    source_session_id: str | None = None
+    """Run the operation was requested from, when the job runs on a derived run."""
+    events_url: str
+
+
+class SessionJobList(BaseModel):
+    session_id: str
+    jobs: list[SessionJobSummary] = Field(default_factory=list)
 
 
 class JobEvent(BaseModel):
@@ -500,7 +534,7 @@ class QuestionSummary(BaseModel):
     """False when deterministic feasibility blocks execution."""
     execution: QuestionExecutionSummary | None = None
     card_version: int = 1
-    """Bumped by every card edit; an investigation plan records the version it planned."""
+    """Bumped by every card edit."""
     value_hypothesis: str = ""
     success_criterion: str = ""
     data_signal: str = ""
@@ -539,6 +573,21 @@ class QuestionExecutionStarted(BaseModel):
     question_id: str
     execution_session_id: str
     job: JobCreated
+
+
+class RandomizedDesignConfirmed(BaseModel):
+    """User-issued credential: assignment in this column was randomized.
+
+    The credential admits run_causal_experiment's randomized tier (T8c tier B)
+    for this dataset + treatment column until it expires; the tool re-verifies
+    it and records its id on the evidence receipt.
+    """
+
+    session_id: str
+    dataset_id: str
+    treatment_column: str
+    credential_id: str
+    expires_at: datetime
 
 
 class FindingEvidenceRef(BaseModel):
@@ -1093,6 +1142,15 @@ class ChatPendingPlanList(BaseModel):
     plans: list[ChatPendingPlan] = Field(default_factory=list)
 
 
+class ChatTurnCancelled(BaseModel):
+    """Ack for a stop request; the turn itself settles through its stream."""
+
+    session_id: str
+    message_id: str | None = None
+    cancel_requested: bool = False
+    """False when no turn was in flight — already finished, or never started."""
+
+
 class BoardCard(BaseModel):
     id: str = Field(max_length=64)
     title: str = Field(max_length=300)
@@ -1345,9 +1403,6 @@ class SessionMetricsView(BaseModel):
     findings_dedup_merged: int = 0
     domain_metric_questions: int = 0
     domain_metrics_skipped: int = 0
-    macro_loop_rounds: int = 0
-    macro_loop_new_findings: int = 0
-    macro_loop_discard_rounds: int = 0
     question_answered: int = 0
     question_abstained: int = 0
     question_failed: int = 0
@@ -1367,6 +1422,12 @@ class SessionMetricsView(BaseModel):
     steps: list[SessionStepMetricRow] = Field(default_factory=list)
     artifact_counts: dict[str, int] = Field(default_factory=dict)
     generated_at: datetime | None = None
+    # Deep-dive spend runs in its own shadow ledger, so it is reported beside
+    # the session totals rather than silently folded into them.
+    exploration_runs: int = 0
+    exploration_llm_calls: int = 0
+    exploration_total_tokens: int = 0
+    exploration_est_cost_usd: float | None = None
 
 
 class TraceEventRow(BaseModel):
@@ -1875,11 +1936,10 @@ class SettingsView(BaseModel):
     usd_per_1k_completion: float = 0.0
     """0 means "use the built-in model pricing defaults" (core.llm)."""
     analysis_depth: int = 0
-    """Exploration tier: 0 Quick, 1 Standard, 2/3 Deep.
-
-    The legacy investigation path still uses 1+ for deep analysis and 2+ for
-    its macro loop; no additional product-facing tier vocabulary is created.
-    """
+    """Exploration tier: 0 Quick, 1 Standard, 2/3 Deep."""
+    max_working_set_bytes: int = 2 << 30
+    """Memory one analysis may hold. The limit that stops real runs."""
+    max_rows_per_dataset: int = 10_000_000
     dev_mode: bool = False
     api_key_set: bool = False
     api_key_last4: str = ""
@@ -1919,6 +1979,8 @@ class SettingsPatch(BaseModel):
     usd_per_1k_completion: float | None = None
     analysis_depth: int | None = None
     """0-3, mapped centrally to Quick / Standard / Deep exploration tiers."""
+    max_working_set_bytes: int | None = None
+    max_rows_per_dataset: int | None = None
     dev_mode: bool | None = None
     api_key: str | None = Field(default=None, repr=False)
     clear_api_key: bool | None = None
@@ -1982,9 +2044,6 @@ class SystemCapabilitiesView(BaseModel):
     pdf_export_available: bool
     pdf_export_hint: str = ""
     """Install instructions; empty when PDF export already works."""
-    exploration_available: bool = False
-    exploration_hint: str = ""
-    """Exploration is visible only with a verified, runtime-bound E4a release."""
 
 
 class SandboxStatusView(BaseModel):
@@ -2096,186 +2155,6 @@ class QuestionDraftStarted(BaseModel):
     job: JobCreated
 
 
-class InvestigationGateView(BaseModel):
-    name: str
-    status: str
-    """passed | warning | failed"""
-    reason: str = ""
-
-
-class InvestigationPlanView(BaseModel):
-    """One investigation plan plus its decision and terminal outcome."""
-
-    plan_id: str
-    """Artifact id of the InvestigationPlan; approval targets this artifact."""
-    plan_session_id: str
-    investigation_id: str
-    question_id: str
-    question: str
-    method_family: str = ""
-    method_recipe: str = ""
-    card_version: int = 1
-    status: str = "pending"
-    """pending | approved | rejected | executed"""
-    plan_status: str = "planned"
-    """The plan artifact's own status (planned | needs_data | ...)."""
-    execution_ready: bool = False
-    allowed_tools: list[str] = Field(default_factory=list)
-    target_datasets: list[str] = Field(default_factory=list)
-    method_requirements: list[str] = Field(default_factory=list)
-    validation_gates: list[InvestigationGateView] = Field(default_factory=list)
-    candidate_fingerprint: str = ""
-    deep_investigation: bool = False
-    """True when the plan carries the deep-probe marker tool."""
-    decision_reason: str = ""
-    outcome_status: str | None = None
-    """InvestigationRecord.status once execution produced one."""
-    outcome_reason: str = ""
-    finding_texts: list[str] = Field(default_factory=list)
-    report_readiness: str | None = None
-    can_approve: bool = False
-    can_reject: bool = False
-    can_execute: bool = False
-
-
-class MacroLoopRoundView(BaseModel):
-    round_id: int
-    new_validated_findings: int = 0
-    redundant_findings: int = 0
-    discarded_findings: int = 0
-    executed_questions: int = 0
-    tokens: int = 0
-    exit_reason: str = "continue"
-    disposition: str = "keep"
-
-
-class MacroLoopView(BaseModel):
-    """One persisted macro-loop ledger for a plan run."""
-
-    plan_session_id: str
-    depth: int = 0
-    rounds: list[MacroLoopRoundView] = Field(default_factory=list)
-    admitted_finding_count: int = 0
-    total_tokens: int = 0
-    exit_reason: str = ""
-
-
-class InvestigationsView(BaseModel):
-    """Every plan derived from this run, newest plan run first."""
-
-    session_id: str
-    project_id: str
-    analysis_depth: int = 0
-    deep_investigation_enabled: bool = False
-    macro_loop_authorized: bool = False
-    """True when the session's thinking level authorizes the macro loop."""
-    plans: list[InvestigationPlanView] = Field(default_factory=list)
-    macro_loops: list[MacroLoopView] = Field(default_factory=list)
-
-
-class InvestigationPlanBuildStarted(BaseModel):
-    """The derived ``ipsess_*`` run carrying a plan-building job.
-
-    Plan building is deterministic and spends no model budget, so it needs no
-    approval; the plans it writes land on their own ``investigation_*`` run,
-    which the job reports in an ``investigation.planned`` trace event.
-    """
-
-    session_id: str
-    execution_session_id: str
-    question_ids: list[str] = Field(default_factory=list)
-    deep: bool = False
-    job: JobCreated
-
-
-class InvestigationDecisionPrepared(BaseModel):
-    """Pending approval for approving or rejecting one plan.
-
-    The approval binds the plan's content fingerprint: a plan rebuilt after
-    this call no longer matches and the decision fails closed.
-    """
-
-    session_id: str
-    plan_id: str
-    plan_session_id: str
-    decision: str
-    """approved | rejected"""
-    reason: str = ""
-    action_hash: str
-    approval_token: str
-    expires_at: datetime
-    plan: InvestigationPlanView
-
-
-class InvestigationDecisionRecorded(BaseModel):
-    session_id: str
-    plan_id: str
-    decision: str
-    approval_artifact_id: str
-    plan: InvestigationPlanView
-
-
-class InvestigationExecutionPrepared(BaseModel):
-    """Pending approval for executing a set of approved plans.
-
-    Execution runs the approved methods and interprets findings with the model,
-    so the approval binds the exact plan set and the LLM mode.
-    """
-
-    session_id: str
-    plan_session_id: str
-    plan_ids: list[str] = Field(default_factory=list)
-    action_hash: str
-    approval_token: str
-    expires_at: datetime
-    llm_mode: str = "env"
-    plans: list[InvestigationPlanView] = Field(default_factory=list)
-
-
-class InvestigationExecutionStarted(BaseModel):
-    """The derived ``ixsess_*`` run carrying a plan-execution job.
-
-    Findings and records land on the plan run; the derived run carries only the
-    lifecycle, so a failed execution never flips the source run to failed.
-    """
-
-    session_id: str
-    plan_session_id: str
-    execution_session_id: str
-    plan_ids: list[str] = Field(default_factory=list)
-    job: JobCreated
-
-
-class MacroLoopPrepared(BaseModel):
-    """Pending approval for the Ultra macro loop over one executed plan run.
-
-    Approving this authorizes the loop to generate and execute follow-up
-    questions on its own for up to ``rounds_cap`` rounds, spending model budget
-    without a further prompt.
-    """
-
-    session_id: str
-    plan_session_id: str
-    action_hash: str
-    approval_token: str
-    expires_at: datetime
-    depth: int
-    rounds_cap: int
-    questions_per_round: int
-    llm_mode: str = "env"
-
-
-class MacroLoopStarted(BaseModel):
-    """The derived ``mlsess_*`` run carrying a macro-loop job."""
-
-    session_id: str
-    plan_session_id: str
-    execution_session_id: str
-    depth: int
-    rounds_cap: int
-    job: JobCreated
-
-
 class CustomChartRequest(BaseModel):
     """One ad-hoc chart over a run's dataset. Column names are validated against
     the dataset before they reach the spec; `y_column` null means row count."""
@@ -2289,6 +2168,9 @@ class CustomChartRequest(BaseModel):
     """None picks the default: sum for a numeric Y, count otherwise."""
     drop_missing: bool = True
     drop_outliers: bool = False
+    save_to_charts: bool = False
+    """Persist the built spec as a CHART_SPEC artifact in the source session,
+    so it appears in the session's Charts listing."""
 
 
 class CustomChartView(BaseModel):
@@ -2309,6 +2191,27 @@ class CustomChartView(BaseModel):
     describe this as missing rows."""
     row_limit: int
     spec: dict[str, Any]
+    saved_chart_id: str | None = None
+    """Set when `save_to_charts` was requested: the persisted chart artifact."""
+
+
+class ExplorationListItemView(BaseModel):
+    """One row of a session's deep-dive history, light enough to list."""
+
+    exploration_id: str
+    session_id: str
+    project_id: str
+    goal: str
+    mode: Literal["open", "goal_directed"]
+    thinking_level: Literal["quick", "standard", "deep"]
+    status: ExplorationRunStatus
+    stop_reason: ExplorationStopReason | None = None
+    created_at: datetime
+    report_available: bool = False
+
+
+class ExplorationListView(BaseModel):
+    explorations: list[ExplorationListItemView] = Field(default_factory=list)
 
 
 class DecisionCoverageView(BaseModel):

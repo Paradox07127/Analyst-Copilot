@@ -203,7 +203,6 @@ def summarize_session(
     _apply_di9_rollups(metrics, events, artifacts)
     _apply_question_quality_rollups(metrics, artifacts)
     _reconcile_question_observability(metrics, artifacts)
-    _apply_macro_loop_rollups(metrics, artifacts)
     report_freshness: dict[str, PublicationFreshness] = {}
     for artifact in artifacts:
         if artifact.type is ArtifactType.DECISION_REPORT:
@@ -751,28 +750,6 @@ def _reconcile_question_observability(
     metrics.tool_calls = pipeline_calls + max(metrics.trace_tool_calls, agent_calls)
     metrics.question_failures_count = metrics.question_failed
     metrics.failures_count = max(metrics.trace_failures_count, metrics.question_failed)
-
-
-def _apply_macro_loop_rollups(metrics: SessionMetrics, artifacts: list[Artifact]) -> None:
-    """Round-level macro-loop rollup derived from the run's LOOP_LEDGER (design §5.2).
-
-    Re-running the loop persists a fresh ledger; only the newest one counts,
-    otherwise repeated invocations double the round totals.
-    """
-    ledgers = [a for a in artifacts if a.type is ArtifactType.LOOP_LEDGER]
-    if not ledgers:
-        return
-    latest = max(ledgers, key=lambda artifact: artifact.created_at)
-    rounds = latest.payload.get("rounds")
-    if not isinstance(rounds, list):
-        return
-    for row in rounds:
-        if not isinstance(row, dict):
-            continue
-        metrics.macro_loop_rounds += 1
-        metrics.macro_loop_new_findings += _as_int(row.get("new_validated_findings"))
-        if row.get("disposition") == "discard":
-            metrics.macro_loop_discard_rounds += 1
 
 
 def _apply_efficiency_rollups(metrics: SessionMetrics) -> None:

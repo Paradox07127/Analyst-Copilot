@@ -102,11 +102,14 @@ class ArtifactService:
         )
 
     def get_artifact(self, session_id: str, artifact_id: str) -> ArtifactDetail:
-        """Read one artifact from the partition named by the detail URL."""
+        """Read one artifact from the partition named by the detail URL, or from
+        a run derived from it."""
         project_id = self._project_for_run(session_id)
         row = self._store.artifact_index_row(
             artifact_id, project_id=project_id, session_id=session_id
         )
+        if row is None:
+            row = self._derived_index_row(artifact_id, project_id, session_id)
         if row is None:
             raise ArtifactNotFoundError(artifact_id)
         # Internal derived runs are hidden from every API surface; their
@@ -205,6 +208,24 @@ class ArtifactService:
             raise AgentHandoffUnavailableError(
                 f"Final Agent handoff failed contract validation for session {session_id}."
             ) from exc
+
+    def _derived_index_row(
+        self, artifact_id: str, project_id: str, session_id: str
+    ) -> dict | None:
+        """Locate an artifact one hop down the lineage from ``session_id``.
+
+        Chat reads conclusions produced by runs derived from the open session
+        (question executions and the like) and cites their ids back under the
+        session the user is looking at; those artifacts live in the child's own
+        partition. Same project only, and machinery-owned internal runs stay
+        hidden even when a sibling would have matched.
+        """
+        for row in self._store.artifact_index_rows_in_children(
+            artifact_id, project_id=project_id, source_session_id=session_id
+        ):
+            if INTERNAL_SESSION_MARKER not in str(row["session_id"]):
+                return row
+        return None
 
     def _project_for_run(self, session_id: str) -> str:
         if INTERNAL_SESSION_MARKER in session_id:
