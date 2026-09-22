@@ -246,9 +246,40 @@ function StageBars({ metrics }: { metrics: SessionMetricsView }) {
   );
 }
 
-function EventRow({ event }: { event: TraceEventRow }) {
+type CorrelatedTraceEvent = TraceEventRow & {
+  session_id?: string | null;
+  job_id?: string | null;
+  job_generation?: number | null;
+  call_id?: string | null;
+  turn_id?: string | null;
+  execution_id?: string | null;
+  parent_execution_id?: string | null;
+  graph_node?: string | null;
+  checkpoint_ns?: string | null;
+  effect_id?: string | null;
+  attempt_id?: string | null;
+  span_id?: string | null;
+  parent_span_id?: string | null;
+};
+
+function EventRow({ event }: { event: CorrelatedTraceEvent }) {
   const summary = event.summary ?? {};
   const hasSummary = Object.keys(summary).length > 0;
+  const correlation = [
+    ["Session", event.session_id],
+    ["Turn", event.turn_id],
+    ["Execution", event.execution_id],
+    ["Parent execution", event.parent_execution_id],
+    ["Node", event.graph_node],
+    ["Checkpoint namespace", event.checkpoint_ns],
+    ["Effect", event.effect_id],
+    ["Attempt", event.attempt_id],
+    ["Span", event.span_id],
+    ["Parent span", event.parent_span_id],
+    ["Provider call", event.call_id],
+    ["Worker job", event.job_id],
+    ["Worker generation", event.job_generation],
+  ].filter(([, value]) => value !== null && value !== undefined && value !== "");
   return (
     <tr className="border-t border-table-border align-top">
       <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
@@ -258,6 +289,23 @@ function EventRow({ event }: { event: TraceEventRow }) {
         {event.event_type}
       </td>
       <td className="px-3 py-2 whitespace-nowrap">{event.name}</td>
+      <td className="px-3 py-2 text-xs">
+        {correlation.length > 0 ? (
+          <details>
+            <summary className="cursor-pointer font-mono text-status-neutral">
+              {event.graph_node ?? "Execution details"}
+            </summary>
+            <dl className="mt-2 flex min-w-64 flex-col gap-1" aria-label="Execution correlation">
+              {correlation.map(([label, value]) => (
+                <div key={label}>
+                  <dt className="text-status-neutral">{label}</dt>
+                  <dd className="break-all font-mono">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          </details>
+        ) : <span className="text-status-neutral">—</span>}
+      </td>
       <td className="px-3 py-2 text-xs whitespace-nowrap text-status-neutral">
         {event.started_at ? new Date(event.started_at).toLocaleTimeString() : ""}
       </td>
@@ -728,6 +776,7 @@ export function Component() {
                   <th className="px-3 py-2 font-medium">#</th>
                   <th className="px-3 py-2 font-medium">Type</th>
                   <th className="px-3 py-2 font-medium">Name</th>
+                  <th className="px-3 py-2 font-medium">Execution</th>
                   <th className="px-3 py-2 font-medium">Started</th>
                   <th className="px-3 py-2 font-medium">Duration</th>
                   <th className="px-3 py-2 font-medium">Summary</th>

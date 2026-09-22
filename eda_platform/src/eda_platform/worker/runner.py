@@ -46,7 +46,7 @@ from eda_platform.core.llm import (
     create_llm_client,
 )
 from eda_platform.core.store import ArtifactStore
-from eda_platform.core.trace_correlation import trace_job_scope
+from eda_platform.core.trace_correlation import trace_execution_scope, trace_job_scope
 from eda_platform.infrastructure.job_lifecycle import (
     Heartbeat,
     JobLifecycleRepository,
@@ -61,7 +61,6 @@ from eda_platform.tools.evidence import PayloadPolicy
 from eda_platform.worker.error_translation import (
     LLMNotConfiguredError,
     describe_worker_failure,
-    durable_error_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,31 +111,41 @@ def run_job(
         with suppress(Exception):
             lifecycle.materialize_trace(job_id)
         return
-    lifecycle.materialize_trace(job_id)
-    params_json = lifecycle.params_json(job_id)
-    if params_json is None:
-        lifecycle.finish(
-            claim,
-            "failed",
-            error_code="durable_params_missing",
-            error_message="Worker claim has no durable params_json.",
-        )
-        with suppress(Exception):
-            lifecycle.materialize_trace(job_id)
-        return
-    heartbeat = Heartbeat(lifecycle, claim)
-    heartbeat.__enter__()
-    token = _job_cancellation_token(store, lifecycle, claim)
-
-    def cancel_check() -> bool:
-        try:
-            token.checkpoint()
-        except CancellationError as exc:
-            raise SessionCancelled(str(exc)) from exc
-        return False
-
+    heartbeat: Heartbeat | None = None
     try:
-        with trace_job_scope(claim.job_id, claim.attempt), cancellation_scope(token):
+        lifecycle.materialize_trace(job_id)
+        params_json = lifecycle.params_json(job_id)
+        if params_json is None:
+            lifecycle.finish(
+                claim,
+                "failed",
+                error_code="durable_params_missing",
+                error_message="Worker claim has no durable params_json.",
+            )
+            with suppress(Exception):
+                lifecycle.materialize_trace(job_id)
+            return
+        started_heartbeat = Heartbeat(lifecycle, claim)
+        started_heartbeat.__enter__()
+        heartbeat = started_heartbeat
+        token = _job_cancellation_token(store, lifecycle, claim)
+
+        def cancel_check() -> bool:
+            try:
+                token.checkpoint()
+            except CancellationError as exc:
+                raise SessionCancelled(str(exc)) from exc
+            return False
+
+        with (
+            trace_job_scope(claim.job_id, claim.attempt),
+            cancellation_scope(token),
+            trace_execution_scope(
+                session_id=job["session_id"],
+                attempt_id=f"job:{claim.job_id}:{claim.attempt}",
+                emit=lambda event: store.append_trace(job["project_id"], event),
+            ),
+        ):
             params = json.loads(params_json)
             cancel_check()
             if job["kind"] == "auto_eda":
@@ -171,8 +180,7 @@ def run_job(
                 handler = _run_exploration_job
             else:
                 raise ValueError(f"Unsupported job kind: {job['kind']}")
-            _invoke_job_handler(
-                handler,
+            handler(
                 store,
                 workspace,
                 job,
@@ -180,14 +188,15 @@ def run_job(
                 cancel_check=cancel_check,
             )
             cancel_check()
+            completion_summary = _completion_summary(store, job, params)
     except (SessionCancelled, CancellationError):
-        _finish(store, job, "cancelled", lifecycle=lifecycle, claim=claim)
+        _finish(lifecycle, claim, "cancelled")
     except Exception as exc:
         logger.exception("Job %s failed", job_id)
         failure = describe_worker_failure(exc)
         _finish(
-            store,
-            job,
+            lifecycle,
+            claim,
             "failed",
             error_code=failure.error_code,
             error_message=_sanitize_error(failure.message, workspace)[:500],
@@ -196,30 +205,22 @@ def run_job(
                 if failure.detail
                 else None
             ),
-            lifecycle=lifecycle,
-            claim=claim,
         )
     else:
         _finish(
-            store,
-            job,
+            lifecycle,
+            claim,
             "completed",
-            lifecycle=lifecycle,
-            claim=claim,
-            summary=_completion_summary(store, job, params),
+            summary=completion_summary,
         )
     finally:
-        heartbeat.__exit__(None, None, None)
+        if heartbeat is not None:
+            heartbeat.__exit__(None, None, None)
 
 
 def _run_started_at(store: ArtifactStore, project_id: str, session_id: str) -> datetime | None:
     raw = store.earliest_trace_started_at(project_id=project_id, session_id=session_id)
     return None if raw is None else datetime.fromisoformat(raw)
-
-
-def _durable_error_code(exc: Exception) -> str:
-    """Return the stable API code a worker persists across process boundaries."""
-    return durable_error_code(exc)
 
 
 # Trace event types that mean "the job finished, but a capability it was queued
@@ -329,20 +330,6 @@ def _job_cancellation_token(
         enter_outer_shield=lambda: lifecycle.enter_critical(claim),
         exit_outer_shield=lambda: lifecycle.exit_critical(claim),
     )
-
-
-def _invoke_job_handler(
-    handler: Callable[..., None],
-    store: ArtifactStore,
-    workspace: str,
-    job: dict,
-    params: dict,
-    *,
-    cancel_check: CancelCheck,
-) -> None:
-    """Invoke a worker handler through the mandatory cancellation seam."""
-
-    handler(store, workspace, job, params, cancel_check=cancel_check)
 
 
 def _checkpoint(cancel_check: CancelCheck | None) -> None:
@@ -1353,9 +1340,18 @@ def _run_question_draft_job(
     skeleton so the card is still reviewable and editable without a provider.
     """
     # Same local-import rationale as the other kinds: keep spawn bootstrap cheap.
+    from eda_platform.agents.model_workflow import (
+        ModelWorkflow,
+        WorkflowModelClient,
+        run_model_workflow,
+    )
     from eda_platform.agents.question_agent import propose_llm_question_candidates
-    from eda_platform.core.llm import is_offline_client
+    from eda_platform.core.graph_execution import GraphPersistence
+    from eda_platform.core.ids import stable_hash
+    from eda_platform.core.llm import is_offline_client, llm_execution_fingerprint
     from eda_platform.drivers.card_edit import append_candidate
+    from eda_platform.schemas.artifacts import ArtifactType
+    from eda_platform.schemas.questions import QuestionCandidate
     from eda_platform.tools.question_discovery import make_question_id
 
     _checkpoint(cancel_check)
@@ -1371,21 +1367,43 @@ def _run_question_draft_job(
     if is_offline_client(llm):
         candidate = _unscored_user_card(question, artifacts)
     else:
-        proposal = propose_llm_question_candidates(
-            artifacts,
-            llm=llm,
-            business_context=(
-                f"The user supplied this exact analysis question: {question!r}. "
-                "Return exactly one opportunity card for that question and complete "
-                "all review fields without changing its intent."
+        def draft(active: ModelWorkflow) -> dict[str, Any]:
+            proposal = propose_llm_question_candidates(
+                artifacts,
+                llm=WorkflowModelClient(llm, active),
+                business_context=(
+                    f"The user supplied this exact analysis question: {question!r}. "
+                    "Return exactly one opportunity card for that question and complete "
+                    "all review fields without changing its intent."
+                ),
+                max_questions=1,
+                payload_policy=_payload_policy(params),
+                cancel_check=cancel_check,
+            )
+            if not proposal.candidates:
+                raise ValueError(proposal.error or "the model returned no question card")
+            return {"candidate": proposal.candidates[0].model_dump(mode="json")}
+
+        saved = run_model_workflow(
+            draft,
+            persistence=GraphPersistence(
+                store.session_dir(project_id, str(job["session_id"])),
+                "question-draft:" + str(job["job_id"]),
             ),
-            max_questions=1,
-            payload_policy=_payload_policy(params),
-            cancel_check=cancel_check,
+            definition="question-draft-functional-v1",
+            inputs={
+                "question": question, "source_session_id": source_session_id,
+                "artifacts": [
+                    {"id": item.id, "type": item.type.value,
+                     "digest": stable_hash(item.payload, length=64)}
+                    for item in artifacts
+                    if item.type is not ArtifactType.QUESTION_CANDIDATE_SET
+                ],
+                "payload_policy": _payload_policy(params),
+                "model": llm_execution_fingerprint(llm),
+            },
         )
-        if not proposal.candidates:
-            raise ValueError(proposal.error or "the model returned no question card")
-        drafted = proposal.candidates[0]
+        drafted = QuestionCandidate.model_validate(saved["candidate"])
         candidate = drafted.model_copy(
             update={
                 "question_en": question,
@@ -1568,19 +1586,15 @@ def _sanitize_error(message: str, workspace: str) -> str:
 
 
 def _finish(
-    store: ArtifactStore,
-    job: dict,
+    lifecycle: JobLifecycleRepository,
+    claim: LaunchClaim,
     status: str,
     *,
     error_code: str | None = None,
     error_message: str | None = None,
     error_detail: str | None = None,
     summary: dict[str, Any] | None = None,
-    lifecycle: JobLifecycleRepository | None = None,
-    claim: LaunchClaim | None = None,
 ) -> None:
-    if lifecycle is None or claim is None:
-        raise RuntimeError("Terminal lifecycle claim is required.")
     lifecycle.finish(
         claim,
         status,
@@ -1589,13 +1603,18 @@ def _finish(
         error_detail=error_detail,
         summary=summary,
     )
-    lifecycle.materialize_trace(str(job["job_id"]))
+    # The SQLite transition is authoritative; a broken JSONL mirror must not
+    # replace the original result or escape terminal cleanup.
+    with suppress(Exception):
+        lifecycle.materialize_trace(claim.job_id)
 
 
 def main(argv: list[str]) -> None:
     """CLI entry: acknowledge, wait for the parent gate, then claim running."""
     if len(argv) != 5:
-        raise SystemExit("legacy ungated worker invocation is disabled")
+        raise SystemExit(
+            "worker requires workspace, job id, launch token, launch attempt, and start gate"
+        )
     workspace, job_id, token, attempt, gate_argument = argv
     workspace = str(require_absolute_workspace(workspace, source="worker workspace"))
     if not acknowledge_and_wait(gate_argument, token, START_ACK_TIMEOUT_SECONDS):

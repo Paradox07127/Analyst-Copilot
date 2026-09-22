@@ -11,6 +11,11 @@ from eda_platform.agents.data_tools import DataToolContext, build_data_tools
 from eda_platform.agents.interpretation import validate_agent_answer
 from eda_platform.agents.runtime import AgentRunResult, AgentRuntime
 from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.graph_execution import (
+    GraphEffectUncertain,
+    GraphIdentityError,
+    GraphPersistence,
+)
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.llm import ToolCallingLLM, ToolCallingUnsupportedError
 from eda_platform.core.method_skills import method_skill_guidance
@@ -120,6 +125,20 @@ def run_question_agent(
         max_tool_calls=16,
         answer_validator=check_answer,
         trace=emit,
+        artifact_store=store,
+        restore_artifacts=context.restore_artifacts,
+        persistence=GraphPersistence(
+            store.session_dir(project_id, session_id),
+            "question:"
+            + stable_hash({"question": question, "context": candidate_context}, length=24),
+            stable_hash(
+                {
+                    "data": [d.record.content_hash for d in datasets],
+                    "payload_policy": payload_policy,
+                },
+                length=32,
+            ),
+        ),
     )
     user_message = json.dumps(
         {
@@ -135,7 +154,7 @@ def run_question_agent(
             system_prompt=_SYSTEM_PROMPT + method_skill_guidance(question),
             user_message=user_message,
         )
-    except BudgetExceeded:
+    except (BudgetExceeded, GraphIdentityError, GraphEffectUncertain):
         raise
     except ToolCallingUnsupportedError:
         # Not a failed question — the model cannot take a tools payload at all.

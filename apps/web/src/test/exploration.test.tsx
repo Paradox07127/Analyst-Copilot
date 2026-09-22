@@ -690,3 +690,15 @@ describe("E5 exploration API workflow", () => {
     ).toBeInTheDocument();
   });
 });
+
+it("keeps a failed exploration distinct from its completed worker attempt", async () => {
+  const failed = explorationDto({ status: "stopped", stop_reason: "failed", job: {
+    job_id: "job_expl_1", execution_session_id: "explsess_1", status: "completed",
+  } });
+  server.use(http.get("/api/v1/sessions/:sessionId/explorations/:explorationId", () =>
+    HttpResponse.json(failed)));
+  renderAppWithRouterAt("/projects/p1/sessions/r1/explorations/expl_1");
+  expect(await screen.findByText("Stopped · terminal")).toBeInTheDocument();
+  expect(screen.getByRole("alert", { name: /Stop reason/ })).toHaveTextContent("failed");
+  expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+});

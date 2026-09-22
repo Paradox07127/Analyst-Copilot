@@ -3,6 +3,7 @@ report, and pulls in derived-run artifacts transitively (auto_eda closure loop).
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 
@@ -166,3 +167,40 @@ def test_offline_on_demand_report_terminates_and_persists(tmp_path: Path) -> Non
     done: set[str] = set()
     for artifact_id in by_id:
         visit(artifact_id, set(), done)
+
+
+def test_report_generation_preserves_completed_source_session(tmp_path: Path) -> None:
+    result = _build_workspace(tmp_path)
+    store = ArtifactStore(result.workspace)
+    store.mark_session_status(PROJECT, PRIMARY, "completed")
+    generated = generate_report_on_demand(result)
+    assert generated.report_markdown
+    assert store.get_session_status(PRIMARY) == "completed"
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute(
+            "select active_job_id from sessions where session_id = ?", (PRIMARY,)
+        ).fetchone()[0] is None
+
+
+def test_report_failure_does_not_fail_source_even_when_trace_mirror_breaks(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import pytest
+
+    from eda_platform.drivers.auto_eda import ExportAgenticReportStep
+
+    result = _build_workspace(tmp_path)
+    store = ArtifactStore(result.workspace)
+    store.mark_session_status(PROJECT, PRIMARY, "completed")
+
+    def broken(*_args, **_kwargs):
+        raise OSError("report unavailable")
+
+    monkeypatch.setattr(ExportAgenticReportStep, "run", broken)
+    monkeypatch.setattr(ArtifactStore, "append_trace", broken)
+    with pytest.raises(OSError, match="report unavailable"):
+        generate_report_on_demand(result)
+    assert store.get_session_status(PRIMARY) == "completed"
+    assert any(event.event_type == "step_failed" for event in store.list_trace_events(
+        project_id=PROJECT, session_id=PRIMARY
+    ))

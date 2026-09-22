@@ -18,7 +18,6 @@ from eda_platform.agents.exploration.candidates import (
     materialize_proposal_batch,
     unexplored_coverage,
 )
-from eda_platform.agents.exploration.frontier import Frontier, FrontierTransitionError
 from eda_platform.agents.exploration.scheduler import (
     AdmissionContext,
     CandidateSignals,
@@ -309,20 +308,6 @@ def test_missingness_without_a_group_dimension_never_claims_a_mechanism() -> Non
     assert seeds[0].proposal.probe_kind == "missingness_rate_scan"
     assert seeds[0].proposal.columns == ("satisfaction",)
     assert "mechanism" not in seeds[0].proposal.statement.casefold()
-
-
-def test_frontier_enforces_state_machine_and_fingerprint_dedup() -> None:
-    seed = candidate_seed(_proposal(), sequence_index=1)
-    frontier = Frontier()
-    frontier.add(seed)
-    duplicate = frontier.add(candidate_seed(_proposal(statement="Rephrased."), sequence_index=2))
-
-    assert duplicate.status == "rejected_duplicate"
-    frontier.transition(seed.hypothesis_id, "admitted")
-    frontier.transition(seed.hypothesis_id, "running")
-    frontier.transition(seed.hypothesis_id, "supported")
-    with pytest.raises(FrontierTransitionError):
-        frontier.transition(seed.hypothesis_id, "running")
 
 
 def test_scheduler_records_every_feature_check_and_choice_deterministically() -> None:

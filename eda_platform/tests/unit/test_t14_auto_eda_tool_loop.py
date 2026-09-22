@@ -179,6 +179,10 @@ def _step(qcand_id: str, llm: Any) -> ExecuteTopQuestionsStep:
         [_series_dataset()],
         question_candidate_artifact_id=qcand_id,
         relationship_artifact_ids=[],
+        context_artifact_ids=[
+            profile_dataset(_series_dataset(), project_id=PROJECT, session_id=SESSION).id,
+            qcand_id,
+        ],
         llm=llm,
     )
 

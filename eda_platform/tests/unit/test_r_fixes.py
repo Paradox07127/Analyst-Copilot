@@ -279,7 +279,11 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class _RaisingLLM:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
+        self.calls.append(task)
         raise RuntimeError("transport error")
 
     def text(self, *, task: str, payload: dict) -> str:
@@ -302,7 +306,18 @@ class _BadJsonLLM:
 
 
 class _BadJsonWithUsageLLM:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.usage: LLMResultMetadata | None = None
+
     def structured(self, *, task: str, schema: type[T], payload: dict) -> T:
+        self.calls.append(task)
+        self.usage = LLMResultMetadata(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            request_id=f"request-{len(self.calls)}",
+            usage=LLMUsage(prompt_tokens=100, completion_tokens=200, total_tokens=300),
+        )
         ReportPlanDraft.model_validate({"claims": [{"section_title": "Executive Summary"}]})
         raise AssertionError("unreachable")
 
@@ -310,11 +325,7 @@ class _BadJsonWithUsageLLM:
         return ""
 
     def last_usage(self) -> LLMResultMetadata | None:
-        return LLMResultMetadata(
-            provider="deepseek",
-            model="deepseek-v4-flash",
-            usage=LLMUsage(prompt_tokens=100, completion_tokens=200, total_tokens=300),
-        )
+        return self.usage
 
 
 class _UsageLLM:
@@ -337,14 +348,24 @@ class _UsageLLM:
 
 def test_r3_transport_error_falls_back_without_crashing(tmp_path: Path) -> None:
     profile, _ = _profile_and_pack(tmp_path)
+    llm = _RaisingLLM()
     result = generate_agentic_report(
-        [profile], project_id="p", session_id="r", business_context="", llm=_RaisingLLM()
+        [profile], project_id="p", session_id="r", business_context="", llm=llm
     )
     assert result.used_fallback is True
     assert result.bundle.status is ReportStatus.VALIDATED
-    assert len(result.llm_events) == 3
-    assert result.llm_events[0].status == "error"
-    assert result.llm_events[0].error_type == "RuntimeError"
+    plan_events = [event for event in result.llm_events if event.task == "m2_report_claim_plan"]
+    narration_events = [
+        event for event in result.llm_events if event.task == "report_section_narrative"
+    ]
+    assert len(plan_events) == 3
+    assert [event.attempt for event in plan_events] == [1, 2, 3]
+    assert len(narration_events) == 1
+    assert llm.calls == ["m2_report_claim_plan"] * 3 + ["report_section_narrative"]
+    assert [event.task for event in result.llm_events] == llm.calls
+    assert all(event.status == "error" for event in result.llm_events)
+    assert all(event.error_type == "RuntimeError" for event in result.llm_events)
+    assert result.narration_discards == [{"section": "Executive Summary", "reason": "llm_error"}]
 
 
 def test_r3_invalid_json_falls_back_without_crashing(tmp_path: Path) -> None:
@@ -357,19 +378,34 @@ def test_r3_invalid_json_falls_back_without_crashing(tmp_path: Path) -> None:
 
 def test_r3_invalid_json_still_records_provider_usage(tmp_path: Path) -> None:
     profile, _ = _profile_and_pack(tmp_path)
+    llm = _BadJsonWithUsageLLM()
     result = generate_agentic_report(
         [profile],
         project_id="p",
         session_id="r",
         business_context="",
-        llm=_BadJsonWithUsageLLM(),
+        llm=llm,
     )
 
     assert result.used_fallback is True
-    assert len(result.llm_calls) == 3
-    assert result.llm_calls[0].usage.total_tokens == 300
-    assert result.llm_events[0].status == "error"
-    assert result.llm_events[0].usage is not None
+    plan_events = [event for event in result.llm_events if event.task == "m2_report_claim_plan"]
+    narration_events = [
+        event for event in result.llm_events if event.task == "report_section_narrative"
+    ]
+    assert len(plan_events) == 3
+    assert len(narration_events) == 1
+    assert llm.calls == ["m2_report_claim_plan"] * 3 + ["report_section_narrative"]
+    assert [event.task for event in result.llm_events] == llm.calls
+    assert sum(event.usage.usage.total_tokens for event in plan_events if event.usage) == 900
+    assert sum(event.usage.usage.total_tokens for event in narration_events if event.usage) == 300
+    assert len(result.llm_calls) == 4
+    assert sum(call.usage.total_tokens for call in result.llm_calls) == 1200
+    assert [call.request_id for call in result.llm_calls] == [
+        "request-1", "request-2", "request-3", "request-4",
+    ]
+    assert [event.usage for event in result.llm_events] == result.llm_calls
+    assert all(event.status == "error" for event in result.llm_events)
+    assert result.narration_discards == [{"section": "Executive Summary", "reason": "llm_error"}]
 
 
 def test_r7_llm_usage_is_recorded(tmp_path: Path) -> None:

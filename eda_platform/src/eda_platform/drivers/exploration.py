@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -92,6 +93,7 @@ from eda_platform.core.exploration_shadow_store import (
 )
 from eda_platform.core.file_lock import lock_exclusive, unlock
 from eda_platform.core.fs import BINARY_FLAG
+from eda_platform.core.graph_execution import GraphPersistence
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.llm import LLMClient, LLMToolResponse
 from eda_platform.core.llm_ledger import (
@@ -286,12 +288,13 @@ class JsonlShadowBudgetStore:
 
 
 class JsonExplorationWorkflowStateStore:
-    """Atomic typed snapshot for reducer facts; the journal remains lifecycle authority."""
+    """Atomic domain facts and idempotent commits, independent of graph execution position."""
 
     _KEYS = frozenset(
         {
             "schema_version",
             "decisions",
+            "scheduling_commits",
             "committed_receipts",
             "gate_reports",
             "admitted_bundles",
@@ -312,10 +315,9 @@ class JsonExplorationWorkflowStateStore:
             return ExplorationWorkflowState()
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid workflow-state snapshot: {exc}") from exc
-        legacy_keys = self._KEYS - {"decisions"}
-        if not isinstance(raw, dict) or set(raw) not in {self._KEYS, legacy_keys}:
+        if not isinstance(raw, dict) or set(raw) != self._KEYS:
             raise ValueError("workflow-state snapshot has an unsupported shape.")
-        if raw.get("schema_version") not in {1, 2}:
+        if raw.get("schema_version") != 3:
             raise ValueError("workflow-state snapshot has an unsupported version.")
         receipts = _typed_items(raw.get("committed_receipts"), EvidenceReceipt)
         reports = _typed_items(raw.get("gate_reports"), GateReport)
@@ -326,7 +328,15 @@ class JsonExplorationWorkflowStateStore:
             isinstance(item, str) and item for item in coverage
         ):
             raise ValueError("workflow-state coverage must be a non-empty string list.")
+        commits = raw.get("scheduling_commits")
+        if not isinstance(commits, dict) or any(
+            not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key
+            or not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value)
+            for key, value in commits.items()
+        ):
+            raise ValueError("workflow-state scheduling commits have an unsupported shape.")
         state = ExplorationWorkflowState(
+            scheduling_commits={int(key): value for key, value in commits.items()},
             decisions=tuple(
                 _decode_scheduling_decision(item)
                 for item in _required_list(raw.get("decisions", []), "decisions")
@@ -351,7 +361,9 @@ class JsonExplorationWorkflowStateStore:
         _write_json_atomic(
             self.path,
             {
-                "schema_version": 2,
+                "schema_version": 3,
+                "scheduling_commits": {str(key): value
+                                       for key, value in state.scheduling_commits.items()},
                 "decisions": [
                     _encode_scheduling_decision(item) for item in state.decisions
                 ],
@@ -1409,6 +1421,11 @@ def run_shadow_exploration(
             finalizer=guarded_finalizer,
             recovery=guarded_recovery,
             branch_deriver=actual_branch_deriver,
+            persistence=GraphPersistence(
+                shadow_run_root(workspace_path, exploration_id),
+                "exploration:" + exploration_id,
+                code_fingerprint,
+            ),
         )
         result = supervisor.run()
         final_state = actual_journal.rebuild()

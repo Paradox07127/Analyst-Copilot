@@ -10,6 +10,11 @@ from typing import Any, Literal, cast
 import duckdb
 
 from eda_platform.agents.interpretation import interpret_findings
+from eda_platform.agents.model_workflow import (
+    ModelWorkflow,
+    WorkflowModelClient,
+    run_model_workflow,
+)
 from eda_platform.agents.planner import build_plan
 from eda_platform.agents.question_runtime import run_question_agent
 from eda_platform.agents.reporting import generate_agentic_report
@@ -17,6 +22,7 @@ from eda_platform.agents.runtime import AgentRunResult
 from eda_platform.core.budget import BudgetExceeded, SessionBudgetPolicy
 from eda_platform.core.config import require_absolute_workspace
 from eda_platform.core.currency_units import classify_currency_unit, currency_unit_display
+from eda_platform.core.graph_execution import GraphPersistence
 from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.llm import (
     LLMClient,
@@ -24,6 +30,7 @@ from eda_platform.core.llm import (
     ToolCallingLLM,
     ToolCallingUnsupportedError,
     is_offline_client,
+    llm_execution_fingerprint,
     manifest_model_versions,
 )
 from eda_platform.core.llm_ledger import meter_llm_client, restore_run_budget_state
@@ -37,7 +44,7 @@ from eda_platform.core.semantic import (
 from eda_platform.core.semantic_resources import load_semantic_seeds_safe
 from eda_platform.core.session_metrics import persist_run_metrics
 from eda_platform.core.store import ArtifactStore
-from eda_platform.core.tool_calling_probe import tool_calling_readiness
+from eda_platform.core.tool_calling_routing import tool_calling_readiness
 from eda_platform.core.tool_guard import (
     JoinScope,
     ToolGuardError,
@@ -67,7 +74,6 @@ from eda_platform.schemas.questions import (
     method_answer_contract,
     method_degradation_disclosure,
 )
-from eda_platform.schemas.relations import RelationshipCandidateSet
 from eda_platform.schemas.segmentation import SegmentationResult
 from eda_platform.schemas.sessions import (
     SessionManifest,
@@ -122,12 +128,9 @@ class _ResultContractFailure:
 def select_auto_execution_candidates(
     candidate_set: QuestionCandidateSet,
     *,
-    relationship_candidates: RelationshipCandidateSet | None = None,
     limit: int = 3,
 ) -> list[QuestionCandidate]:
-    # Kept for call compatibility. Automatic execution never joins datasets;
-    # a user must select a question that explicitly needs a relationship.
-    _ = relationship_candidates
+    """Rank single-dataset questions; relationships require explicit user selection."""
     ranked = [
         candidate
         for candidate in sorted(
@@ -246,7 +249,36 @@ def execute_question_candidate(
     confirmed_joins: Collection[str] = (),
     on_join_used: Callable[[str], None] | None = None,
     catalog: SqlCatalog | None = None,
+    persistence: GraphPersistence | None = None,
+    workflow: ModelWorkflow | None = None,
 ) -> list[Artifact]:
+    if workflow is None:
+        def run(active: ModelWorkflow) -> dict[str, Any]:
+            artifacts = execute_question_candidate(
+                candidate, datasets=datasets, project_id=project_id, session_id=session_id,
+                parent_ids=parent_ids,
+                llm=WorkflowModelClient(llm, active) if llm is not None else None,
+                preview_rows=preview_rows, timeout_seconds=timeout_seconds, seeds=seeds,
+                on_guard_rejected=on_guard_rejected, confirmed_joins=confirmed_joins,
+                on_join_used=on_join_used, catalog=catalog, workflow=active,
+            )
+            return {"artifacts": [artifact.model_dump(mode="json") for artifact in artifacts]}
+
+        saved = run_model_workflow(
+            run, persistence=persistence, definition="question-sql-functional-v1",
+            inputs={
+                "candidate": candidate.model_dump(mode="json"),
+                "datasets": [dataset.record.model_dump(mode="json", exclude={"created_at"})
+                             for dataset in datasets],
+                "project_id": project_id, "session_id": session_id,
+                "parent_ids": list(parent_ids), "preview_rows": preview_rows,
+                "timeout_seconds": timeout_seconds, "model": llm_execution_fingerprint(llm),
+                "model_client": type(llm).__qualname__,
+                "confirmed_joins": sorted(confirmed_joins),
+                "seeds": None if seeds is None else seeds.model_dump(mode="json"),
+            },
+        )
+        return [Artifact.model_validate(item) for item in saved["artifacts"]]
     if candidate.origin == "llm":
         return _execute_llm_question(
             candidate,
@@ -262,6 +294,7 @@ def execute_question_candidate(
             confirmed_joins=confirmed_joins,
             on_join_used=on_join_used,
             catalog=catalog,
+            workflow=workflow,
         )
     return _execute_template_question(
         candidate,
@@ -276,6 +309,7 @@ def execute_question_candidate(
         confirmed_joins=confirmed_joins,
         on_join_used=on_join_used,
         catalog=catalog,
+        workflow=workflow,
     )
 
 
@@ -493,25 +527,9 @@ def _run_question_batch(
         ),
     )
 
-    # Settled before the batch spends anything: an unverified model that
-    # cannot take a tools payload should cost one probe call, not a full
-    # question's worth of planning first.
+    # The graph's first actual request establishes provider support durably;
+    # a separate capability probe would add a paid call outside recovery.
     readiness = tool_calling_readiness(run_llm)
-    if readiness.source in {"probe", "cached"}:
-        store.append_trace(
-            project_id,
-            TraceEvent(
-                session_id=actual_session_id,
-                event_type="tool_calling_probe",
-                name="question_batch",
-                started_at=batch_started_at,
-                summary={
-                    "usable": readiness.usable,
-                    "source": readiness.source,
-                    "detail": readiness.detail,
-                },
-            ),
-        )
     agent_route = readiness.usable
 
     seeds = load_semantic_seeds_safe(store, project_id)
@@ -615,8 +633,10 @@ def _run_question_batch(
                         error=error,
                     ),
                     confirmed_joins=confirmed_joins,
-                    on_join_used=lambda label: _record_join_usage_safe(
-                        store, project_id, label
+                    on_join_used=lambda label: _record_join_usage_safe(store, project_id, label),
+                    persistence=GraphPersistence(
+                        store.session_dir(project_id, actual_session_id),
+                        "question-sql:" + candidate.question_id,
                     ),
                 )
         raise_if_cancelled(cancel_check, operation="question batch")
@@ -664,6 +684,13 @@ def _run_question_batch(
             business_context=business_context,
             llm=run_llm,
             payload_policy=payload_policy,
+            persistence=GraphPersistence(
+                store.session_dir(project_id, actual_session_id),
+                "report:question-batch:"
+                + stable_hash(
+                    [artifact.id for artifact in [*source_artifacts, *new_artifacts]], length=32
+                ),
+            ),
         )
         raise_if_cancelled(cancel_check, operation="question batch report")
         for artifact in report_artifacts:
@@ -826,9 +853,7 @@ def _agent_qexec_artifact(
         tool_names=agent_result.tool_names,
     )
     sql_artifacts = [
-        artifact
-        for artifact in evidence_artifacts
-        if artifact.type is ArtifactType.SQL_RESULT
+        artifact for artifact in evidence_artifacts if artifact.type is ArtifactType.SQL_RESULT
     ]
     degradation: str | None = None
     if contract_failure is not None:
@@ -836,8 +861,7 @@ def _agent_qexec_artifact(
         # to a query publishes qualified rather than throwing the result away.
         degradation = _method_degradation(candidate, contract_failure)
         if degradation is not None and not any(
-            _data_contract_failure(candidate, artifact) is None
-            for artifact in sql_artifacts
+            _data_contract_failure(candidate, artifact) is None for artifact in sql_artifacts
         ):
             degradation = None
     if contract_failure is not None and degradation is None:
@@ -880,11 +904,7 @@ def _agent_qexec_artifact(
         ]
 
     last_sql = sql_artifacts[-1] if sql_artifacts else None
-    sql_text = (
-        SqlResult.model_validate(last_sql.payload).sql
-        if last_sql is not None
-        else None
-    )
+    sql_text = SqlResult.model_validate(last_sql.payload).sql if last_sql is not None else None
     unique_tool_names = list(dict.fromkeys(agent_result.tool_names))
     result = QuestionExecutionResult(
         question_id=candidate.question_id,
@@ -897,11 +917,7 @@ def _agent_qexec_artifact(
         evidence_artifact_ids=evidence_ids,
         plan_summary=(
             f"Autonomous agent completed {agent_result.tool_calls} tool call(s)"
-            + (
-                f" using {', '.join(unique_tool_names)}."
-                if unique_tool_names
-                else "."
-            )
+            + (f" using {', '.join(unique_tool_names)}." if unique_tool_names else ".")
         ),
         answer_contract=_effective_answer_contract(candidate),
         contract_status=(
@@ -987,6 +1003,7 @@ def _execute_template_question(
     confirmed_joins: Collection[str] = (),
     on_join_used: Callable[[str], None] | None = None,
     catalog: SqlCatalog | None = None,
+    workflow: ModelWorkflow,
 ) -> list[Artifact]:
     if candidate.sql_template is None:
         return [
@@ -1026,15 +1043,15 @@ def _execute_template_question(
             )
         ]
     try:
-        sql_artifact = run_sql(
+        sql_artifact = workflow.query(lambda: run_sql(
             catalog or _template_catalog(datasets),
-            candidate.sql_template,
+            cast(str, candidate.sql_template),
             project_id=project_id,
             session_id=session_id,
             preview_rows=preview_rows,
             timeout_seconds=timeout_seconds,
             output_units=candidate.produced_units,
-        )
+        ))
         sql_artifact.parents = list(parent_ids)
         qexec = _successful_qexec_artifact(
             candidate,
@@ -1085,6 +1102,7 @@ def _execute_llm_question(
     confirmed_joins: Collection[str] = (),
     on_join_used: Callable[[str], None] | None = None,
     catalog: SqlCatalog | None = None,
+    workflow: ModelWorkflow,
 ) -> list[Artifact]:
     if llm is None or is_offline_client(llm):
         return [
@@ -1169,7 +1187,7 @@ def _execute_llm_question(
                     exploratory=candidate.exploratory,
                 )
             ]
-        sql_artifact = run_sql(
+        sql_artifact = workflow.query(lambda: run_sql(
             catalog,
             plan.sql,
             project_id=project_id,
@@ -1177,7 +1195,7 @@ def _execute_llm_question(
             preview_rows=preview_rows,
             timeout_seconds=timeout_seconds,
             output_units=candidate.produced_units,
-        )
+        ))
         sql_artifact.parents = list(parent_ids)
         qexec = _successful_qexec_artifact(
             candidate,
@@ -1280,9 +1298,7 @@ def _successful_qexec_artifact(
         method_context=plan_summary,
         limitations=candidate.risks,
         seeds=seeds,
-        ranking_basis=(
-            {"column": basis[0], "direction": basis[1]} if basis is not None else None
-        ),
+        ranking_basis=({"column": basis[0], "direction": basis[1]} if basis is not None else None),
     )
     result = QuestionExecutionResult(
         question_id=candidate.question_id,
@@ -1310,11 +1326,7 @@ def _successful_qexec_artifact(
         # are report-facing; ordinary card risks stay on the candidate.
         limitations=[
             *([degradation] if degradation else []),
-            *(
-                risk
-                for risk in candidate.risks
-                if "auto-confirmed (high confidence)" in risk
-            ),
+            *(risk for risk in candidate.risks if "auto-confirmed (high confidence)" in risk),
         ],
     )
     payload = result.model_dump(mode="json")
@@ -1432,9 +1444,7 @@ def _method_contract_failure(
         if artifact_type not in artifact_types
     ]
     missing_tools = [
-        tool_name
-        for tool_name in contract.required_tool_names
-        if tool_name not in observed_tools
+        tool_name for tool_name in contract.required_tool_names if tool_name not in observed_tools
     ]
     if missing_artifacts or missing_tools:
         details: list[str] = []
@@ -1474,9 +1484,7 @@ def _method_degradation(
         return None
     if candidate.analysis_mode not in DEGRADABLE_ANALYSIS_MODES:
         return None
-    return method_degradation_disclosure(
-        contract.required_method_id or "", candidate.question_en
-    )
+    return method_degradation_disclosure(contract.required_method_id or "", candidate.question_en)
 
 
 def _effective_answer_contract(
@@ -1913,7 +1921,7 @@ def _findings_for(candidate: QuestionCandidate, sql_artifact: Artifact) -> list[
             rows,
             sql=result.sql,
             total_rows=result.row_count,
-                truncated=result.truncated,
+            truncated=result.truncated,
         )
     ]
 
@@ -1978,9 +1986,7 @@ def _trend_finding(
             "overall trend is not established."
         )
     else:
-        direction = (
-            "increased" if end > start else "decreased" if end < start else "stayed flat"
-        )
+        direction = "increased" if end > start else "decreased" if end < start else "stayed flat"
         text = (
             f"{candidate.question_en} The metric {direction} from "
             f"{gate_safe_number(start)} to {gate_safe_number(end)} across the "
@@ -2251,9 +2257,7 @@ def _ranked_finding(
     return QuestionFinding(text=text, evidence=evidence)
 
 
-def _leaders_only_note(
-    partial: bool, rows: list[dict[str, object]], total_rows: int | None
-) -> str:
+def _leaders_only_note(partial: bool, rows: list[dict[str, object]], total_rows: int | None) -> str:
     """Names the whole result behind a ranking whose tail was not returned."""
     if not partial:
         return ""
@@ -2316,9 +2320,7 @@ def _parse_order_by(sql: str) -> tuple[str, str] | None:
     if not sql:
         return None
     matches = [
-        match
-        for match in _ORDER_BY_KEYWORD.finditer(sql)
-        if _paren_depth(sql, match.start()) == 0
+        match for match in _ORDER_BY_KEYWORD.finditer(sql) if _paren_depth(sql, match.start()) == 0
     ]
     if len(matches) != 1:
         return None
@@ -2409,9 +2411,7 @@ def _row_label(row: dict[str, object], columns: list[str]) -> str:
 _MAX_LABEL_COLUMNS = 3
 
 
-def _identifying_columns(
-    rows: list[dict[str, object]], basis_column: str
-) -> list[str]:
+def _identifying_columns(rows: list[dict[str, object]], basis_column: str) -> list[str]:
     """Shortest leading column run that tells every row apart, or nothing.
 
     SQL puts group keys before aggregates, so the identity of a row is a prefix.
@@ -2432,9 +2432,7 @@ def _identifying_columns(
     return []
 
 
-def _is_partial(
-    rows: list[dict[str, object]], total_rows: int | None, truncated: bool
-) -> bool:
+def _is_partial(rows: list[dict[str, object]], total_rows: int | None, truncated: bool) -> bool:
     """Whether the rows in hand are less than the result.
 
     The flag is authoritative; the count comparison only covers producers that
@@ -2479,9 +2477,7 @@ def _unranked_rows_finding(
                 )
             ],
         )
-    spread = _spread_finding(
-        candidate, artifact_id, rows, count=count, grouped=grouped
-    )
+    spread = _spread_finding(candidate, artifact_id, rows, count=count, grouped=grouped)
     if spread is not None:
         return spread
     return QuestionFinding(
@@ -2555,9 +2551,7 @@ def _spread_finding(
     )
 
 
-def _group_size_column(
-    row: dict[str, object], sql: str, *, exclude: str
-) -> str | None:
+def _group_size_column(row: dict[str, object], sql: str, *, exclude: str) -> str | None:
     """The COUNT(*) column of a grouped result, when the SQL declares one.
 
     A ranking on a summed magnitude is partly a ranking on group size: the
@@ -2772,6 +2766,7 @@ def _regenerate_report(
     business_context: str,
     llm: LLMClient,
     payload_policy: PayloadPolicy,
+    persistence: GraphPersistence | None = None,
 ) -> list[Artifact]:
     report = generate_agentic_report(
         artifacts,
@@ -2780,6 +2775,7 @@ def _regenerate_report(
         business_context=business_context,
         llm=llm,
         payload_policy=payload_policy,
+        persistence=persistence,
     )
     return build_agentic_report_artifacts(
         report,

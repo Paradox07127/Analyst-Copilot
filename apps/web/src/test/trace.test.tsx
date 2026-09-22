@@ -521,3 +521,20 @@ describe("Trace page — debug log download", () => {
     expect(objectUrls.created).toHaveLength(0);
   });
 });
+
+it("shows graph, effect, turn, and worker correlation returned by the trace API", async () => {
+  server.use(http.get("/api/v1/sessions/:sessionId/trace", () => HttpResponse.json({
+    session_id: "r1", total: 1, next_cursor: null, event_types: { llm_usage: 1 }, items: [{
+      event_id: 12, event_type: "llm_usage", name: "probe", session_id: "r1",
+      turn_id: "turn-1", execution_id: "execution-1", parent_execution_id: "parent-1",
+      graph_node: "model", checkpoint_ns: "probe:0", effect_id: "model:1",
+      job_id: "job-1", job_generation: 3, call_id: "call-1", summary: {},
+    }],
+  })));
+  renderAppAt(PATH);
+  fireEvent.click(await screen.findByText("model", { selector: "summary" }));
+  const correlation = within(screen.getByLabelText("Execution correlation"));
+  for (const value of ["turn-1", "execution-1", "parent-1", "probe:0", "model:1", "job-1", "call-1"]) {
+    expect(correlation.getByText(value)).toBeInTheDocument();
+  }
+});

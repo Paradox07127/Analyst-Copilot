@@ -8,12 +8,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from eda_platform.core.budget import Budget, BudgetExceeded
+from eda_platform.core.budget import Budget
 from eda_platform.core.cancellation import (
     CancellationError,
     CancellationToken,
     current_cancellation_token,
 )
+from eda_platform.core.graph_execution import GraphPersistence
 from eda_platform.core.llm import LLMClient
 from eda_platform.core.permissions import PermissionTier, classify_action
 from eda_platform.core.sandbox import (
@@ -59,7 +60,9 @@ class CodeAgent:
         max_repairs: int = 2,
         require_stdout_json: bool = False,
         on_event: Callable[[dict[str, object]], None] | None = None,
+        persistence: GraphPersistence | None = None,
     ) -> None:
+        self.persistence = persistence
         self.llm = llm
         self.backend = backend
         self.limits = limits or SandboxLimits()
@@ -76,112 +79,19 @@ class CodeAgent:
         budget: Budget | None = None,
         cancellation: CancellationToken | None = None,
     ) -> CodeAgentResult:
-        cancellation = cancellation or current_cancellation_token()
-        attempts: list[CodeAgentAttempt] = []
-        previous_error: str | None = None
-        max_attempts = max(1, min(self.max_repairs + 1, 3))
-        for attempt_number in range(1, max_attempts + 1):
-            try:
-                if cancellation is not None:
-                    cancellation.checkpoint()
-                if budget is not None:
-                    budget.check()
-            except CancellationError as exc:
-                return _cancelled_result(attempts, exc)
-            except BudgetExceeded as exc:
-                return CodeAgentResult(
-                    status="failed",
-                    attempts=attempts,
-                    final_artifact=attempts[-1].artifact if attempts else None,
-                    error=str(exc),
-                    error_category="budget_exhausted",
-                )
-            payload: dict[str, Any] = {
-                "task": task,
-                "evidence_manifest": evidence_manifest,
-                "instructions": (
-                    "Return complete Python code only in the code field. Use only local "
-                    "mounted data and allowed analytical libraries. Do not access network, "
-                    "environment variables, subprocesses, or host paths."
-                ),
-            }
-            if previous_error:
-                payload["previous_error"] = previous_error
-                payload["repair_instructions"] = (
-                    "Revise the code to address the previous sandbox failure. Keep the "
-                    "analysis scoped to the same task and evidence."
-                )
+        from eda_platform.agents.code_graph import run_code_graph
 
-            try:
-                draft = self.llm.structured(
-                    task="m5_code_agent_generate",
-                    schema=CodeDraft,
-                    payload=payload,
-                )
-                if cancellation is not None:
-                    cancellation.checkpoint()
-                _record_usage(budget, self.llm)
-                if budget is not None:
-                    budget.check()
-            except CancellationError as exc:
-                return _cancelled_result(attempts, exc)
-            except BudgetExceeded as exc:
-                return CodeAgentResult(
-                    status="failed",
-                    attempts=attempts,
-                    final_artifact=attempts[-1].artifact if attempts else None,
-                    error=str(exc),
-                    error_category="budget_exhausted",
-                )
-            artifact, error_category = self._execute_draft(
-                draft,
-                cancellation=cancellation,
+        try:
+            return run_code_graph(
+                self,
+                task=task,
+                evidence_manifest=evidence_manifest,
+                budget=budget,
+                cancellation=cancellation or current_cancellation_token(),
             )
-            attempt = CodeAgentAttempt(
-                attempt=attempt_number,
-                code=draft.code,
-                artifact=artifact,
-                previous_error=previous_error,
-            )
-            attempts.append(attempt)
-            try:
-                if cancellation is not None:
-                    cancellation.checkpoint()
-            except CancellationError as exc:
-                return _cancelled_result(attempts, exc)
-            status, stdout_json, contract_error = _exit_status(
-                artifact,
-                require_stdout_json=self.require_stdout_json,
-            )
-            if contract_error is not None:
-                error_category = "invalid_result_contract"
-            self._emit(
-                {
-                    "event": "code_agent_attempt",
-                    "attempt": attempt_number,
-                    "status": status,
-                    "sandbox_status": artifact.status,
-                    "duration_seconds": artifact.duration_seconds,
-                    "error_category": error_category,
-                    "error": contract_error or artifact.error or artifact.stderr[:500],
-                }
-            )
-            if status == "succeeded":
-                return CodeAgentResult(
-                    status="succeeded",
-                    attempts=attempts,
-                    final_artifact=artifact,
-                    stdout_json=stdout_json,
-                )
-            previous_error = contract_error or _feedback(artifact)
-
-        return CodeAgentResult(
-            status="failed",
-            attempts=attempts,
-            final_artifact=attempts[-1].artifact if attempts else None,
-            error=_feedback(attempts[-1].artifact) if attempts else "No attempts executed.",
-            error_category="attempt_limit_exceeded",
-        )
+        except CancellationError as exc:
+            # Input hashing can be cancelled before a graph checkpoint is loaded.
+            return _cancelled_result([], exc)
 
     def _emit(self, event: dict[str, object]) -> None:
         if self.on_event is not None:
@@ -258,15 +168,6 @@ def _cancelled_result(
         error=str(exc),
         error_category="cancelled",
     )
-
-
-def _record_usage(budget: Budget | None, llm: LLMClient) -> None:
-    if budget is None:
-        return
-    usage = llm.last_usage()
-    if usage is None:
-        return
-    budget.add_tokens(usage.usage.total_tokens)
 
 
 def _blocked_artifact(backend: ExecutionBackend, error: str) -> ExecArtifact:

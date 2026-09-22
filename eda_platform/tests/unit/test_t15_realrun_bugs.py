@@ -26,6 +26,7 @@ from eda_platform.schemas.artifacts import (
     SqlResult,
 )
 from eda_platform.schemas.questions import (
+    AnalysisMode,
     QuestionCandidate,
     QuestionExecutionResult,
     QuestionFinding,
@@ -71,7 +72,7 @@ def _sql_artifact(rows: list[dict[str, object]], *, sql: str = "select 1") -> Ar
     )
 
 
-def _candidate(question: str, *, analysis_mode: str) -> QuestionCandidate:
+def _candidate(question: str, *, analysis_mode: AnalysisMode) -> QuestionCandidate:
     return QuestionCandidate(
         question_id="q_t15",
         question_en=question,
@@ -433,6 +434,7 @@ def test_the_plan_prompt_forbids_restating_a_share_against_a_new_denominator() -
     # The numeric gate verifies 14.2 and never reads the "of ..." phrase.
     from typing import Any, cast
 
+    from eda_platform.agents.report_graph import run_report_workflow
     from eda_platform.agents.reporting import _request_plan
     from eda_platform.schemas.reports import ReportPlanDraft
 
@@ -451,14 +453,22 @@ def test_the_plan_prompt_forbids_restating_a_share_against_a_new_denominator() -
             return None
 
     llm = _CapturingLLM()
-    _request_plan(
-        EvidencePack(payload_policy="schema+aggregates"),
-        business_context="Revenue analysis",
-        llm=cast(Any, llm),
-        prior_error=None,
-        prior_findings=[],
-        prior_bundle=None,
-        question_results=[_question_with_interpretation()],
+    run_report_workflow(
+        lambda workflow: _request_plan(
+            EvidencePack(payload_policy="schema+aggregates"),
+            business_context="Revenue analysis",
+            llm=cast(Any, llm),
+            prior_error=None,
+            prior_findings=[],
+            prior_bundle=None,
+            question_results=[_question_with_interpretation()],
+            workflow=workflow,
+            attempt_number=1,
+            usages=[],
+            call_records=[],
+        ).model_dump(mode="json"),
+        persistence=None,
+        inputs={},
     )
 
     instructions = llm.payloads[0]["instructions"].lower()

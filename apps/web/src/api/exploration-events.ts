@@ -21,6 +21,7 @@ export const EXPLORATION_EVENT_TYPES = [
   "gate_verdict",
   "reduction_committed",
   "round_settled",
+  "branch_abandoned",
   "pause_requested",
   "paused",
   "resumed",
@@ -53,6 +54,7 @@ function parseEvent(raw: string, explorationId: string): ExplorationEventDto | n
     if (
       data.exploration_id !== explorationId ||
       typeof data.seq !== "number" ||
+      !Number.isSafeInteger(data.seq) || data.seq < 0 ||
       data.event_id !== `${explorationId}:${data.seq}` ||
       typeof data.type !== "string"
     ) {
@@ -91,6 +93,7 @@ export function useExplorationEvents({
   const initialId =
     initialLastSeq >= 0 ? `${explorationId}:${initialLastSeq}` : null;
   const cursorRef = useRef<string | null>(initialId);
+  const sequenceRef = useRef({ explorationId, seq: initialLastSeq });
   const onEventRef = useRef(onEvent);
   const [phase, setPhase] = useState<ExplorationStreamPhase>(
     enabled ? "connecting" : "idle",
@@ -100,8 +103,13 @@ export function useExplorationEvents({
   onEventRef.current = onEvent;
 
   useEffect(() => {
-    cursorRef.current = initialLastSeq >= 0
-      ? `${explorationId}:${initialLastSeq}`
+    // A GET started before the last SSE frame may finish afterwards. Never
+    // move the reconnect cursor backwards when that older snapshot arrives.
+    const seq = sequenceRef.current.explorationId === explorationId
+      ? Math.max(sequenceRef.current.seq, initialLastSeq) : initialLastSeq;
+    sequenceRef.current = { explorationId, seq };
+    cursorRef.current = seq >= 0
+      ? `${explorationId}:${seq}`
       : null;
     setLastEventId(cursorRef.current);
   }, [explorationId, initialLastSeq]);
@@ -120,7 +128,8 @@ export function useExplorationEvents({
     source.onopen = () => setPhase("live");
     const receive = (message: MessageEvent) => {
       const event = parseEvent(String(message.data), explorationId);
-      if (!event) return;
+      if (terminal || !event || event.seq <= sequenceRef.current.seq) return;
+      sequenceRef.current = { explorationId, seq: event.seq };
       cursorRef.current = event.event_id;
       setLastEventId(event.event_id);
       onEventRef.current(event);
@@ -140,7 +149,10 @@ export function useExplorationEvents({
         setPhase("disconnected");
       }
     };
-    return () => source.close();
+    return () => {
+      terminal = true;
+      source.close();
+    };
   }, [enabled, eventsUrl, explorationId]);
 
   return { phase, lastEventId };

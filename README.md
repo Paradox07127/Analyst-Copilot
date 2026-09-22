@@ -27,10 +27,10 @@ The current release is `0.2.0`. The Python implementation lives in
 
 Analyst Copilot is under active development. The local, single-workspace flow,
 deterministic EDA, question execution, reporting, comparison, and guarded chat
-paths are implemented and covered by automated tests. Autonomous exploration is
-present behind a fail-closed production certificate gate; it remains hidden
-until a trusted provider-specific three-bucket evaluation certificate is
-installed.
+paths are implemented and covered by automated tests. Autonomous exploration
+uses a pre-run budget approval, bounded execution, and evidence-gated publication.
+Provider-specific certification remains evaluation tooling rather than a feature
+admission requirement.
 
 Remote mode is a protected single-workspace deployment option, not a
 multi-tenant security boundary. Open-ended model-authored Python requires the
@@ -42,6 +42,7 @@ before using the project with sensitive data.
 
 - [Capabilities](#capabilities)
 - [How it works](#how-it-works)
+- [LangGraph execution architecture](#langgraph-execution-architecture)
 - [Agent harness and evaluation](#agent-harness-and-evaluation)
 - [Technology and requirements](#technology-and-requirements)
 - [Quick start](#quick-start)
@@ -94,10 +95,10 @@ validators decide whether a result may become a finding or report claim. A
 failed method contract becomes an explicit abstention instead of a plausible
 but unsupported answer.
 
-The runtime deliberately stays framework-light. It uses project-owned Pydantic
-contracts, an explicit tool loop, durable journals and receipts for exploration,
-and a single canonical evaluation trial format. This keeps execution semantics
-inspectable without coupling the product to a third-party agent graph runtime.
+LangGraph owns agent and pipeline execution. Project-owned Pydantic contracts,
+analytical tools, budgets, approvals, receipts, and publication gates remain the
+domain layer. Checkpoints record where execution can continue; evidence artifacts
+record what the analysis established.
 
 ### Bounded-memory data plane
 
@@ -126,6 +127,111 @@ approximately 495 MB combined deep-frame size) completes offline with 123
 artifacts in about 32 seconds on the development machine. The measured process
 peak was approximately 446 MB, or 242 MB above the imported-runtime baseline;
 these measurements are illustrative rather than deployment guarantees.
+
+## LangGraph execution architecture
+
+The local FastAPI application and existing process workers run LangGraph directly.
+No managed graph server, PostgreSQL service, or hosted tracing account is required.
+The shared [execution adapter](eda_platform/src/eda_platform/core/graph_execution.py)
+uses the official SQLite checkpointer, synchronous graph durability, WAL storage,
+and a per-execution writer lock.
+
+| Workflow | Execution structure | Implementation |
+|---|---|---|
+| Chat and question agents | `StateGraph`: model, one tool effect at a time, answer validation, bounded revision | [Agent graph](eda_platform/src/eda_platform/agents/runtime.py) |
+| Structured-only planning and discovery | Functional API tasks per provider request and SQL query, covering planner repairs, interpretation, semantic bootstrap, question drafting, and session titles | [Model workflow](eda_platform/src/eda_platform/agents/model_workflow.py) |
+| Autonomous exploration | Explicit phase graph, native `interrupt` / `Command` pause and resume, bounded `Send` fan-out to independently checkpointed probes | [Exploration graph](eda_platform/src/eda_platform/agents/exploration/graph.py) and [probe composition](eda_platform/src/eda_platform/agents/exploration/workflow.py) |
+| Auto EDA | `StateGraph`: prepare, bounded `Send` compute batches, ordered artifact commits; official SQLite artifact-reference cache | [Pipeline graph](eda_platform/src/eda_platform/core/pipeline_graph.py) |
+| Code generation and repair | `StateGraph`: draft, sandbox execution, result-contract validation, bounded repair | [Code graph](eda_platform/src/eda_platform/agents/code_graph.py) |
+| Report planning, evidence reads, repair, and narration | Functional API `entrypoint` and individual checkpointed `task` results | [Report workflow](eda_platform/src/eda_platform/agents/report_graph.py) |
+
+Runtime services are supplied through context or closures. DataFrames, provider
+clients, database connections, locks, and worker handles are never checkpointed.
+Persisted state contains serializable control state, bounded intermediate results,
+and artifact references; the current EDA batch may temporarily include artifact
+envelopes until its ordered commit. The per-table data lifecycle described above
+continues to bound the working set.
+
+Execution routing uses known model capabilities and the first checkpointed
+request to establish tool support, avoiding a separate paid capability probe.
+Explicit provider diagnostics can still probe when requested.
+
+### Custom runtime retirement
+
+The old agent loop, sequential/thread-pool pipeline runners, and JSON execution
+checkpoints are retired. Report internals require the Functional workflow; no
+private direct-model compatibility route remains. Capability routing is entirely
+side-effect-free, with no automatic paid probe or process-global verdict cache.
+Exploration control state uses explicit graph channels, strict journal schema v2,
+and real receipt envelopes; old single-slot recovery fields and receipt-as-artifact
+fallbacks are rejected. Start a fresh exploration for older journal formats.
+
+`AgentRuntime`, `CodeAgent`, and the supervisor remain graph/domain facades.
+Workers still own processes and leases; evidence journals still verify domain
+commits. Neither is an alternative execution scheduler. Existing user workspace
+files are not deleted by source retirement.
+
+### Persistence and recovery
+
+Each execution has its own `graphs/<execution-hash>.sqlite` file under its owning
+session or exploration directory. The binding covers execution inputs, relevant
+configuration fingerprints, the graph version, and the installed LangGraph and
+SQLite-checkpointer versions. Changed bindings are rejected rather than silently
+resuming under a different definition. The artifact cache is separate from the
+execution cursor, and cached artifact references are validated before reuse.
+
+A checkpoint does not make a remote request and a local write atomic. Model and
+tool effects therefore keep stable operation identities and durable commit
+records. Completed effects are adopted after restart. Unknown provider outcomes
+are blocked from automatic resending; retrying requires a new execution. Only
+local operations explicitly treated as safe to repeat can replay a pending
+effect. Exploration retains its receipt outbox and journal reconciliation for
+these boundaries, plus per-round scheduling commit markers to prevent duplicate
+decisions after a crash.
+
+Exploration resume rechecks the data witness before analysis continues. Chat
+recovery discovers saved turns without running them; continuation uses an explicit
+resume action and the original execution identity. Existing worker fencing,
+cancellation, and job lifecycle controls remain responsible for process ownership.
+Chat admission is persisted before scheduling its local executor thread, including
+an atomic approval-consumption/admission transaction. Recovery also covers queued
+turns whose graph has not started. Approved SQL runs in a durable graph. Terminal
+SSE events and delivery status commit together; event sequences remain monotonic
+across recovery and process restarts. Recovery never starts paid work automatically.
+A periodic worker reconciler releases dead worker ownership without restarting work.
+Old custom-runtime runs and workflow snapshots are not migrated into the new
+execution format. Start a new run when its identity or runtime binding no longer
+matches.
+
+SQLite checkpoints are local application data and can contain prompts and tool
+observations. They use pickle-free serialization, with explicit permitted types
+for typed graph state. Hosted LangSmith tracing is disabled by the shared runtime;
+existing product traces and the optional redacted OpenTelemetry integration remain
+separate. Local traces carry turn, execution/parent execution, attempt, node,
+checkpoint namespace and effect identities. Node transition events contain bounded
+status metadata rather than checkpoint payloads. Product progress distinguishes
+worker completion from exploration success, pause, cancellation and limited outcomes.
+
+### Domain guarantees
+
+LangGraph replaces control flow and checkpoint scheduling. It does not replace
+SQL restrictions, Docker isolation, approval scope and one-time consumption,
+budget reservation and settlement, statistical method contracts, evidence gates,
+content-addressed artifacts, or report publication checks. An interrupt is a pause,
+not an authorization credential. Graph databases are execution records, not proof
+of an analytical claim; exploration evidence verification continues to use the
+independently validated journals, receipts, and result bodies.
+
+Regression tests exercise SQLite reopen and resume, data/configuration drift,
+uncertain provider outcomes, cancellation, bounded concurrency, and crashes
+between domain commits and graph checkpoints. This architecture change does not
+by itself establish lower latency, lower model cost, or better analytical accuracy.
+
+The implementation follows the official [Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api),
+[Functional API](https://docs.langchain.com/oss/python/langgraph/functional-api),
+[persistence](https://docs.langchain.com/oss/python/langgraph/persistence), and
+[interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts) documentation;
+the versions pinned in `uv.lock` and executable tests define the supported behavior.
 
 ## Agent harness and evaluation
 
@@ -163,6 +269,7 @@ exploration-release suites under [`eda_platform/tests/`](eda_platform/tests/).
 - Node.js 20+ and npm, to build the React workbench (`apps/web`)
 - [FastAPI](https://fastapi.tiangolo.com/) for the `/api/v1` contract and [React](https://react.dev/) + [Vite](https://vite.dev/) for the product UI
 - Pandas, DuckDB, SciPy, and scikit-learn for processing, querying, statistics, and baseline modeling
+- LangGraph and its official SQLite checkpointer/cache for local workflow execution
 - Pydantic for typed artifacts and workflow contracts
 - Vega-Lite and `vl-convert-python` for interactive charts and PNG export;
   Matplotlib is available to sandboxed open-ended Python analysis
@@ -464,6 +571,7 @@ The default workspace is `eda_platform/workspace/projects/<project_id>/`:
 uploads/<dataset_id>/v1/                 # preserved source-data versions
 sessions/<session_id>/manifest.json              # session manifest and code version
 sessions/<session_id>/trace.jsonl                # step and call trace events
+sessions/<session_id>/graphs/*.sqlite            # execution checkpoints and artifact cache
 sessions/<session_id>/artifacts/*.json           # typed analysis artifacts
 sessions/<session_id>/report/report.md           # Markdown report
 sessions/<session_id>/report/report.html         # self-contained HTML report
@@ -503,12 +611,14 @@ not be enabled for sensitive or remotely hosted workloads.
 
 - The application is local-first and single-workspace. Its remote mode is not a
   multi-tenant authorization system.
-- Autonomous exploration stays disabled until a trusted production certificate
-  covers planted, negative-control, and injection trials for the configured
-  provider and policy.
-- Forecasting, segmentation, and causal execution do not yet have dedicated
-  typed adapters. Requests requiring those methods abstain rather than falling
-  back to generic SQL or Python.
+- Exploration requires budget authorization and applies method, evidence, and
+  publication gates. Evaluation certificates do not replace those runtime checks.
+- Method-specific outputs must satisfy their typed contracts. Forecasts and
+  segmentation carry their validation limitations; causal wording requires the
+  appropriate experiment evidence and authorization.
+- Durable execution is local and requires a matching execution binding. Unknown
+  remote effects and incompatible runtime versions cannot be automatically
+  resumed; this is not a multi-machine scheduling or exactly-once execution service.
 - Docker live-runtime probes require a Linux-container Docker engine and the
   prebuilt sandbox image. Deterministic EDA and read-only SQL remain available
   when Docker is absent; model-authored Python does not.
@@ -609,10 +719,10 @@ scripts/                          server, demos, operations, and eval entry poin
 
 The primary architectural seams are:
 
-- `agents/`: model-facing loops, tool definitions, planning, interpretation,
-  reporting, and exploration orchestration;
+- `agents/`: LangGraph agent/workflow definitions, tool contracts, planning,
+  interpretation, reporting, and exploration domain services;
 - `core/`: storage-independent policies, budgets, traces, sandbox broker,
-  endpoint security, and durable control primitives;
+  endpoint security, shared SQLite graph execution, and pipeline composition;
 - `drivers/`: end-to-end workflows that connect agents and deterministic tools;
 - `schemas/`: versioned persisted and API-facing contracts;
 - `tools/`: deterministic analytical and evaluation operations;

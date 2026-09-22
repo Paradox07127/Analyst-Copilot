@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,6 +12,7 @@ from eda_platform.agents.exploration.executor import ProbeExecutor
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
 from eda_platform.core.exploration_budget import ToolCallLedger
 from eda_platform.core.llm import LLMToolCall, LLMToolResponse
+from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.exploration_budget import (
     ExplorationBudgetPolicy,
     SessionBudgetPolicyModel,
@@ -31,10 +32,11 @@ class _SliceArgs(BaseModel):
     where_sql: str | None = Field(default=None, min_length=1)
 
 
-@dataclass(frozen=True)
-class _Receipt:
-    id: str
-    payload: dict[str, Any] = field(default_factory=dict)
+def _Receipt(id: str, payload: dict[str, Any] | None = None) -> Artifact:
+    return Artifact(
+        id=id, type=ArtifactType.EVIDENCE_RECEIPT, project_id="p", session_id="s",
+        payload={"receipt_id": id, **(payload or {})},
+    )
 
 
 class _Provider:
@@ -225,7 +227,7 @@ def test_disabled_tool_call_is_rejected_without_execution() -> None:
 class _JournalEvent:
     event_type: str
     logical_step_id: str
-    tool_kind: str = "legacy_unknown"
+    tool_kind: str = "flaky"
     error: str = ""
 
 

@@ -180,7 +180,7 @@ def main() -> int:
 
     _heading("5. Auto-selected top questions -> execution -> findings")
     selected = select_auto_execution_candidates(
-        question_set, relationship_candidates=candidates, limit=3
+        question_set, limit=3
     )
     if not selected:
         print("(no candidates cleared the deterministic auto-execution gate)")

@@ -113,7 +113,17 @@ def create_app(
 ) -> FastAPI:
     root = resolve_workspace_path(workspace)
     deployment = deployment_config()
-    app = FastAPI(title="EDA Agent Platform API", version="0.1.0")
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        job_backend.start_reconciliation()
+        try:
+            yield
+        finally:
+            job_backend.close()
+
+    app = FastAPI(title="EDA Agent Platform API", version="0.1.0", lifespan=lifespan)
     app.state.workspace = root
     app.state.deployment = deployment
     store = ArtifactStore(root)
@@ -146,9 +156,7 @@ def create_app(
     app.state.artifact_service = ArtifactService(store)
     app.state.insight_service = InsightService(store)
     approval_service = ApprovalService(store)
-    app.state.exploration_service = ExplorationService(
-        store, approval_service, job_service
-    )
+    app.state.exploration_service = ExplorationService(store, approval_service, job_service)
     app.state.cleaning_service = CleaningService(
         store, dataset_service, approval_service, job_service
     )
@@ -165,9 +173,7 @@ def create_app(
     app.state.report_generation_service = ReportGenerationService(store, job_service)
     app.state.session_fork_service = SessionForkService(store, job_service)
     app.state.compare_service = CompareService(store, session_service)
-    app.state.skill_service = SkillService(
-        store, dataset_service, approval_service, job_service
-    )
+    app.state.skill_service = SkillService(store, dataset_service, approval_service, job_service)
     app.state.chat_service = ChatService(store, approval_service)
     app.state.board_service = BoardService(store)
     analysis_service = AnalysisService(store)
@@ -234,9 +240,7 @@ def create_app(
     return app
 
 
-def _configure_middleware(
-    app: FastAPI, store: ArtifactStore, deployment: DeploymentConfig
-) -> None:
+def _configure_middleware(app: FastAPI, store: ArtifactStore, deployment: DeploymentConfig) -> None:
     """Install inner-to-outer after routes exist so mutation policy is generated."""
     configure_mutation_contract(app, db_path=str(store.db_path))
     # Must sit at the ASGI layer: starlette spools the whole multipart body to

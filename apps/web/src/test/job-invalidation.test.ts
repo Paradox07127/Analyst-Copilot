@@ -24,6 +24,11 @@ const base = [
 ];
 
 const expected: Record<JobKind, unknown[][]> = {
+  exploration_run: [
+    ...base, ["explorations", "source"], ["exploration", "source"],
+    ["findings", "source"], ["artifacts", "derived"],
+    ["session-metrics", "source"], ["trace", "source"],
+  ],
   auto_eda: [
     ...base,
     ["datasets", "derived"],

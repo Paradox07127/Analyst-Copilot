@@ -411,6 +411,11 @@ class SessionDeletionCoordinator:
                     "delete from trace_events where project_id = ? and session_id = ?",
                     (operation.project_id, operation.session_id),
                 )
+                for table in ("chat_executions", "chat_execution_events"):
+                    conn.execute(
+                        f"delete from {table} where project_id=? and session_id=?",
+                        (operation.project_id, operation.session_id),
+                    )
                 conn.execute(
                     "delete from pending_actions where project_id = ? and session_id = ?",
                     (operation.project_id, operation.session_id),

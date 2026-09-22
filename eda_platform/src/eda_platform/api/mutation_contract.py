@@ -58,6 +58,7 @@ IDEMPOTENT_OPERATIONS = frozenset(
         "import_skill_template_api_v1_sessions__session_id__skill_templates__template_id__import_post",
         "execute_skill_replay_api_v1_sessions__session_id__skills__skill_id__execute_post",
         "send_chat_message_api_v1_sessions__session_id__chat_messages_post",
+        "resume_chat_turn_api_v1_sessions__session_id__chat_turns__message_id__resume_post",
         "approve_chat_plan_api_v1_sessions__session_id__chat_plans__plan_id__approve_post",
         "reject_chat_plan_api_v1_sessions__session_id__chat_plans__plan_id__reject_post",
         "record_client_failure_api_v1_sessions__session_id__client_failures_post",

@@ -18,8 +18,12 @@ class Budget:
     max_tokens: int | None = None
     started_at: float = field(default_factory=monotonic)
     tokens_used: int = 0
+    _execution_tokens: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def check(self) -> None:
+        with self._lock:
+            self._check_token_limit()
         if self.max_seconds is None:
             return
         if self.max_seconds <= 0:
@@ -31,7 +35,22 @@ class Budget:
         """Record token usage and enforce the token ceiling if configured."""
         if tokens < 0:
             raise ValueError("Token usage cannot be negative.")
-        self.tokens_used += tokens
+        with self._lock:
+            self.tokens_used += tokens
+            self._check_token_limit()
+
+    def account_execution_tokens(self, execution_id: str, total_tokens: int) -> None:
+        """Account a graph's cumulative spend once, including committed replayed calls."""
+        if total_tokens < 0:
+            raise ValueError("Token usage cannot be negative.")
+        with self._lock:
+            previous = self._execution_tokens.get(execution_id, 0)
+            self.tokens_used += max(0, total_tokens - previous)
+            # Retain accounting even when enforcing the ceiling raises.
+            self._execution_tokens[execution_id] = max(previous, total_tokens)
+            self._check_token_limit()
+
+    def _check_token_limit(self) -> None:
         if self.max_tokens is not None and self.tokens_used > self.max_tokens:
             raise BudgetExceeded(
                 f"Session token budget exhausted: {self.tokens_used} > {self.max_tokens}."

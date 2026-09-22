@@ -41,6 +41,7 @@ from eda_platform.core.llm import (
     LLMToolResponse,
     MalformedProviderResponseError,
 )
+from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.exploration import ExplorationPolicy
 from eda_platform.schemas.exploration_budget import (
     ExplorationBudgetPolicy,
@@ -59,9 +60,11 @@ class _SqlArgs(BaseModel):
     purpose: str = Field(min_length=1)
 
 
-@dataclass(frozen=True)
-class _Receipt:
-    id: str
+def _Receipt(receipt_id: str) -> Artifact:
+    return Artifact(
+        id=receipt_id, type=ArtifactType.EVIDENCE_RECEIPT,
+        project_id="p", session_id="s", payload={"receipt_id": receipt_id},
+    )
 
 
 class _Provider:
@@ -618,6 +621,7 @@ def test_actual_success_over_cap_is_failed_before_receipt_commit() -> None:
 def test_batch_action_index_stays_stable_when_an_earlier_tool_is_adopted() -> None:
     run_id = "batch-recovery"
     response_store = InMemoryLlmResponseStore()
+    tool_store = InMemoryToolResultStore()
     completed_steps: set[str] = set()
     seen: set[str] = set()
     ledger = ToolCallLedger(_policy("one", "two"))
@@ -641,6 +645,7 @@ def test_batch_action_index_stays_stable_when_an_earlier_tool_is_adopted() -> No
         ledger,
         journal=first_hooks,
         response_store=response_store,
+        tool_result_store=tool_store,
     )
     with pytest.raises(RuntimeError, match="simulated crash"):
         first.run(
@@ -662,6 +667,7 @@ def test_batch_action_index_stays_stable_when_an_earlier_tool_is_adopted() -> No
         ledger,
         journal=resumed_hooks,
         response_store=response_store,
+        tool_result_store=tool_store,
     ).run(
         phase="execute_probes",
         system_prompt="x",
@@ -677,6 +683,7 @@ def test_batch_action_index_stays_stable_when_an_earlier_tool_is_adopted() -> No
         if event == "tool_started"
     ]
     assert resumed.status == "completed"
+    assert [artifact.id for artifact in resumed.artifacts] == ["rcpt-1", "rcpt-2"]
     assert resumed_started[0] == first_hooks.started_ids[1]
     assert len(resumed_provider.calls) == 1  # only the next provider step was sent
 
@@ -969,8 +976,8 @@ def test_jsonl_hooks_commit_receipt_under_claimed_attempt_fence(tmp_path: Any) -
     state = journal.rebuild()
     assert result.status == "completed"
     assert state is not None
-    assert state.pending_call_id is None
-    assert state.pending_logical_step_id is None
+    assert state.pending_call_ids == ()
+    assert state.pending_tool_steps == {}
     assert state.tool_calls_committed == 1
     assert list(state.step_receipt_refs.values()) == ["receipt-1"]
     assert [event.event_type for event in journal.events()][-7:] == [
@@ -1114,3 +1121,183 @@ def test_an_oversized_native_batch_rejects_the_overflow_before_executing_any_too
         and "batch position" in str(message.get("content", ""))
     ]
     assert len(overflow) == 2
+
+
+class _WorkerCrash(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("crash_point", ["before_tools", "after_tools", "provider_uncertain"])
+def test_probe_sqlite_restart_preserves_execution_and_remote_effects(
+    tmp_path: Any, crash_point: str
+) -> None:
+    from eda_platform.drivers.exploration import JsonLlmResponseStore, JsonToolResultStore
+    from eda_platform.schemas.artifacts import Artifact, ArtifactType
+
+    budget = _policy("inspect")
+    policy = sealed_policy(ExplorationPolicy(
+        mode="open", dataset_scope=("dataset-1",), thinking_level="quick",
+        coverage_targets=(), budget=budget, scoring_policy_version="score-v1",
+        statistical_policy_version="stats-v1", tool_capability_digest="tools-v1",
+    ))
+    journal = JsonlExplorationJournal(tmp_path / "exploration.jsonl")
+    journal.initialize(
+        exploration_id="restart", policy=policy, code_fingerprint="v1",
+        data_state_witness="witness-v1",
+    )
+    journal.claim_attempt()
+    journal.append_new("round_started", round_index=0)
+    tool_runs: list[int] = []
+
+    def inspect(_args: Any) -> AgentToolResult:
+        tool_runs.append(1)
+        return AgentToolResult(
+            content={"value": 1},
+            receipt_artifact=Artifact(
+                id="receipt-1", type=ArtifactType.EVIDENCE_RECEIPT,
+                project_id="project", session_id="session", payload={"receipt_id": "receipt-1"},
+            ),
+        )
+
+    checkpoints = 0
+
+    def crash() -> None:
+        nonlocal checkpoints
+        checkpoints += 1
+        if ((crash_point == "before_tools" and checkpoints == 2)
+                or (crash_point == "after_tools" and checkpoints == 3)):
+            raise _WorkerCrash
+
+    initial_provider = _Provider([
+        LLMToolResponse(tool_calls=[_call("inspect")]), _WorkerCrash()
+    ])
+    tools = [_tool("inspect", inspect)]
+    responses = tmp_path / "responses"
+    results = tmp_path / "results"
+    with pytest.raises(_WorkerCrash):
+        ProbeExecutor(
+            initial_provider, tools, ToolCallLedger(budget),
+            journal=JsonlProbeJournalHooks(journal),
+            response_store=JsonLlmResponseStore(responses),
+            tool_result_store=JsonToolResultStore(results), cancel_check=crash,
+        ).run(phase="execute_probes", system_prompt="x", user_message="y", run_id="probe")
+
+    # New journal/executor/provider/store instances reopen the persisted SQLite
+    # checkpoint. The real recovery claim fences the crashed worker and marks
+    # unresolved provider requests as uncertain before resuming the graph.
+    reopened = JsonlExplorationJournal(journal.path)
+    recovered = reopened.claim_recovery()
+    completed_digests = {
+        event.step_id: event.response_digest for event in reopened.events()
+        if event.event_type == "llm_call_completed"
+    }
+    resumed_provider = _Provider([LLMToolResponse(content="Done.")])
+    result = ProbeExecutor(
+        resumed_provider, tools, ToolCallLedger(budget),
+        journal=JsonlProbeJournalHooks(reopened),
+        response_store=JsonLlmResponseStore(responses),
+        tool_result_store=JsonToolResultStore(results),
+    ).run(
+        phase="execute_probes", system_prompt="x", user_message="y", run_id="probe",
+        completed_step_ids=set(recovered.completed_step_ids),
+        completed_response_digests=completed_digests,
+        blocked_llm_call_ids=set(recovered.uncertain_call_ids),
+    )
+    assert len(tool_runs) == 1
+    assert [artifact.id for artifact in result.artifacts] == ["receipt-1"]
+    if crash_point == "provider_uncertain":
+        assert result.error_code == "provider_outcome_uncertain"
+        assert resumed_provider.calls == []
+    else:
+        assert result.status == "completed"
+        assert len(resumed_provider.calls) == 1
+    final = reopened.rebuild()
+    assert final is not None and final.tool_calls_committed == 1
+
+
+@pytest.mark.parametrize("crash_point", ["mid_batch", "before_checkpoint"])
+def test_sqlite_batch_recovery_adopts_every_receipt_without_budget_readmission(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, crash_point: str,
+) -> None:
+    from eda_platform.drivers.exploration import JsonLlmResponseStore, JsonToolResultStore
+    from eda_platform.schemas.artifacts import Artifact, ArtifactType
+
+    budget = _policy("one", "two", max_calls=2)
+    policy = sealed_policy(ExplorationPolicy(
+        mode="open", dataset_scope=("ds",), thinking_level="quick", coverage_targets=(),
+        budget=budget, scoring_policy_version="1", statistical_policy_version="1",
+        tool_capability_digest="1",
+    ))
+    journal = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    journal.initialize(
+        exploration_id="batch", policy=policy, code_fingerprint="v1", data_state_witness="w",
+    )
+    journal.claim_attempt()
+    journal.append_new("round_started", round_index=0)
+    calls = {"one": 0, "two": 0}
+
+    def execute(name: str) -> AgentToolResult:
+        calls[name] += 1
+        return AgentToolResult(content={"value": name}, receipt_artifact=Artifact(
+            id="receipt-" + name, type=ArtifactType.EVIDENCE_RECEIPT,
+            project_id="p", session_id="s", payload={"receipt_id": "receipt-" + name},
+        ))
+
+    tools = [_tool(name, lambda _, name=name: execute(name)) for name in calls]
+    original = ProbeExecutor._tools_node
+
+    def crash_after_node(self: ProbeExecutor, state: Any) -> Any:
+        result = original(self, state)
+        if crash_point == "before_checkpoint":
+            raise _WorkerCrash
+        return result
+
+    monkeypatch.setattr(ProbeExecutor, "_tools_node", crash_after_node)
+    checkpoints = 0
+
+    def checkpoint() -> None:
+        nonlocal checkpoints
+        checkpoints += 1
+        if crash_point == "mid_batch" and checkpoints == 3:
+            raise _WorkerCrash
+
+    initial_provider = _Provider([
+        LLMToolResponse(tool_calls=[_call("one", "c1"), _call("two", "c2")]),
+    ])
+    with pytest.raises(_WorkerCrash):
+        ProbeExecutor(
+            initial_provider, tools, ToolCallLedger(budget),
+            journal=JsonlProbeJournalHooks(journal), cancel_check=checkpoint,
+            response_store=JsonLlmResponseStore(tmp_path / "responses"),
+            tool_result_store=JsonToolResultStore(tmp_path / "results"),
+        ).run(phase="execute_probes", system_prompt="x", user_message="y", run_id="probe")
+    monkeypatch.setattr(ProbeExecutor, "_tools_node", original)
+    reopened = JsonlExplorationJournal(journal.path)
+    recovered = reopened.claim_recovery()
+    ledger = ToolCallLedger.restore_from_journal_state(budget, recovered)
+    provider = _Provider([LLMToolResponse(content="done")])
+    result = ProbeExecutor(
+        provider, tools, ledger, journal=JsonlProbeJournalHooks(reopened),
+        response_store=JsonLlmResponseStore(tmp_path / "responses"),
+        tool_result_store=JsonToolResultStore(tmp_path / "results"),
+    ).run(
+        phase="execute_probes", system_prompt="x", user_message="y", run_id="probe",
+        completed_step_ids=set(recovered.completed_step_ids),
+        completed_response_digests={
+            event.step_id: event.response_digest for event in reopened.events()
+            if event.event_type == "llm_call_completed"
+        },
+        seen_probe_fingerprints=set(recovered.completed_probe_fingerprints),
+        blocked_llm_call_ids=set(recovered.uncertain_call_ids),
+    )
+    assert result.status == "completed"
+    assert result.failure_history == ()
+    assert [artifact.id for artifact in result.artifacts] == ["receipt-one", "receipt-two"]
+    assert calls == {"one": 1, "two": 1}
+    assert result.tool_calls == 2
+    assert len(initial_provider.calls) == len(provider.calls) == 1
+    assert ledger.snapshot()["successful_tool_calls"] == 2
+    final = reopened.rebuild()
+    assert final is not None
+    assert set(final.step_receipt_refs.values()) == {"receipt-one", "receipt-two"}
+    assert final.tool_calls_committed == 2

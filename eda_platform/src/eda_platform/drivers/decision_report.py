@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -11,11 +12,21 @@ from eda_platform.agents.evidence_interleave import (
     EvidenceInterleaveSession,
     StoreEvidenceResolver,
 )
+from eda_platform.agents.model_workflow import (
+    ModelWorkflow,
+    WorkflowModelClient,
+    run_model_workflow,
+)
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.claim_language import CAUSAL_PHRASES, contains_causal_phrase
-from eda_platform.core.ids import make_artifact_id
+from eda_platform.core.graph_execution import (
+    GraphEffectUncertain,
+    GraphIdentityError,
+    GraphPersistence,
+)
+from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.kernel import SessionCancelled
-from eda_platform.core.llm import LLMClient, is_offline_client
+from eda_platform.core.llm import LLMClient, is_offline_client, llm_execution_fingerprint
 from eda_platform.core.publication_fingerprint import (
     DECISION_REPORT_POLICY_VERSION,
     decision_report_input_fingerprint,
@@ -32,7 +43,7 @@ from eda_platform.schemas.decision_report import (
 )
 from eda_platform.schemas.investigations import ValidatedFinding
 from eda_platform.schemas.quality_context import QualityContext
-from eda_platform.schemas.reports import EvidenceRequest
+from eda_platform.schemas.reports import EvidenceRequest, InterleaveTranscript
 from eda_platform.schemas.synthesis import SynthesisBrief
 
 _NUMBER_PATTERN = re.compile(r"(?<![\w.-])-?\d+(?:\.\d+)?%?")
@@ -103,6 +114,7 @@ def create_decision_report(
     brief_session_id: str | None = None,
     llm: LLMClient | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    execution_id: str | None = None,
 ) -> str:
     """Create and persist a DecisionReport, returning its artifact id."""
     raise_if_cancelled(cancel_check, operation="decision report")
@@ -143,20 +155,20 @@ def create_decision_report(
     )
     if llm is not None and not is_offline_client(llm):
         # Fall back to the deterministic report if evidence interleaving fails.
+        witnesses: list[dict[str, Any]] = []
         session = _interleave_session(
             store,
             project_id=project_id,
             session_id=brief_artifact.session_id,
             finding_artifacts=finding_artifacts,
             findings=findings,
+            witnesses=witnesses,
         )
         deterministic_report = report
-        report = _refine_scqa(
-            report,
-            llm=llm,
-            evidence=evidence,
-            session=session,
-            cancel_check=cancel_check,
+        report = _durable_refine_scqa(
+            report, llm=llm, evidence=evidence, session=session,
+            cancel_check=cancel_check, store=store, brief_artifact=brief_artifact,
+            finding_artifacts=finding_artifacts, witnesses=witnesses, execution_id=execution_id,
         )
         raise_if_cancelled(cancel_check, operation="decision report")
         transcript_persisted = _persist_interleave_transcript(
@@ -207,6 +219,105 @@ def create_decision_report(
     return artifact.id
 
 
+class _WitnessedStoreResolver(StoreEvidenceResolver):
+    """Record the exact persisted evidence read by the bounded resolver."""
+
+    def __init__(self, *args: Any, witnesses: list[dict[str, Any]], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.witnesses = witnesses
+
+    def lookup(self, artifact_id: str) -> Artifact | None:
+        artifact = super().lookup(artifact_id)
+        if artifact is not None:
+            reference = {
+                "id": artifact.id, "project_id": artifact.project_id,
+                "session_id": artifact.session_id,
+                "digest": stable_hash(
+                    artifact.model_dump(mode="json", exclude={"created_at"}), length=64,
+                ),
+            }
+            if reference not in self.witnesses:
+                self.witnesses.append(reference)
+        return artifact
+
+
+def _verify_evidence_witnesses(store: ArtifactStore, witnesses: list[dict[str, Any]]) -> None:
+    for ref in witnesses:
+        try:
+            artifact = store.get_artifact(
+                ref["id"], project_id=ref["project_id"], session_id=ref["session_id"],
+            )
+        except (KeyError, FileNotFoundError) as exc:
+            raise GraphIdentityError("Decision report evidence disappeared; start anew.") from exc
+        if stable_hash(
+            artifact.model_dump(mode="json", exclude={"created_at"}), length=64,
+        ) != ref["digest"]:
+            raise GraphIdentityError("Decision report evidence changed; start anew.")
+
+
+def _durable_refine_scqa(
+    report: DecisionReport, *, llm: LLMClient,
+    evidence: Sequence[tuple[float, str, str | None]], session: EvidenceInterleaveSession,
+    cancel_check: Callable[[], bool] | None, store: ArtifactStore,
+    brief_artifact: Artifact, finding_artifacts: Sequence[Artifact],
+    witnesses: list[dict[str, Any]], execution_id: str | None,
+) -> DecisionReport:
+    def run(workflow: ModelWorkflow) -> dict[str, Any]:
+        def catalog() -> dict[str, Any]:
+            entries = session.catalog()
+            return {"catalog": entries, "sources": list(witnesses)}
+
+        initial = workflow.step("decision_evidence_catalog", catalog)
+        _verify_evidence_witnesses(store, initial["sources"])
+        witnesses[:] = initial["sources"]
+
+        def read(request: EvidenceRequest) -> dict[str, Any]:
+            def resolve() -> dict[str, Any]:
+                outcome = session.request(request)
+                return {
+                    "outcome": outcome.model_dump(mode="json"),
+                    "transcript": session.transcript.model_dump(mode="json"),
+                    "sources": list(witnesses),
+                }
+
+            saved = workflow.step("decision_evidence_request", resolve)
+            _verify_evidence_witnesses(store, saved["sources"])
+            witnesses[:] = saved["sources"]
+            session.restore(InterleaveTranscript.model_validate(saved["transcript"]))
+            return saved["outcome"]
+
+        refined = _refine_scqa(
+            report, llm=WorkflowModelClient(llm, workflow), evidence=evidence,
+            session=session, cancel_check=cancel_check, evidence_reader=read,
+            evidence_catalog=initial["catalog"],
+        )
+        return {
+            "report": refined.model_dump(mode="json"),
+            "transcript": session.transcript.model_dump(mode="json"),
+            "sources": list(witnesses),
+        }
+
+    saved = run_model_workflow(
+        run, persistence=GraphPersistence(
+            store.session_dir(brief_artifact.project_id, brief_artifact.session_id),
+            "decision-report:" + (execution_id or stable_hash({
+                "brief": brief_artifact.id, "model": llm_execution_fingerprint(llm),
+            }, length=32)),
+        ),
+        inputs={
+            "brief": brief_artifact.model_dump(mode="json", exclude={"created_at"}),
+            "findings": [artifact.model_dump(mode="json", exclude={"created_at"})
+                         for artifact in finding_artifacts],
+            "model": llm_execution_fingerprint(llm), "policy": DECISION_REPORT_POLICY_VERSION,
+            "report": report.model_dump(mode="json"),
+        },
+        definition="decision-report-functional-v1",
+    )
+    _verify_evidence_witnesses(store, saved["sources"])
+    session.restore(InterleaveTranscript.model_validate(saved["transcript"]))
+    return DecisionReport.model_validate(saved["report"])
+
+
 def _interleave_session(
     store: ArtifactStore,
     *,
@@ -214,6 +325,7 @@ def _interleave_session(
     session_id: str,
     finding_artifacts: Sequence[Artifact],
     findings: Sequence[ValidatedFinding],
+    witnesses: list[dict[str, Any]] | None = None,
 ) -> EvidenceInterleaveSession:
     """Build the bounded evidence session used by the report writer."""
     catalog_ids = [
@@ -245,8 +357,9 @@ def _interleave_session(
         )
 
     return EvidenceInterleaveSession(
-        StoreEvidenceResolver(
+        _WitnessedStoreResolver(
             store,
+            witnesses=witnesses if witnesses is not None else [],
             project_id=project_id,
             artifact_session_ids=artifact_session_ids,
             catalog_artifact_ids=catalog_ids,
@@ -573,6 +686,8 @@ def _refine_scqa(
     evidence: Sequence[tuple[float, str, str | None]],
     session: EvidenceInterleaveSession | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    evidence_reader: Callable[[EvidenceRequest], dict[str, Any]] | None = None,
+    evidence_catalog: list[str] | None = None,
 ) -> DecisionReport:
     # The LLM may arrange grounded content but cannot introduce facts or numbers.
     payload: dict[str, object] = {
@@ -601,9 +716,10 @@ def _refine_scqa(
                 llm=llm,
                 session=session,
                 cancel_check=cancel_check,
+                evidence_reader=evidence_reader, evidence_catalog=evidence_catalog,
             )
         )
-    except (BudgetExceeded, SessionCancelled):
+    except (BudgetExceeded, SessionCancelled, GraphEffectUncertain, GraphIdentityError):
         raise
     except (RuntimeError, ValidationError, ValueError, TypeError, AttributeError, OSError) as exc:
         return _narrative_fallback(report, f"rewrite_call_failed:{type(exc).__name__}")
@@ -652,6 +768,8 @@ def _request_interleaved_rewrite(
     llm: LLMClient,
     session: EvidenceInterleaveSession,
     cancel_check: Callable[[], bool] | None = None,
+    evidence_reader: Callable[[EvidenceRequest], dict[str, Any]] | None = None,
+    evidence_catalog: list[str] | None = None,
 ) -> _SCQARewrite | None:
     """Run the bounded evidence-request and rewrite loop."""
     payload = dict(payload)
@@ -667,7 +785,9 @@ def _request_interleaved_rewrite(
             "return the final text with no evidence_requests. Only numbers "
             "present in granted evidence or the provided statements may appear."
         ),
-        "available_artifacts": session.catalog(),
+        "available_artifacts": (
+            evidence_catalog if evidence_catalog is not None else session.catalog()
+        ),
     }
     exchanges: list[dict[str, object]] = []
     rewrite: _SCQAInterleavedRewrite | None = None
@@ -680,8 +800,11 @@ def _request_interleaved_rewrite(
         if not requests:
             break
         for request in requests:
-            outcome = session.request(request)
-            exchanges.append(outcome.model_dump(mode="json"))
+            outcome = (
+                evidence_reader(request) if evidence_reader is not None
+                else session.request(request).model_dump(mode="json")
+            )
+            exchanges.append(outcome)
         payload = dict(payload)
         payload["granted_evidence"] = list(exchanges)
     if rewrite is None:

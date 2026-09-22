@@ -7,8 +7,8 @@ Twelve of eighteen providers were unreachable as a result, including all three
 local ones.
 
 So an entry here means "verified, and here is the dialect that works"; absence
-means "unverified, try it and find out" — see ``tool_calling_probe`` for how
-that gets decided before a run spends anything.
+means "unverified, try the graph's durable request". The side-effect-free
+``tool_calling_routing`` module chooses the initial route.
 """
 
 from __future__ import annotations

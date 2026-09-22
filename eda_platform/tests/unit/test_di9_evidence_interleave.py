@@ -20,7 +20,13 @@ from eda_platform.agents.evidence_interleave import (
     InMemoryEvidenceResolver,
     StoreEvidenceResolver,
 )
+from eda_platform.agents.model_workflow import ModelWorkflow
 from eda_platform.agents.reporting import generate_agentic_report
+from eda_platform.core.graph_execution import (
+    GraphEffectUncertain,
+    GraphExecution,
+    GraphIdentityError,
+)
 from eda_platform.core.llm import OfflineLLMClient
 from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.decision_report import create_decision_report
@@ -765,3 +771,109 @@ def test_offline_llm_keeps_deterministic_fallback_without_interleave(tmp_path: P
     )
     assert result.used_fallback
     assert result.interleave_transcript is None
+
+
+class _DecisionWorkerLost(BaseException):
+    pass
+
+
+def _durable_replies(artifact_id: str = "sqlres_di9") -> list[dict[str, Any]]:
+    return [
+        {"evidence_requests": [{
+            "artifact_id": artifact_id, "locator": "rows[0].late_rate", "section": "answer",
+        }]},
+        {"situation": "The fulfilment analysis frames the current decision.",
+         "complication": "Coverage conditions narrow interpretation.",
+         "answer": "The granted late rate metric is 12.5."},
+    ]
+
+
+@pytest.mark.parametrize("boundary", ["model:2", "decision_evidence_request"])
+def test_decision_graph_restores_grants_without_repeated_paid_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    store, brief_id = _seed_store(tmp_path)
+    first = ScriptedLLM(_durable_replies())
+    crashed = False
+    original_effect = GraphExecution.effect
+    original_step = ModelWorkflow.step
+
+    def effect(self: GraphExecution, key: str, request: dict, call: Any, **kwargs: Any) -> dict:
+        nonlocal crashed
+        result = original_effect(self, key, request, call, **kwargs)
+        if boundary == key and not crashed:
+            crashed = True
+            raise _DecisionWorkerLost()
+        return result
+
+    def step(self: ModelWorkflow, name: str, run: Any) -> dict:
+        nonlocal crashed
+        result = original_step(self, name, run)
+        if boundary == name and not crashed:
+            crashed = True
+            raise _DecisionWorkerLost()
+        return result
+
+    monkeypatch.setattr(GraphExecution, "effect", effect)
+    monkeypatch.setattr(ModelWorkflow, "step", step)
+    with pytest.raises(_DecisionWorkerLost):
+        create_decision_report(store, project_id=_PROJECT, brief_artifact_id=brief_id, llm=first)
+    resumed = ScriptedLLM(_durable_replies()[first.calls:])
+    report_id = create_decision_report(
+        store, project_id=_PROJECT, brief_artifact_id=brief_id, llm=resumed,
+    )
+    report = DecisionReport.model_validate(store.get_artifact(report_id).payload)
+    assert first.calls + resumed.calls == 2
+    assert report.narrative_status == "llm_refined"
+    assert report.granted_evidence_artifact_ids == ["sqlres_di9"]
+    assert report.interleave_transcript_artifact_id is not None
+    transcript = InterleaveTranscript.model_validate(
+        store.get_artifact(report.interleave_transcript_artifact_id).payload,
+    )
+    assert transcript.granted_count == 1
+    assert len(transcript.exchanges) == 1
+    finished = ScriptedLLM([])
+    assert create_decision_report(
+        store, project_id=_PROJECT, brief_artifact_id=brief_id, llm=finished,
+    ) == report_id
+    assert finished.calls == 0
+
+
+def test_decision_graph_checks_read_evidence_outside_the_suggested_catalog(tmp_path: Path) -> None:
+    store, brief_id = _seed_store(tmp_path)
+    hidden = _sql_artifact().model_copy(update={"id": "sqlres_hidden"}, deep=True)
+    store.save_artifact(hidden)
+    client = ScriptedLLM(_durable_replies("sqlres_hidden"))
+    report_id = create_decision_report(
+        store, project_id=_PROJECT, brief_artifact_id=brief_id, llm=client,
+    )
+    report = DecisionReport.model_validate(store.get_artifact(report_id).payload)
+    assert report.narrative_status == "llm_refined"
+    assert report.granted_evidence_artifact_ids == ["sqlres_hidden"]
+    # This artifact is neither a selected finding nor in its source refs: only
+    # the resolver's actual-read witness can catch its mutation after completion.
+    hidden.payload["rows_preview"][0]["late_rate"] = 99
+    store.save_artifact(hidden)
+    resumed = ScriptedLLM([])
+    with pytest.raises(GraphIdentityError):
+        create_decision_report(
+            store, project_id=_PROJECT, brief_artifact_id=brief_id, llm=resumed,
+        )
+    assert resumed.calls == 0
+
+
+def test_decision_graph_timeout_is_not_silently_published_as_a_fallback(tmp_path: Path) -> None:
+    store, brief_id = _seed_store(tmp_path)
+
+    class TimeoutLLM(ScriptedLLM):
+        def structured(self, *, task: str, schema: type[T], payload: dict[str, Any]) -> T:
+            self.calls += 1
+            raise TimeoutError("Response outcome unknown")
+
+    client = TimeoutLLM([])
+    for _ in range(2):
+        with pytest.raises(GraphEffectUncertain):
+            create_decision_report(
+                store, project_id=_PROJECT, brief_artifact_id=brief_id, llm=client,
+            )
+    assert client.calls == 1

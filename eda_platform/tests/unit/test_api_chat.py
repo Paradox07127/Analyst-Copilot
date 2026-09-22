@@ -204,9 +204,7 @@ def test_large_transcript_page_never_uses_read_text(
     client: TestClient, workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed_transcript(workspace, 5_000)
-    transcript = (
-        workspace / "projects" / PROJECT / "chat" / f"{RUN}.jsonl"
-    ).resolve()
+    transcript = (workspace / "projects" / PROJECT / "chat" / f"{RUN}.jsonl").resolve()
     original = Path.read_text
 
     def guarded(path: Path, *args: Any, **kwargs: Any) -> str:
@@ -236,9 +234,7 @@ def test_large_transcript_page_never_uses_read_text(
     assert older.status_code == 200
 
 
-def test_chat_cursor_rejects_changed_source(
-    client: TestClient, workspace: Path
-) -> None:
+def test_chat_cursor_rejects_changed_source(client: TestClient, workspace: Path) -> None:
     _seed_transcript(workspace, 10)
     first = client.get(f"/api/v1/sessions/{RUN}/chat/messages", params={"limit": 2}).json()
     path = workspace / "projects" / PROJECT / "chat" / f"{RUN}.jsonl"
@@ -254,9 +250,9 @@ def test_chat_cursor_rejects_changed_source(
 
 def test_chat_cursor_is_bound_to_run(client: TestClient, workspace: Path) -> None:
     _seed_transcript(workspace, 10)
-    cursor = client.get(
-        f"/api/v1/sessions/{RUN}/chat/messages", params={"limit": 2}
-    ).json()["next_cursor"]
+    cursor = client.get(f"/api/v1/sessions/{RUN}/chat/messages", params={"limit": 2}).json()[
+        "next_cursor"
+    ]
     other = "run_chat_other"
     ArtifactStore(workspace).start_session(PROJECT, other)
     path = workspace / "projects" / PROJECT / "chat" / f"{other}.jsonl"
@@ -552,8 +548,7 @@ def test_chat_restores_and_enforces_run_request_budget(
     assert frames[-1]["type"] == "turn.failed"
     assert provider is not None and provider.calls == ["m3_route_intent"]
     event_types = [
-        event.event_type
-        for event in store.list_trace_events(project_id=PROJECT, session_id=RUN)
+        event.event_type for event in store.list_trace_events(project_id=PROJECT, session_id=RUN)
     ]
     assert event_types.count(LLM_USAGE_EVENT) == 1
     assert "budget_rejected" in event_types
@@ -782,16 +777,19 @@ def test_two_simultaneous_turns_start_exactly_one(
     original_append = chat_service_module.ChatService._append_message
 
     def gated_append(
-        self: Any, project_id: str, session_id: str, message: ChatMessage
+        self: Any,
+        project_id: str,
+        session_id: str,
+        message: ChatMessage,
+        *,
+        deduplicate: bool = False,
     ) -> None:
         if message.role == "user":
             with suppress(threading.BrokenBarrierError):
                 gate.wait()
-        original_append(self, project_id, session_id, message)
+        original_append(self, project_id, session_id, message, deduplicate=deduplicate)
 
-    monkeypatch.setattr(
-        chat_service_module.ChatService, "_append_message", gated_append
-    )
+    monkeypatch.setattr(chat_service_module.ChatService, "_append_message", gated_append)
 
     results: list[tuple[int, dict[str, Any]]] = []
     results_lock = threading.Lock()
@@ -845,7 +843,7 @@ def test_reconnect_resumes_after_last_event_id_and_then_answers_204(
     assert exhausted.status_code == 204
 
 
-def test_evicted_session_reads_as_404(
+def test_evicted_session_replays_durable_events(
     client: TestClient, echo_driver: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(chat_service_module, "MAX_RETAINED_SESSIONS", 2)
@@ -857,8 +855,8 @@ def test_evicted_session_reads_as_404(
         _read_stream(client, RUN, accepted["message_id"])
 
     evicted = client.get(f"/api/v1/sessions/{RUN}/chat/stream?message_id={message_ids[0]}")
-    assert evicted.status_code == 404
-    assert evicted.json()["error"]["code"] == "chat_message_not_found"
+    assert evicted.status_code == 200
+    assert "message.completed" in evicted.text
     # The sessions still inside the window keep streaming.
     assert (
         client.get(
@@ -870,9 +868,7 @@ def test_evicted_session_reads_as_404(
 
 
 def test_session_events_are_capped_and_flagged_as_truncated() -> None:
-    session = chat_service_module._TurnSession(
-        message_id="m1", session_id=RUN, project_id=PROJECT
-    )
+    session = chat_service_module._TurnSession(message_id="m1", session_id=RUN, project_id=PROJECT)
     for index in range(chat_service_module.MAX_SESSION_EVENTS + 10):
         session.append("tool.call", {"n": index})
     session.append("message.completed", {"content": "done"})
@@ -893,9 +889,7 @@ def test_pending_plan_survives_a_service_restart(
     pending = _pending_plan(client, planning_driver)
 
     # The persisted line carries the plan's identity, but never its token.
-    raw = (workspace / "projects" / PROJECT / "chat" / f"{RUN}.jsonl").read_text(
-        encoding="utf-8"
-    )
+    raw = (workspace / "projects" / PROJECT / "chat" / f"{RUN}.jsonl").read_text(encoding="utf-8")
     awaiting = json.loads(raw.strip().splitlines()[-1])
     assert awaiting["status"] == "awaiting_approval"
     assert awaiting["plan_id"] == pending["plan_id"]
@@ -906,9 +900,7 @@ def test_pending_plan_survives_a_service_restart(
     # Restart: a fresh service keeps the store but loses every session buffer.
     store = ArtifactStore(workspace)
     app = cast(FastAPI, client.app)
-    app.state.chat_service = chat_service_module.ChatService(
-        store, ApprovalService(store)
-    )
+    app.state.chat_service = chat_service_module.ChatService(store, ApprovalService(store))
 
     recovered = client.get(f"/api/v1/sessions/{RUN}/chat/pending-plans")
     assert recovered.status_code == 200
@@ -988,10 +980,7 @@ def test_concurrent_pending_plan_gets_return_identical_token_without_writes(
 
     assert len(responses) == 8
     assert all(response == responses[0] for response in responses)
-    assert (
-        responses[0]["plans"][0]["approval_token"]
-        == pending["approval_token"]
-    )
+    assert responses[0]["plans"][0]["approval_token"] == pending["approval_token"]
     assert store.get_pending_action(pending["action_hash"], session_id=RUN) == before
 
 
@@ -1032,9 +1021,7 @@ def test_wrong_chat_plan_path_does_not_consume_correct_approval(
         },
     )
     assert swapped.status_code == 422, swapped.text
-    row = ArtifactStore(workspace).get_pending_action(
-        pending["action_hash"], session_id=RUN
-    )
+    row = ArtifactStore(workspace).get_pending_action(pending["action_hash"], session_id=RUN)
     assert row is not None
     assert row["status"] == "pending"
     assert row["generation"] == pending["approval_token"]
@@ -1049,7 +1036,7 @@ def test_wrong_chat_plan_path_does_not_consume_correct_approval(
     assert approved.status_code == 202
 
 
-def test_chat_spawn_failure_restores_same_approval_for_retry(
+def test_chat_spawn_failure_preserves_approved_execution_for_resume(
     client: TestClient,
     workspace: Path,
     planning_driver: _PlanningDriver,
@@ -1074,22 +1061,16 @@ def test_chat_spawn_failure_restores_same_approval_for_retry(
                 "approval_token": pending["approval_token"],
             },
         )
-    row = ArtifactStore(workspace).get_pending_action(
-        pending["action_hash"], session_id=RUN
-    )
+    row = ArtifactStore(workspace).get_pending_action(pending["action_hash"], session_id=RUN)
     assert row is not None
-    assert row["status"] == "pending"
+    assert row["status"] == "consumed"
     assert row["generation"] == pending["approval_token"]
-
+    turns = client.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"]
+    assert len(turns) == 1
     monkeypatch.setattr(service, "_spawn", original_spawn)
-    retried = client.post(
-        f"/api/v1/sessions/{RUN}/chat/plans/{pending['plan_id']}/approve",
-        json={
-            "action_hash": pending["action_hash"],
-            "approval_token": pending["approval_token"],
-        },
-    )
+    retried = client.post(f"/api/v1/sessions/{RUN}/chat/turns/{turns[0]['message_id']}/resume")
     assert retried.status_code == 202
+    _read_stream(client, RUN, retried.json()["message_id"])
 
 
 def test_pending_plans_is_empty_once_the_plan_is_decided(
@@ -1140,3 +1121,342 @@ def test_oversized_transcript_line_is_counted_and_shown_as_a_placeholder(
     assert placeholder["status"] == "omitted"
     assert "too large" in placeholder["content"].lower()
 
+
+def _seed_native_checkpoint(workspace: Path, message_id: str) -> Path:
+    from eda_platform.agents.runtime import AgentState, build_agent_graph
+    from eda_platform.core.graph_execution import GraphPersistence, graph_execution
+
+    directory = ArtifactStore(workspace).session_dir(PROJECT, RUN)
+    persistence = GraphPersistence(directory, "chat:" + message_id)
+    initial: AgentState = {
+        "messages": [
+            {"role": "system", "content": "Analyze"},
+            {"role": "user", "content": "Recover my analysis"},
+        ],
+        "artifacts": [],
+        "step": 0,
+        "tool_calls": 0,
+        "tool_names": [],
+        "pending_calls": [],
+        "rewrites": 0,
+        "rejection": "",
+        "answer": "",
+        "status": "model",
+        "error": None,
+    }
+    with graph_execution(persistence, definition="chat_agent_tool_loop", inputs={}) as execution:
+        graph = build_agent_graph().compile(
+            checkpointer=execution.saver,
+            interrupt_before=["model"],
+        )
+        graph.invoke(initial, execution.config, durability="sync")
+    return persistence.path
+
+
+def test_native_recovery_get_is_read_only_and_never_executes(
+    workspace: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message_id = "a" * 32
+    path = _seed_native_checkpoint(workspace, message_id)
+    before = path.read_bytes()
+    monkeypatch.setattr(
+        chat_service_module, "_build_llm", lambda *_: pytest.fail("GET called model")
+    )
+    url = f"/api/v1/sessions/{RUN}/chat/recoverable-turns"
+    for _ in range(2):
+        response = client.get(url)
+        assert response.status_code == 200
+        turn = response.json()["turns"][0]
+        assert turn["message_id"] == message_id
+        assert turn["status"] == "interrupted"
+        assert turn["question"] == "Recover my analysis"
+    assert path.read_bytes() == before
+    assert client.get(f"/api/v1/sessions/{RUN}/chat/messages").json()["messages"] == []
+
+
+@pytest.mark.parametrize("effect_key,blocked", [("model:1", True), ("tool:call_1", False)])
+def test_recovery_blocks_unknown_model_effect_but_allows_local_tool_replay(
+    workspace: Path,
+    client: TestClient,
+    effect_key: str,
+    blocked: bool,
+) -> None:
+    message_id = "b" * 32
+    path = _seed_native_checkpoint(workspace, message_id)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO execution_effects(key,digest,result,kind) VALUES(?,?,NULL,?)",
+            (effect_key, "digest", "guarded" if blocked else "retry_safe"),
+        )
+    recovered = client.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"]
+    assert recovered[0]["status"] == ("blocked" if blocked else "interrupted")
+    if blocked:
+        response = client.post(f"/api/v1/sessions/{RUN}/chat/turns/{message_id}/resume")
+        assert response.status_code == 422
+        assert "unknown outcome" in response.text
+
+
+def test_recovery_excludes_active_turns_and_reserves_atomically(
+    workspace: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message_id = "c" * 32
+    _seed_native_checkpoint(workspace, message_id)
+    spawned: list[Any] = []
+    service = cast(FastAPI, client.app).state.chat_service
+    monkeypatch.setattr(service, "_spawn", lambda session, target: spawned.append(session))
+    url = f"/api/v1/sessions/{RUN}/chat/turns/{message_id}/resume"
+    assert client.post(url).status_code == 202
+    assert client.post(url).status_code == 409
+    assert len(spawned) == 1
+    assert spawned[0].message_id == message_id
+    assert client.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"] == []
+    assert client.get(f"/api/v1/sessions/{RUN}/chat/messages").json()["messages"] == []
+
+
+def test_recovery_skips_corrupt_or_unrelated_graph_files_and_unknown_ids(
+    workspace: Path,
+    client: TestClient,
+) -> None:
+    message_id = "d" * 32
+    path = _seed_native_checkpoint(workspace, message_id)
+    path.write_bytes(b"not sqlite")
+    assert client.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"] == []
+    assert client.post(f"/api/v1/sessions/{RUN}/chat/turns/unknown/resume").status_code == 404
+    assert client.get("/api/v1/sessions/missing/chat/recoverable-turns").status_code == 404
+
+
+@pytest.mark.parametrize("crash_boundary", ["before_transcript", "after_transcript"])
+def test_native_completed_answer_recovers_after_restart_without_model_or_transcript_repetition(
+    workspace: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_boundary: str,
+) -> None:
+    from eda_platform.core.llm import LLMToolResponse
+    from eda_platform.infrastructure.chat_execution import ChatExecutionRepository
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.settings: LLMSettings | None = None
+
+        def tool_call(self, **kwargs) -> LLMToolResponse:
+            self.calls += 1
+            return LLMToolResponse(content="I can inspect this session's data.")
+
+        def last_usage(self) -> LLMResultMetadata:
+            return LLMResultMetadata(
+                provider="test",
+                model="test",
+                estimated_cost_usd=0,
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+
+    provider = Provider()
+    monkeypatch.setattr(chat_service_module, "_build_llm", lambda *_: provider)
+    original_append = chat_service_module.ChatService._append_message
+    original_event = ChatExecutionRepository.append_event
+    with monkeypatch.context() as patch:
+        if crash_boundary == "before_transcript":
+
+            def failed_append(self, project_id, session_id, message, **kwargs):
+                if message.role == "assistant":
+                    raise OSError("simulated stopped API before transcript")
+                return original_append(self, project_id, session_id, message, **kwargs)
+
+            patch.setattr(chat_service_module.ChatService, "_append_message", failed_append)
+        else:
+
+            def failed_event(self, project, session, turn, event_type, data):
+                if event_type == "message.completed":
+                    raise OSError("simulated stopped API before terminal event")
+                return original_event(self, project, session, turn, event_type, data)
+
+            patch.setattr(ChatExecutionRepository, "append_event", failed_event)
+        accepted = client.post(
+            f"/api/v1/sessions/{RUN}/chat/messages",
+            json={"text": "Help inspect this data"},
+        )
+        assert accepted.status_code == 202
+        message_id = accepted.json()["message_id"]
+        assert _read_stream(client, RUN, message_id)[-1]["type"] == "turn.failed"
+    assert provider.calls == 1
+
+    restarted = TestClient(create_app(workspace))
+    recovered = restarted.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"]
+    assert recovered[0]["status"] == "awaiting_delivery"
+    assert recovered[0]["message_id"] == message_id
+    # Restoring with changed model identity must fail before a paid request,
+    # preserve the original graph, and allow a later corrected retry.
+    provider.settings = LLMSettings.model_validate(
+        {"provider": "openai", "model": "changed", "api_key": "test"}
+    )
+    mismatch = restarted.post(f"/api/v1/sessions/{RUN}/chat/turns/{message_id}/resume")
+    assert mismatch.status_code == 202
+    assert _read_stream(restarted, RUN, message_id)[-1]["type"] == "turn.failed"
+    assert provider.calls == 1
+    assert restarted.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"]
+    provider.settings = None
+    response = restarted.post(f"/api/v1/sessions/{RUN}/chat/turns/{message_id}/resume")
+    assert response.status_code == 202, response.text
+    assert response.json()["message_id"] == message_id
+    frames = _read_stream(restarted, RUN, message_id)
+    assert frames[-1]["type"] == "message.completed", frames
+    assert provider.calls == 1
+    messages = restarted.get(f"/api/v1/sessions/{RUN}/chat/messages").json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert all(m["turn_id"] == message_id for m in messages)
+    assert restarted.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"] == []
+
+
+def test_recovery_failure_keeps_original_execution_available(
+    workspace: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import eda_platform.drivers.chat as driver
+    from eda_platform.core.graph_execution import GraphIdentityError
+
+    message_id = "e" * 32
+    _seed_native_checkpoint(workspace, message_id)
+
+    def fail(*args, **kwargs):
+        assert kwargs["resume_mode"] == "tool"
+        assert kwargs["turn_id"] == message_id
+        raise GraphIdentityError("Model settings changed; restore the original configuration.")
+
+    monkeypatch.setattr(driver, "run_chat_turn", fail)
+    response = client.post(f"/api/v1/sessions/{RUN}/chat/turns/{message_id}/resume")
+    assert response.status_code == 202
+    assert _read_stream(client, RUN, message_id)[-1]["type"] == "turn.failed"
+    assert client.get(f"/api/v1/sessions/{RUN}/chat/messages").json()["messages"] == []
+    turns = client.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"]
+    assert turns[0]["message_id"] == message_id
+
+
+def test_recovered_transcript_dedup_covers_old_and_oversized_lines(workspace: Path) -> None:
+    store = ArtifactStore(workspace)
+    original = ChatMessage(turn_id="f" * 32, role="assistant", content="a" * (2 * 1024 * 1024))
+    path = store.append_chat_line(PROJECT, RUN, original.model_dump_json())
+    with path.open("a") as output:
+        for index in range(1000):
+            output.write(
+                ChatMessage(role="user", content=f"later {index}").model_dump_json() + "\n"
+            )
+    before = path.stat().st_size
+    store.append_chat_line(PROJECT, RUN, original.model_dump_json(), deduplicate=True)
+    assert path.stat().st_size == before
+
+
+def test_recovered_transcript_replaces_incomplete_crash_tail(workspace: Path) -> None:
+    store = ArtifactStore(workspace)
+    path = store.append_chat_line(
+        PROJECT, RUN, ChatMessage(role="user", content="question").model_dump_json()
+    )
+    with path.open("ab") as output:
+        output.write(b'{"turn_id":"unfinished')
+    recovered = ChatMessage(turn_id="a" * 32, role="assistant", content="Recovered")
+    store.append_chat_line(PROJECT, RUN, recovered.model_dump_json(), deduplicate=True)
+    lines = [ChatMessage.model_validate_json(line) for line in path.read_text().splitlines()]
+    assert [line.role for line in lines] == ["user", "assistant"]
+    assert lines[-1].content == "Recovered"
+
+
+def test_structured_interrupted_workflow_is_discovered_and_resumes_its_original_mode(
+    workspace: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import eda_platform.drivers.chat as driver
+    from eda_platform.agents.model_workflow import run_model_workflow
+    from eda_platform.core.graph_execution import GraphPersistence
+
+    message_id = "9" * 32
+    directory = ArtifactStore(workspace).session_dir(PROJECT, RUN)
+    persistence = GraphPersistence(directory, "chat-structured:" + message_id)
+
+    def interrupted(workflow):
+        raise RuntimeError("interrupted before routing")
+
+    with pytest.raises(RuntimeError, match="interrupted before routing"):
+        run_model_workflow(
+            interrupted,
+            persistence=persistence,
+            inputs={},
+            definition="chat-structured-functional-v1",
+            checkpoint_input={"message": "Recover structured analysis", "turn_id": message_id},
+        )
+    turns = client.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"]
+    assert turns[0]["question"] == "Recover structured analysis"
+    assert turns[0]["status"] == "interrupted"
+
+    def resumed(message, **kwargs):
+        assert kwargs["resume_mode"] == "structured"
+        assert kwargs["turn_id"] == message_id
+        assert message == "Recover structured analysis"
+        return ChatTurnResult(
+            intent=Intent(kind="meta_help", confidence=1, raw_message=message),
+            message="Recovered structured answer",
+        )
+
+    monkeypatch.setattr(driver, "run_chat_turn", resumed)
+    response = client.post(f"/api/v1/sessions/{RUN}/chat/turns/{message_id}/resume")
+    assert response.status_code == 202
+    assert _read_stream(client, RUN, message_id)[-1]["type"] == "message.completed"
+    assert client.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"] == []
+
+
+def test_structured_completed_answer_is_delivered_after_restart_without_replanning(
+    workspace: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from eda_platform.core.llm import OfflineLLMClient
+    from eda_platform.infrastructure.chat_execution import ChatExecutionRepository
+
+    class CountingOffline(OfflineLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def structured(self, **kwargs):
+            self.calls += 1
+            return super().structured(**kwargs)
+
+    provider = CountingOffline()
+
+    def choose_original_mode(mode, settings):
+        assert mode == "offline"
+        return provider
+
+    monkeypatch.setattr(chat_service_module, "_build_llm", choose_original_mode)
+    original_event = ChatExecutionRepository.append_event
+    with monkeypatch.context() as patch:
+
+        def failed_event(self, project, session, turn, event_type, data):
+            if event_type == "message.completed":
+                raise OSError("interrupted delivery")
+            return original_event(self, project, session, turn, event_type, data)
+
+        patch.setattr(ChatExecutionRepository, "append_event", failed_event)
+        message_id = _accept_turn(client, "Which datasets are loaded?")["message_id"]
+        assert _read_stream(client, RUN, message_id)[-1]["type"] == "turn.failed"
+    calls_before = provider.calls
+    assert calls_before >= 1
+    restarted = TestClient(create_app(workspace))
+    turns = restarted.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"]
+    assert turns[0]["question"] == "Which datasets are loaded?"
+    assert turns[0]["status"] == "awaiting_delivery"
+    assert (
+        restarted.post(f"/api/v1/sessions/{RUN}/chat/turns/{message_id}/resume").status_code == 202
+    )
+    frames = _read_stream(restarted, RUN, message_id)
+    assert frames[-1]["type"] == "message.completed", frames
+    assert provider.calls == calls_before
+    messages = restarted.get(f"/api/v1/sessions/{RUN}/chat/messages").json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert restarted.get(f"/api/v1/sessions/{RUN}/chat/recoverable-turns").json()["turns"] == []

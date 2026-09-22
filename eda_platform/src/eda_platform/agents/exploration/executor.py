@@ -20,9 +20,11 @@ import re
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypedDict
 
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ValidationError
 
 from eda_platform.agents.runtime import (
@@ -43,6 +45,7 @@ from eda_platform.core.exploration_budget import (
     ToolCallProjection,
 )
 from eda_platform.core.exploration_journal import JsonlExplorationJournal
+from eda_platform.core.graph_execution import GraphPersistence, graph_execution
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.kernel import SessionCancelled
 from eda_platform.core.llm import (
@@ -52,6 +55,7 @@ from eda_platform.core.llm import (
     ProviderUnavailableError,
 )
 from eda_platform.core.llm_ledger import logical_llm_call
+from eda_platform.schemas.artifacts import Artifact
 
 type ProbeExecutionStatus = Literal[
     "completed",
@@ -111,9 +115,7 @@ PROBE_LOCAL_ERROR_CODES = frozenset(
 # fingerprint and the tool capability digest are deliberately untouched.
 FAILURE_FINGERPRINT_DISABLE_THRESHOLD = 2
 _CANONICAL_ERROR_MAX_CHARS = 120
-_DISABLED_TOOL_NOTE = (
-    "tool {tool} is disabled for this run after repeated failure: {error}"
-)
+_DISABLED_TOOL_NOTE = "tool {tool} is disabled for this run after repeated failure: {error}"
 # W3: session wind-down once typed adjudicating evidence is held.
 _WIND_DOWN_SAME_DIRECTION_RECEIPTS = 2
 _ADJUDICATING_OUTCOMES = frozenset({"supports", "contradicts"})
@@ -130,8 +132,7 @@ _WIND_DOWN_NOTE = (
 # slices, reject locally instead of executing another value variant.
 ZERO_ROW_FILTER_FAMILY_THRESHOLD = 3
 _ZERO_ROW_FAMILY_NOTE = (
-    "this filter family has matched zero rows twice; revise the plan instead "
-    "of the value"
+    "this filter family has matched zero rows twice; revise the plan instead of the value"
 )
 _PROFILE_SLICE_TOOL_NAME = "profile_slice"
 
@@ -205,8 +206,7 @@ class InMemoryLlmResponseStore:
             return self.responses[logical_step_id]
         except KeyError as exc:
             raise KeyError(
-                f"completed LLM response {logical_step_id!r} is unavailable; "
-                "refusing to resend it."
+                f"completed LLM response {logical_step_id!r} is unavailable; refusing to resend it."
             ) from exc
 
     def remember(self, logical_step_id: str, response: LLMToolResponse) -> None:
@@ -225,8 +225,7 @@ class InMemoryToolResultStore:
             return self.results[logical_step_id]
         except KeyError as exc:
             raise KeyError(
-                f"committed tool result {logical_step_id!r} is unavailable; "
-                "refusing to re-run it."
+                f"committed tool result {logical_step_id!r} is unavailable; refusing to re-run it."
             ) from exc
 
     def remember(self, logical_step_id: str, result: DurableToolResult) -> None:
@@ -479,9 +478,7 @@ class JsonlProbeJournalHooks:
                 if state.pending_call_steps.get(call_id) not in {None, step_id}:
                     raise ValueError("pending LLM call is bound to another logical step.")
                 return
-            self.journal.append_new(
-                "llm_call_started", call_id=call_id, step_id=step_id
-            )
+            self.journal.append_new("llm_call_started", call_id=call_id, step_id=step_id)
 
     def llm_terminal(
         self,
@@ -576,13 +573,9 @@ class JsonlProbeJournalHooks:
                 )
                 return
             if not receipt_id:
-                raise ValueError(
-                    "A journaled successful probe requires an EvidenceReceipt id."
-                )
+                raise ValueError("A journaled successful probe requires an EvidenceReceipt id.")
             if not result_digest:
-                raise ValueError(
-                    "A journaled successful probe requires a durable result digest."
-                )
+                raise ValueError("A journaled successful probe requires a durable result digest.")
             self.journal.append_new(
                 "receipt_prepared",
                 logical_step_id=logical_step_id,
@@ -601,10 +594,6 @@ class JsonlProbeJournalHooks:
 
 class ProviderCallRejectedError(RuntimeError):
     """A provider definitively rejected a request; a bounded retry is safe."""
-
-
-class ProviderOutcomeUncertainError(RuntimeError):
-    """The provider may have accepted a request; never resend the logical step."""
 
 
 @dataclass(slots=True)
@@ -646,6 +635,52 @@ class _PreparedCall:
     fingerprint: str
     projection: ToolCallProjection
     action_index: int
+
+
+@dataclass
+class ProbeMemory:
+    phase: str
+    execution_run_id: str
+    messages: list[dict[str, Any]]
+    artifacts: list[Any]
+    tool_calls: int
+    tool_names: list[str]
+    seen: set[str]
+    completed: set[str]
+    response_digests: Mapping[str, str] | None
+    blocked_calls: set[str]
+    failures: list[str]
+    empty_response_retries: int
+    guards: _SessionGuardState
+    disabled_tools: dict[str, str]
+    hypothesis: HypothesisExecutionBinding | None
+    step: int = 0
+    response: Any = None
+    phase_names: tuple[str, ...] = ()
+    offered_names: tuple[str, ...] = ()
+
+
+class ProbeGraphState(TypedDict):
+    memory: ProbeMemory
+    route: str
+    result: ProbeExecutionResult | None
+
+
+def _probe_checkpoint_types() -> tuple[type, ...]:
+    from eda_platform.schemas.artifacts import Artifact, ArtifactType
+    from eda_platform.schemas.hypotheses import HypothesisPredicate
+
+    return (
+        ProbeMemory,
+        _SessionGuardState,
+        HypothesisExecutionBinding,
+        HypothesisPredicate,
+        ProbeExecutionResult,
+        LLMToolResponse,
+        LLMToolCall,
+        Artifact,
+        ArtifactType,
+    )
 
 
 class ProbeExecutor:
@@ -731,8 +766,7 @@ class ProbeExecutor:
         response_digests = completed_response_digests
         blocked_calls = blocked_llm_call_ids or set()
         failures = [
-            " ".join(str(item).split())[:_FAILURE_ENTRY_MAX_CHARS]
-            for item in failure_history
+            " ".join(str(item).split())[:_FAILURE_ENTRY_MAX_CHARS] for item in failure_history
         ]
         failures = failures[-_FAILURE_HISTORY_LIMIT:]
         empty_response_retries = 0
@@ -746,497 +780,573 @@ class ProbeExecutor:
             messages.append(
                 {
                     "role": "user",
-                    "content": _DISABLED_TOOL_NOTE.format(
-                        tool=name, error=disabled_tools[name]
-                    ),
+                    "content": _DISABLED_TOOL_NOTE.format(tool=name, error=disabled_tools[name]),
                 }
             )
 
-        for step in range(1, self._max_steps + 1):
-            self._checkpoint()
-            # W3: after two same-direction adjudicating receipts the session
-            # only gets the conclusion exit -- an empty tool inventory.  The
-            # trigger is a pure function of observed receipts, so crash-replay
-            # recomputes the same inventory at the same step.
-            wind_down = guards.wind_down()
-            phase_names = (
-                ()
-                if wind_down
-                else self._select_phase_tools(phase=phase, step=step)
+        memory = ProbeMemory(
+            phase=phase,
+            execution_run_id=execution_run_id,
+            messages=messages,
+            artifacts=artifacts,
+            tool_calls=tool_calls,
+            tool_names=tool_names,
+            seen=seen,
+            completed=completed,
+            response_digests=response_digests,
+            blocked_calls=blocked_calls,
+            failures=failures,
+            empty_response_retries=empty_response_retries,
+            guards=guards,
+            disabled_tools=disabled_tools,
+            hypothesis=hypothesis,
+        )
+        persistence = None
+        if isinstance(self._journal, JsonlProbeJournalHooks):
+            persistence = GraphPersistence(
+                self._journal.journal.path.parent, "probe:" + execution_run_id
             )
-            phase_registry = {name: self._tools[name] for name in phase_names}
-            # W1: disabled tools stay in the local registry (committed steps
-            # must still be adoptable on resume) but leave the offered
-            # inventory; fresh calls to them are rejected before execution.
-            offered_names = tuple(
-                name for name in phase_names if name not in disabled_tools
+        with graph_execution(
+            persistence,
+            definition=self._task,
+            inputs={
+                "phase": phase,
+                "system_prompt": system_prompt,
+                "user_message": user_message,
+                "max_steps": self._max_steps,
+                "max_tool_calls": self._max_tool_calls,
+                "tools": [tool.provider_schema() for tool in self._tools.values()],
+            },
+            recursion_limit=self._max_steps * 2 + 5,
+            checkpoint_types=_probe_checkpoint_types(),
+        ) as execution:
+            builder = StateGraph(ProbeGraphState)
+
+            def recover(state: ProbeGraphState) -> ProbeGraphState:
+                restored = deepcopy(state["memory"])
+                completed.update(restored.completed)
+                restored.completed = completed
+                if seen_probe_fingerprints is not None:
+                    seen_probe_fingerprints.update(restored.seen)
+                    restored.seen = seen_probe_fingerprints
+                restored.blocked_calls.update(blocked_calls)
+                restored.response_digests = response_digests
+                return {**state, "memory": restored}
+
+            def model_node(state: ProbeGraphState) -> dict[str, Any]:
+                return self._model_node(recover(state))
+
+            def tools_node(state: ProbeGraphState) -> dict[str, Any]:
+                return self._tools_node(recover(state))
+
+            builder.add_node("model", model_node)
+            builder.add_node("tools", tools_node)
+            builder.add_edge(START, "model")
+            builder.add_conditional_edges(
+                "model",
+                lambda state: state["route"],
+                {"model": "model", "tools": "tools", "end": END},
             )
-            call_id = "llm_" + stable_hash(
-                {"run_id": execution_run_id, "step": step}, length=24
+            builder.add_conditional_edges(
+                "tools", lambda state: state["route"], {"model": "model", "end": END}
             )
-            llm_step_id = make_executor_llm_step_id(execution_run_id, step)
-            request_messages = _with_failure_history(messages, failures)
-            if wind_down:
-                request_messages.append({"role": "user", "content": _WIND_DOWN_NOTE})
-            elif guards.adjudications:
-                request_messages.append(
-                    {"role": "user", "content": _ADJUDICATION_GUIDANCE}
+            graph = builder.compile(checkpointer=execution.saver)
+            snapshot = graph.get_state(execution.config) if execution.saver else None
+            if snapshot is not None and snapshot.values and not snapshot.next:
+                final = snapshot.values
+            else:
+                final = graph.invoke(
+                    None
+                    if snapshot is not None and snapshot.values
+                    else {"memory": memory, "route": "model", "result": None},
+                    execution.config,
+                    durability="sync" if execution.saver else None,
                 )
-            if call_id in blocked_calls:
-                return self._result(
+        result = final["result"]
+        if not isinstance(result, ProbeExecutionResult):
+            raise RuntimeError("Probe graph did not return its execution result.")
+        if seen_probe_fingerprints is not None:
+            seen_probe_fingerprints.update(result.probe_fingerprints)
+        return result
+
+    def _model_node(self, state: ProbeGraphState) -> dict[str, Any]:
+        # recover() already copied checkpoint state and reconciled durable effects.
+        memory = state["memory"]
+        if memory.step >= self._max_steps:
+            return {
+                "memory": memory,
+                "route": "end",
+                "result": self._result(
+                    status="limit_reached",
+                    artifacts=memory.artifacts,
+                    tool_calls=memory.tool_calls,
+                    tool_names=memory.tool_names,
+                    failures=memory.failures,
+                    seen=memory.seen,
+                    error="The probe reached its reasoning-step safety limit.",
+                    error_code="step_limit",
+                ),
+            }
+        memory.step += 1
+        self._checkpoint()
+        wind_down = memory.guards.wind_down()
+        memory.phase_names = (
+            () if wind_down else self._select_phase_tools(phase=memory.phase, step=memory.step)
+        )
+        phase_registry = {name: self._tools[name] for name in memory.phase_names}
+        memory.offered_names = tuple(
+            name for name in memory.phase_names if name not in memory.disabled_tools
+        )
+        call_id = "llm_" + stable_hash(
+            {"run_id": memory.execution_run_id, "step": memory.step}, length=24
+        )
+        llm_step_id = make_executor_llm_step_id(memory.execution_run_id, memory.step)
+        request_messages = _with_failure_history(memory.messages, memory.failures)
+        if wind_down:
+            request_messages.append({"role": "user", "content": _WIND_DOWN_NOTE})
+        elif memory.guards.adjudications:
+            request_messages.append({"role": "user", "content": _ADJUDICATION_GUIDANCE})
+        if call_id in memory.blocked_calls:
+            return {
+                "memory": memory,
+                "route": "end",
+                "result": self._result(
                     status="failed",
-                    artifacts=artifacts,
-                    tool_calls=tool_calls,
-                    tool_names=tool_names,
-                    failures=failures,
-                    seen=seen,
-                    error=(
-                        f"Provider outcome for {call_id} is uncertain; refusing to "
-                        "resend the logical request."
-                    ),
+                    artifacts=memory.artifacts,
+                    tool_calls=memory.tool_calls,
+                    tool_names=memory.tool_names,
+                    failures=memory.failures,
+                    seen=memory.seen,
+                    error=(f"Provider outcome for {call_id} is uncertain; "
+                           "refusing to resend the logical request."),
                     error_code="provider_outcome_uncertain",
-                )
-            if llm_step_id in completed:
-                try:
-                    response = self._response_store.load_required(llm_step_id)
-                except (KeyError, ValueError) as exc:
-                    return self._result(
+                ),
+            }
+        if llm_step_id in memory.completed:
+            try:
+                memory.response = self._response_store.load_required(llm_step_id)
+            except (KeyError, ValueError) as exc:
+                return {
+                    "memory": memory,
+                    "route": "end",
+                    "result": self._result(
                         status="failed",
-                        artifacts=artifacts,
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        failures=failures,
-                        seen=seen,
+                        artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls,
+                        tool_names=memory.tool_names,
+                        failures=memory.failures,
+                        seen=memory.seen,
                         error=_safe_error(exc),
                         error_code="completed_response_unavailable",
-                    )
-                expected_digest = (
-                    None if response_digests is None else response_digests.get(llm_step_id)
-                )
-                actual_digest = stable_hash(response.model_dump(mode="json"), length=24)
-                if response_digests is not None and (
-                    expected_digest is None or actual_digest != expected_digest
-                ):
-                    return self._result(
+                    ),
+                }
+            expected_digest = (
+                None
+                if memory.response_digests is None
+                else memory.response_digests.get(llm_step_id)
+            )
+            actual_digest = stable_hash(memory.response.model_dump(mode="json"), length=24)
+            if memory.response_digests is not None and (
+                expected_digest is None or actual_digest != expected_digest
+            ):
+                return {
+                    "memory": memory,
+                    "route": "end",
+                    "result": self._result(
                         status="failed",
-                        artifacts=artifacts,
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        failures=failures,
-                        seen=seen,
+                        artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls,
+                        tool_names=memory.tool_names,
+                        failures=memory.failures,
+                        seen=memory.seen,
                         error="completed LLM response digest does not match the journal.",
                         error_code="completed_response_digest_mismatch",
-                    )
-            else:
-                preflight = getattr(self._provider, "preflight_tool_call", None)
-                if callable(preflight):
-                    preflight(
+                    ),
+                }
+        else:
+            preflight = getattr(self._provider, "preflight_tool_call", None)
+            if callable(preflight):
+                preflight(
+                    task=self._task,
+                    messages=request_messages,
+                    tools=[phase_registry[name].provider_schema() for name in memory.offered_names],
+                )
+            self._journal.llm_started(call_id=call_id, step_id=llm_step_id)
+            try:
+                with logical_llm_call(call_id):
+                    memory.response = self._provider.tool_call(
                         task=self._task,
                         messages=request_messages,
                         tools=[
-                            phase_registry[name].provider_schema()
-                            for name in offered_names
+                            phase_registry[name].provider_schema() for name in memory.offered_names
                         ],
                     )
-                self._journal.llm_started(call_id=call_id, step_id=llm_step_id)
-                try:
-                    with logical_llm_call(call_id):
-                        response = self._provider.tool_call(
-                            task=self._task,
-                            messages=request_messages,
-                            tools=[
-                                phase_registry[name].provider_schema()
-                                for name in offered_names
-                            ],
-                        )
-                except BudgetExceeded as exc:
-                    self._journal.llm_terminal(
-                        call_id=call_id,
-                        step_id=llm_step_id,
-                        outcome="rejected",
-                        error=_safe_error(exc),
-                    )
-                    raise
-                except (SessionCancelled, CancellationError) as exc:
-                    self._journal.llm_terminal(
-                        call_id=call_id,
-                        step_id=llm_step_id,
-                        outcome="uncertain",
-                        error=_safe_error(exc),
-                    )
-                    raise
-                except ProviderUnavailableError as exc:
-                    # Nothing was generated, so the logical step is not
-                    # uncertain; the probe ends locally and the round keeps the
-                    # receipts it already committed.
-                    error = _safe_error(exc)
-                    self._journal.llm_terminal(
-                        call_id=call_id,
-                        step_id=llm_step_id,
-                        outcome="rejected",
-                        error=error,
-                    )
-                    return self._result(
-                        status="failed",
-                        artifacts=artifacts,
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        failures=_add_failure(failures, call_id, error),
-                        seen=seen,
-                        error=error,
-                        error_code="provider_unavailable",
-                    )
-                except (
-                    ProviderCallRejectedError,
-                    MalformedProviderResponseError,
-                ) as exc:
-                    error = _safe_error(exc)
-                    self._journal.llm_terminal(
-                        call_id=call_id,
-                        step_id=llm_step_id,
-                        outcome="rejected",
-                        error=error,
-                    )
-                    failures = _add_failure(failures, call_id, error)
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": f"The provider rejected the prior request: {error}",
-                        }
-                    )
-                    continue
-                except Exception as exc:
-                    error = _safe_error(exc)
-                    self._journal.llm_terminal(
-                        call_id=call_id,
-                        step_id=llm_step_id,
-                        outcome="uncertain",
-                        error=error,
-                    )
-                    return self._result(
-                        status="failed",
-                        artifacts=artifacts,
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        failures=failures,
-                        seen=seen,
-                        error=error,
-                        error_code="provider_outcome_uncertain",
-                    )
-
-                response_digest = stable_hash(response.model_dump(mode="json"), length=24)
-                try:
-                    self._response_store.remember(llm_step_id, response)
-                except Exception as exc:
-                    error = _safe_error(exc)
-                    self._journal.llm_terminal(
-                        call_id=call_id,
-                        step_id=llm_step_id,
-                        outcome="uncertain",
-                        error=error,
-                    )
-                    return self._result(
-                        status="failed",
-                        artifacts=artifacts,
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        failures=failures,
-                        seen=seen,
-                        error=error,
-                        error_code="response_persistence_failed",
-                    )
+            except BudgetExceeded as exc:
+                self._journal.llm_terminal(
+                    call_id=call_id, step_id=llm_step_id, outcome="rejected", error=_safe_error(exc)
+                )
+                raise
+            except (SessionCancelled, CancellationError) as exc:
                 self._journal.llm_terminal(
                     call_id=call_id,
                     step_id=llm_step_id,
-                    outcome="completed",
-                    response_digest=response_digest,
+                    outcome="uncertain",
+                    error=_safe_error(exc),
                 )
-                completed.add(llm_step_id)
-
-            finish_reason = response.finish_reason.strip().lower()
-            if finish_reason == "length":
-                return self._result(
+                raise
+            except ProviderUnavailableError as exc:
+                error = _safe_error(exc)
+                self._journal.llm_terminal(
+                    call_id=call_id, step_id=llm_step_id, outcome="rejected", error=error
+                )
+                return {
+                    "memory": memory,
+                    "route": "end",
+                    "result": self._result(
+                        status="failed",
+                        artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls,
+                        tool_names=memory.tool_names,
+                        failures=_add_failure(memory.failures, call_id, error),
+                        seen=memory.seen,
+                        error=error,
+                        error_code="provider_unavailable",
+                    ),
+                }
+            except (ProviderCallRejectedError, MalformedProviderResponseError) as exc:
+                error = _safe_error(exc)
+                self._journal.llm_terminal(
+                    call_id=call_id, step_id=llm_step_id, outcome="rejected", error=error
+                )
+                memory.failures = _add_failure(memory.failures, call_id, error)
+                memory.messages.append(
+                    {"role": "user", "content": f"The provider rejected the prior request: {error}"}
+                )
+                return {"memory": memory, "route": "model", "result": None}
+            except Exception as exc:
+                error = _safe_error(exc)
+                self._journal.llm_terminal(
+                    call_id=call_id, step_id=llm_step_id, outcome="uncertain", error=error
+                )
+                return {
+                    "memory": memory,
+                    "route": "end",
+                    "result": self._result(
+                        status="failed",
+                        artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls,
+                        tool_names=memory.tool_names,
+                        failures=memory.failures,
+                        seen=memory.seen,
+                        error=error,
+                        error_code="provider_outcome_uncertain",
+                    ),
+                }
+            response_digest = stable_hash(memory.response.model_dump(mode="json"), length=24)
+            try:
+                self._response_store.remember(llm_step_id, memory.response)
+            except Exception as exc:
+                error = _safe_error(exc)
+                self._journal.llm_terminal(
+                    call_id=call_id, step_id=llm_step_id, outcome="uncertain", error=error
+                )
+                return {
+                    "memory": memory,
+                    "route": "end",
+                    "result": self._result(
+                        status="failed",
+                        artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls,
+                        tool_names=memory.tool_names,
+                        failures=memory.failures,
+                        seen=memory.seen,
+                        error=error,
+                        error_code="response_persistence_failed",
+                    ),
+                }
+            self._journal.llm_terminal(
+                call_id=call_id,
+                step_id=llm_step_id,
+                outcome="completed",
+                response_digest=response_digest,
+            )
+            memory.completed.add(llm_step_id)
+        finish_reason = memory.response.finish_reason.strip().lower()
+        if finish_reason == "length":
+            return {
+                "memory": memory,
+                "route": "end",
+                "result": self._result(
                     status="failed",
-                    artifacts=artifacts,
-                    tool_calls=tool_calls,
-                    tool_names=tool_names,
-                    failures=failures,
-                    seen=seen,
+                    artifacts=memory.artifacts,
+                    tool_calls=memory.tool_calls,
+                    tool_names=memory.tool_names,
+                    failures=memory.failures,
+                    seen=memory.seen,
                     error="The provider stopped because the response length limit was reached.",
                     error_code="finish_reason_length",
-                )
-            if finish_reason in _CONTENT_FILTER_FINISH_REASONS:
-                return self._result(
+                ),
+            }
+        if finish_reason in _CONTENT_FILTER_FINISH_REASONS:
+            return {
+                "memory": memory,
+                "route": "end",
+                "result": self._result(
                     status="failed",
-                    artifacts=artifacts,
-                    tool_calls=tool_calls,
-                    tool_names=tool_names,
-                    failures=failures,
-                    seen=seen,
+                    artifacts=memory.artifacts,
+                    tool_calls=memory.tool_calls,
+                    tool_names=memory.tool_names,
+                    failures=memory.failures,
+                    seen=memory.seen,
                     error="The provider filtered the response content.",
                     error_code="content_filtered",
-                )
-            if not response.tool_calls:
-                answer = response.content.strip()
-                if answer:
-                    return self._result(
+                ),
+            }
+        if not memory.response.tool_calls:
+            answer = memory.response.content.strip()
+            if answer:
+                return {
+                    "memory": memory,
+                    "route": "end",
+                    "result": self._result(
                         status="completed",
-                        artifacts=artifacts,
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        failures=failures,
-                        seen=seen,
+                        artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls,
+                        tool_names=memory.tool_names,
+                        failures=memory.failures,
+                        seen=memory.seen,
                         answer=answer,
-                    )
-                if empty_response_retries >= _EMPTY_RESPONSE_RETRY_BUDGET:
-                    return self._result(
+                    ),
+                }
+            if memory.empty_response_retries >= _EMPTY_RESPONSE_RETRY_BUDGET:
+                return {
+                    "memory": memory,
+                    "route": "end",
+                    "result": self._result(
                         status="failed",
-                        artifacts=artifacts,
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        failures=failures,
-                        seen=seen,
+                        artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls,
+                        tool_names=memory.tool_names,
+                        failures=memory.failures,
+                        seen=memory.seen,
                         error=(
                             "The provider returned no text and no tool calls after "
                             f"{_EMPTY_RESPONSE_RETRY_BUDGET} empty-response retries."
                         ),
                         error_code="empty_response",
-                    )
-                empty_response_retries += 1
-                messages.append({"role": "user", "content": _EMPTY_RESPONSE_RETRY})
-                continue
-
-            messages.append(_assistant_message(response))
-            prepared, immediate_messages, failures = self._prepare_batch(
-                calls=response.tool_calls,
-                phase_registry=phase_registry,
-                phase_names=offered_names,
-                seen=seen,
-                failures=failures,
-                guards=guards,
-            )
-            messages.extend(immediate_messages)
-
-            if tool_calls + len(prepared) > self._max_tool_calls:
-                return self._result(
-                    status="limit_reached",
-                    artifacts=artifacts,
-                    tool_calls=tool_calls,
-                    tool_names=tool_names,
-                    failures=failures,
-                    seen=seen,
-                    error=(
-                        "The probe reached its tool-call safety limit before the native "
-                        "batch could start."
                     ),
+                }
+            memory.empty_response_retries += 1
+            memory.messages.append({"role": "user", "content": _EMPTY_RESPONSE_RETRY})
+            return {"memory": memory, "route": "model", "result": None}
+        return {"memory": memory, "route": "tools", "result": None}
+
+    def _tools_node(self, state: ProbeGraphState) -> dict[str, Any]:
+        # recover() already copied checkpoint state and reconciled durable effects.
+        memory = state["memory"]
+        phase_registry = {name: self._tools[name] for name in memory.phase_names}
+        # The journal can be ahead of this node's checkpoint after a crash.
+        # Recover by logical identity before applying new-work deduplication or
+        # budget admission; a committed receipt remains part of this batch.
+        recovered: dict[int, DurableToolResult] = {}
+        for action_index, call in enumerate(memory.response.tool_calls, start=1):
+            if action_index > self._max_tool_calls:
+                continue
+            step_id = make_logical_step_id(
+                memory.execution_run_id, call.call_id,
+                make_tool_sequence_index(
+                    memory.step, action_index, max_tool_calls=self._max_tool_calls
+                ),
+            )
+            if step_id not in memory.completed:
+                continue
+            try:
+                recovered[action_index] = self._tool_result_store.load_required(step_id)
+                _require_matching_kind(
+                    ToolCallProjection(kind=call.name), recovered[action_index].usage
+                )
+            except (KeyError, ValueError) as exc:
+                return {
+                    "memory": memory, "route": "end",
+                    "result": self._result(
+                        status="failed", artifacts=memory.artifacts,
+                        tool_calls=memory.tool_calls, tool_names=memory.tool_names,
+                        failures=memory.failures, seen=memory.seen,
+                        error=_safe_error(exc), error_code="committed_tool_result_unavailable",
+                    ),
+                }
+        memory.messages.append(_assistant_message(memory.response))
+        prepared, immediate_messages, memory.failures = self._prepare_batch(
+            calls=memory.response.tool_calls,
+            phase_registry=phase_registry,
+            phase_names=memory.offered_names,
+            seen=memory.seen,
+            failures=memory.failures,
+            guards=memory.guards,
+            recovered=recovered,
+        )
+        memory.messages.extend(immediate_messages)
+        if memory.tool_calls + len(prepared) > self._max_tool_calls:
+            return {
+                "memory": memory,
+                "route": "end",
+                "result": self._result(
+                    status="limit_reached",
+                    artifacts=memory.artifacts,
+                    tool_calls=memory.tool_calls,
+                    tool_names=memory.tool_names,
+                    failures=memory.failures,
+                    seen=memory.seen,
+                    error=("The probe reached its tool-call safety limit "
+                           "before the native batch could start."),
                     error_code="tool_call_limit",
+                ),
+            }
+        pending = [item.projection for item in prepared if item.action_index not in recovered]
+        if pending:
+            self._ledger.check_batch(pending)
+        for item in prepared:
+            self._checkpoint()
+            sequence_index = make_tool_sequence_index(
+                memory.step, item.action_index, max_tool_calls=self._max_tool_calls
+            )
+            logical_step_id = make_logical_step_id(
+                memory.execution_run_id, item.call.call_id, sequence_index
+            )
+            if item.tool.name in memory.disabled_tools and logical_step_id not in memory.completed:
+                error = _DISABLED_TOOL_NOTE.format(
+                    tool=item.tool.name, error=memory.disabled_tools[item.tool.name]
                 )
-
-            # One projection check for the entire executable native batch.  It
-            # mutates no ledger state and occurs before any tool_started event.
-            self._ledger.check_batch([item.projection for item in prepared])
-
-            for item in prepared:
-                self._checkpoint()
-                sequence_index = make_tool_sequence_index(
-                    step,
-                    item.action_index,
-                    max_tool_calls=self._max_tool_calls,
+                memory.failures = _add_failure(memory.failures, item.fingerprint, error)
+                memory.messages.append(
+                    _tool_message(
+                        item.call, {"ok": False, "error": error}, limit=self._max_observation_chars
+                    )
                 )
-                logical_step_id = make_logical_step_id(
-                    execution_run_id,
-                    item.call.call_id,
-                    sequence_index,
-                )
-                if (
-                    item.tool.name in disabled_tools
-                    and logical_step_id not in completed
-                ):
-                    error = _DISABLED_TOOL_NOTE.format(
-                        tool=item.tool.name, error=disabled_tools[item.tool.name]
-                    )
-                    failures = _add_failure(failures, item.fingerprint, error)
-                    messages.append(
-                        _tool_message(
-                            item.call,
-                            {"ok": False, "error": error},
-                            limit=self._max_observation_chars,
-                        )
-                    )
-                    continue
-                tool_calls += 1
-                tool_names.append(item.tool.name)
-                if logical_step_id in completed:
-                    try:
-                        durable = self._tool_result_store.load_required(logical_step_id)
-                    except (KeyError, ValueError) as exc:
-                        return self._result(
-                            status="failed",
-                            artifacts=artifacts,
-                            tool_calls=tool_calls,
-                            tool_names=tool_names,
-                            failures=failures,
-                            seen=seen,
-                            error=_safe_error(exc),
-                            error_code="committed_tool_result_unavailable",
-                        )
-                    _require_matching_kind(item.projection, durable.usage)
-                    seen.add(item.fingerprint)
-                    self._append_tool_observation(
-                        item=item,
-                        result=durable.result,
-                        artifacts=artifacts,
-                        messages=messages,
-                        guards=guards,
-                    )
-                    continue
-                self._journal.tool_started(
-                    logical_step_id=logical_step_id,
-                    input_fingerprint=item.fingerprint,
-                    tool_kind=item.projection.kind,
-                    tool_name=item.call.name,
-                    projected_rows_scanned=item.projection.rows_scanned,
-                    projected_result_cells=item.projection.result_cells,
-                )
-                seen.add(item.fingerprint)
-                execution = ToolExecutionContext(
-                    run_id=execution_run_id,
-                    provider_call_id=item.call.call_id,
-                    logical_step_id=logical_step_id,
-                    attempt_epoch=self._journal.attempt_epoch,
-                    sequence_index=sequence_index,
-                    hypothesis=hypothesis,
-                )
-                try:
-                    with tool_execution_scope(execution):
-                        result = item.tool.execute(item.arguments)
-                    if not isinstance(result, AgentToolResult):
-                        raise TypeError("AgentTool.execute must return AgentToolResult.")
-                except _TERMINAL_TOOL_ERRORS as exc:
-                    try:
-                        self._settle_failed_tool(
-                            item,
-                            logical_step_id=logical_step_id,
-                            error=exc,
-                        )
-                    except BudgetExceeded:
-                        # record_failure_usage commits counts before enforcing.
-                        # A secondary rows/cells latch must not hide the budget
-                        # or cancellation exception that actually stopped the
-                        # in-flight tool.
-                        pass
-                    raise
-                except Exception as exc:
-                    self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
-                    error = _safe_error(exc)
-                    failures = _add_failure(failures, item.fingerprint, error)
-                    messages.append(
-                        _tool_message(
-                            item.call,
-                            {"ok": False, "error": error},
-                            limit=self._max_observation_chars,
-                        )
-                    )
-                    continue
-
-                try:
-                    actual = self._usage_meter.success(
-                        call=item.call,
-                        tool=item.tool,
-                        arguments=item.arguments,
-                        result=result,
-                        projected=item.projection,
-                    )
-                except _TERMINAL_TOOL_ERRORS as exc:
-                    try:
-                        self._settle_failed_tool(
-                            item,
-                            logical_step_id=logical_step_id,
-                            error=exc,
-                        )
-                    except BudgetExceeded:
-                        # Same rationale as the execute() failure path above:
-                        # record_failure_usage commits counts before
-                        # enforcing, and must not hide the terminal error.
-                        pass
-                    raise
-                except Exception as exc:
-                    # The tool ran, but its usage could not be recorded or
-                    # verified -- treat it like an execution failure rather
-                    # than trust an un-settled result.
-                    self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
-                    error = _safe_error(exc)
-                    failures = _add_failure(failures, item.fingerprint, error)
-                    messages.append(
-                        _tool_message(
-                            item.call,
-                            {"ok": False, "error": error},
-                            limit=self._max_observation_chars,
-                        )
-                    )
-                    continue
-
-                _require_matching_kind(item.projection, actual)
-                receipt_id = _receipt_id(result.receipt_artifact)
-                durable = DurableToolResult(result=result, usage=actual)
-                try:
-                    self._tool_result_store.remember(logical_step_id, durable)
-                except Exception as exc:
-                    self._journal.tool_terminal(
-                        logical_step_id=logical_step_id,
-                        outcome="failed",
-                        error=_safe_error(exc),
-                        rows_scanned=actual.rows_scanned,
-                        result_cells=actual.result_cells,
-                    )
-                    self._ledger.record_failure_usage(
-                        actual.kind,
-                        rows_scanned=actual.rows_scanned,
-                        result_cells=actual.result_cells,
-                    )
-                    raise
-                try:
-                    self._ledger.record_success(
-                        actual.kind,
-                        rows_scanned=actual.rows_scanned,
-                        result_cells=actual.result_cells,
-                    )
-                except BudgetExceeded as exc:
-                    self._journal.tool_terminal(
-                        logical_step_id=logical_step_id,
-                        outcome="failed",
-                        error=_safe_error(exc),
-                        rows_scanned=actual.rows_scanned,
-                        result_cells=actual.result_cells,
-                    )
-                    raise
-                self._journal.tool_terminal(
-                    logical_step_id=logical_step_id,
-                    outcome="completed",
-                    receipt_id=receipt_id,
-                    rows_scanned=actual.rows_scanned,
-                    result_cells=actual.result_cells,
-                    result_digest=durable_tool_result_digest(durable),
-                )
-                completed.add(logical_step_id)
+                continue
+            memory.tool_calls += 1
+            memory.tool_names.append(item.tool.name)
+            if logical_step_id in memory.completed:
+                durable = recovered[item.action_index]
+                _require_matching_kind(item.projection, durable.usage)
+                memory.seen.add(item.fingerprint)
                 self._append_tool_observation(
                     item=item,
-                    result=result,
-                    artifacts=artifacts,
-                    messages=messages,
-                    guards=guards,
+                    result=durable.result,
+                    artifacts=memory.artifacts,
+                    messages=memory.messages,
+                    guards=memory.guards,
                 )
-
-        return self._result(
-            status="limit_reached",
-            artifacts=artifacts,
-            tool_calls=tool_calls,
-            tool_names=tool_names,
-            failures=failures,
-            seen=seen,
-            error="The probe reached its reasoning-step safety limit.",
-            error_code="step_limit",
-        )
+                continue
+            self._journal.tool_started(
+                logical_step_id=logical_step_id,
+                input_fingerprint=item.fingerprint,
+                tool_kind=item.projection.kind,
+                tool_name=item.call.name,
+                projected_rows_scanned=item.projection.rows_scanned,
+                projected_result_cells=item.projection.result_cells,
+            )
+            memory.seen.add(item.fingerprint)
+            execution = ToolExecutionContext(
+                run_id=memory.execution_run_id,
+                provider_call_id=item.call.call_id,
+                logical_step_id=logical_step_id,
+                attempt_epoch=self._journal.attempt_epoch,
+                sequence_index=sequence_index,
+                hypothesis=memory.hypothesis,
+            )
+            try:
+                with tool_execution_scope(execution):
+                    result = item.tool.execute(item.arguments)
+                if not isinstance(result, AgentToolResult):
+                    raise TypeError("AgentTool.execute must return AgentToolResult.")
+            except _TERMINAL_TOOL_ERRORS as exc:
+                try:
+                    self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
+                except BudgetExceeded:
+                    pass
+                raise
+            except Exception as exc:
+                self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
+                error = _safe_error(exc)
+                memory.failures = _add_failure(memory.failures, item.fingerprint, error)
+                memory.messages.append(
+                    _tool_message(
+                        item.call, {"ok": False, "error": error}, limit=self._max_observation_chars
+                    )
+                )
+                continue
+            try:
+                actual = self._usage_meter.success(
+                    call=item.call,
+                    tool=item.tool,
+                    arguments=item.arguments,
+                    result=result,
+                    projected=item.projection,
+                )
+            except _TERMINAL_TOOL_ERRORS as exc:
+                try:
+                    self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
+                except BudgetExceeded:
+                    pass
+                raise
+            except Exception as exc:
+                self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
+                error = _safe_error(exc)
+                memory.failures = _add_failure(memory.failures, item.fingerprint, error)
+                memory.messages.append(
+                    _tool_message(
+                        item.call, {"ok": False, "error": error}, limit=self._max_observation_chars
+                    )
+                )
+                continue
+            _require_matching_kind(item.projection, actual)
+            receipt_id = _receipt_id(result.receipt_artifact)
+            durable = DurableToolResult(result=result, usage=actual)
+            try:
+                self._tool_result_store.remember(logical_step_id, durable)
+            except Exception as exc:
+                self._journal.tool_terminal(
+                    logical_step_id=logical_step_id,
+                    outcome="failed",
+                    error=_safe_error(exc),
+                    rows_scanned=actual.rows_scanned,
+                    result_cells=actual.result_cells,
+                )
+                self._ledger.record_failure_usage(
+                    actual.kind, rows_scanned=actual.rows_scanned, result_cells=actual.result_cells
+                )
+                raise
+            try:
+                self._ledger.record_success(
+                    actual.kind, rows_scanned=actual.rows_scanned, result_cells=actual.result_cells
+                )
+            except BudgetExceeded as exc:
+                self._journal.tool_terminal(
+                    logical_step_id=logical_step_id,
+                    outcome="failed",
+                    error=_safe_error(exc),
+                    rows_scanned=actual.rows_scanned,
+                    result_cells=actual.result_cells,
+                )
+                raise
+            self._journal.tool_terminal(
+                logical_step_id=logical_step_id,
+                outcome="completed",
+                receipt_id=receipt_id,
+                rows_scanned=actual.rows_scanned,
+                result_cells=actual.result_cells,
+                result_digest=durable_tool_result_digest(durable),
+            )
+            memory.completed.add(logical_step_id)
+            self._append_tool_observation(
+                item=item,
+                result=result,
+                artifacts=memory.artifacts,
+                messages=memory.messages,
+                guards=memory.guards,
+            )
+        return {"memory": memory, "route": "model", "result": None}
 
     def _prepare_batch(
         self,
@@ -1247,10 +1357,12 @@ class ProbeExecutor:
         seen: set[str],
         failures: list[str],
         guards: _SessionGuardState,
+        recovered: Mapping[int, DurableToolResult] | None = None,
     ) -> tuple[list[_PreparedCall], list[dict[str, Any]], list[str]]:
         prepared_parts: list[tuple[LLMToolCall, AgentTool, BaseModel, str, int]] = []
         observations: list[dict[str, Any]] = []
         tentative = set(seen)
+        recovered = recovered or {}
 
         for action_index, call in enumerate(calls, start=1):
             tool = phase_registry.get(call.name)
@@ -1273,9 +1385,7 @@ class ProbeExecutor:
                 )
                 continue
             try:
-                canonical_arguments = canonical_tool_arguments(
-                    tool.args_schema, call.arguments
-                )
+                canonical_arguments = canonical_tool_arguments(tool.args_schema, call.arguments)
                 arguments = tool.args_schema.model_validate(canonical_arguments)
             except ValidationError as exc:
                 error = "Tool arguments did not match the declared schema."
@@ -1294,7 +1404,7 @@ class ProbeExecutor:
                 continue
 
             fingerprint = canonical_probe_fingerprint(call.name, canonical_arguments)
-            if fingerprint in tentative:
+            if fingerprint in tentative and action_index not in recovered:
                 error = (
                     "Probe rejected without execution: its canonical fingerprint was "
                     "already attempted. Choose a different direction or conclude."
@@ -1313,13 +1423,9 @@ class ProbeExecutor:
                     )
                 )
                 continue
-            if call.name == _PROFILE_SLICE_TOOL_NAME:
+            if call.name == _PROFILE_SLICE_TOOL_NAME and action_index not in recovered:
                 where_sql = getattr(arguments, "where_sql", None)
-                family = (
-                    zero_row_filter_family(where_sql)
-                    if isinstance(where_sql, str)
-                    else None
-                )
+                family = zero_row_filter_family(where_sql) if isinstance(where_sql, str) else None
                 if (
                     family is not None
                     and guards.zero_row_families.get(family, 0)
@@ -1367,11 +1473,14 @@ class ProbeExecutor:
         prepared: list[_PreparedCall] = []
         for call, tool, arguments, fingerprint, action_index in prepared_parts:
             try:
-                projection = self._usage_meter.project(
-                    call=call,
-                    tool=tool,
-                    arguments=arguments,
-                )
+                if action_index in recovered:
+                    projection = recovered[action_index].usage
+                else:
+                    projection = self._usage_meter.project(
+                        call=call,
+                        tool=tool,
+                        arguments=arguments,
+                    )
             except _TERMINAL_TOOL_ERRORS:
                 raise
             except Exception as exc:
@@ -1469,18 +1578,12 @@ class ProbeExecutor:
             ):
                 family = zero_row_filter_family(where_sql)
                 if family is not None:
-                    guards.zero_row_families[family] = (
-                        guards.zero_row_families.get(family, 0) + 1
-                    )
+                    guards.zero_row_families[family] = guards.zero_row_families.get(family, 0) + 1
         call_artifacts = list(result.artifacts)
         if result.receipt_artifact is not None:
             call_artifacts.append(result.receipt_artifact)
         artifacts.extend(call_artifacts)
-        content = (
-            result.content
-            if isinstance(result.content, dict)
-            else {"result": result.content}
-        )
+        content = result.content if isinstance(result.content, dict) else {"result": result.content}
         messages.append(
             _tool_message(
                 item.call,
@@ -1606,9 +1709,30 @@ _WHERE_OPERATOR = re.compile(
 _WHERE_IDENTIFIER = re.compile(r"\b[a-z_][a-z0-9_.$]*\b")
 _WHERE_NON_COLUMN_WORDS = frozenset(
     {
-        "and", "or", "not", "like", "ilike", "in", "between", "is", "null",
-        "true", "false", "case", "when", "then", "else", "end", "cast", "as",
-        "exists", "escape", "distinct", "interval", "date", "timestamp",
+        "and",
+        "or",
+        "not",
+        "like",
+        "ilike",
+        "in",
+        "between",
+        "is",
+        "null",
+        "true",
+        "false",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "cast",
+        "as",
+        "exists",
+        "escape",
+        "distinct",
+        "interval",
+        "date",
+        "timestamp",
     }
 )
 
@@ -1626,18 +1750,11 @@ def zero_row_filter_family(where_sql: str) -> str | None:
     operators = sorted(
         {
             "!=" if op == "<>" else op
-            for op in (
-                " ".join(match.group(0).split())
-                for match in _WHERE_OPERATOR.finditer(text)
-            )
+            for op in (" ".join(match.group(0).split()) for match in _WHERE_OPERATOR.finditer(text))
         }
     )
     columns = sorted(
-        {
-            token
-            for token in _WHERE_IDENTIFIER.findall(text)
-            if token not in _WHERE_NON_COLUMN_WORDS
-        }
+        {token for token in _WHERE_IDENTIFIER.findall(text) if token not in _WHERE_NON_COLUMN_WORDS}
     )
     if not columns and not operators:
         return None
@@ -1758,10 +1875,14 @@ def _tool_message(
     *,
     limit: int | None,
 ) -> dict[str, Any]:
-    content = _observation_text(observation, limit=limit) if limit is not None else json.dumps(
-        observation,
-        ensure_ascii=False,
-        default=str,
+    content = (
+        _observation_text(observation, limit=limit)
+        if limit is not None
+        else json.dumps(
+            observation,
+            ensure_ascii=False,
+            default=str,
+        )
     )
     return {
         "role": "tool",
@@ -1820,18 +1941,13 @@ def _receipt_id(artifact: Any | None) -> str | None:
         value = payload.get("receipt_id")
         if isinstance(value, str) and value:
             return value
-    # Lightweight executor tests and legacy adapters expose only ``id``.
-    return _artifact_id(artifact)
+    return None
 
 
 def _serializable_artifact(value: object) -> object:
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        return model_dump(mode="json")
-    artifact_id = getattr(value, "id", None)
-    if isinstance(artifact_id, str) and artifact_id:
-        return {"id": artifact_id}
-    raise TypeError(f"durable tool artifact {type(value).__name__} is not serializable.")
+    if not isinstance(value, Artifact):
+        raise TypeError("Durable probe outputs require typed artifact envelopes.")
+    return value.model_dump(mode="json")
 
 
 def _unique_artifacts(artifacts: Sequence[Any]) -> list[Any]:
@@ -1870,7 +1986,6 @@ __all__ = [
     "ProbeExecutor",
     "ProbeJournalHooks",
     "ProviderCallRejectedError",
-    "ProviderOutcomeUncertainError",
     "ToolUsageMeter",
     "ZERO_ROW_FILTER_FAMILY_THRESHOLD",
     "canonical_error_fingerprint",

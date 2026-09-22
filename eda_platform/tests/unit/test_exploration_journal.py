@@ -101,7 +101,8 @@ def _run_one_tool_step(
     journal: JsonlExplorationJournal, step: str, receipt: str
 ) -> None:
     journal.append_new(
-        "tool_call_started", logical_step_id=step, input_fingerprint=f"fp-{step}"
+        "tool_call_started", tool_kind="run_open_analysis",
+        logical_step_id=step, input_fingerprint=f"fp-{step}"
     )
     journal.append_new("receipt_prepared", logical_step_id=step, receipt_id=receipt)
     journal.append_new("receipt_committed", logical_step_id=step, receipt_id=receipt)
@@ -286,7 +287,8 @@ def test_pending_operations_block_round_transitions_but_not_new_slots(
     journal.append_new("round_started", round_index=0)
     journal.append_new("llm_call_started", call_id="call-0")
     state = journal.append_new(
-        "tool_call_started", logical_step_id="step-1", input_fingerprint="fp-1"
+        "tool_call_started", tool_kind="run_open_analysis",
+        logical_step_id="step-1", input_fingerprint="fp-1"
     )
     assert state.pending_call_ids == ("call-0",)
     assert set(state.pending_tool_steps) == {"step-1"}
@@ -294,7 +296,8 @@ def test_pending_operations_block_round_transitions_but_not_new_slots(
         journal.append_new("llm_call_started", call_id="call-0")
     with pytest.raises(EventTransitionError, match="already pending"):
         journal.append_new(
-            "tool_call_started", logical_step_id="step-1", input_fingerprint="fp-1"
+            "tool_call_started", tool_kind="run_open_analysis",
+            logical_step_id="step-1", input_fingerprint="fp-1"
         )
     with pytest.raises(EventTransitionError, match="pending"):
         journal.append_new("round_settled", round_index=0, progress=False)
@@ -327,8 +330,7 @@ def test_round_settled_tracks_the_consecutive_empty_frontier_streak(
 
 def test_round_settled_tracks_the_no_adjudication_streak(tmp_path: Path) -> None:
     """Plan-B soft stop: the streak counts rounds with zero adjudicated
-    transitions, resets on any adjudication, and treats legacy events (no
-    field) as movement so resumed old journals never soft-stop retroactively."""
+    transitions and resets only when the round records an adjudication."""
     journal = _journal(tmp_path, policy=_policy(budget=_budget(max_rounds=9)))
     journal.append_new("round_started", round_index=0)
     state = journal.append_new(
@@ -336,16 +338,16 @@ def test_round_settled_tracks_the_no_adjudication_streak(tmp_path: Path) -> None
     )
     assert state.consecutive_no_adjudication == 1
 
-    # Legacy event without the field: counted as movement, streak resets.
+    # An omitted observation is zero, never assumed to be productive.
     journal.append_new("round_started", round_index=1)
     state = journal.append_new("round_settled", round_index=1, progress=True)
-    assert state.consecutive_no_adjudication == 0
+    assert state.consecutive_no_adjudication == 2
 
     journal.append_new("round_started", round_index=2)
     state = journal.append_new(
         "round_settled", round_index=2, progress=True, adjudicated_transitions=0
     )
-    assert state.consecutive_no_adjudication == 1
+    assert state.consecutive_no_adjudication == 3
 
     journal.append_new("round_started", round_index=3)
     state = journal.append_new(
@@ -358,8 +360,7 @@ def test_round_settled_tracks_the_no_adjudication_streak(tmp_path: Path) -> None
 
 
 def test_round_settled_carries_the_productivity_observations(tmp_path: Path) -> None:
-    """Recorded, replayable, and optional: pre-existing journals have None and
-    must still rebuild."""
+    """Productivity observations remain optional domain telemetry."""
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new(
@@ -383,12 +384,12 @@ def test_round_settled_carries_the_productivity_observations(tmp_path: Path) -> 
         for event in settled
     ] == [(2, 11, 7)]
 
-    # A legacy settle carries none of them and still replays.
+    # Unmeasured telemetry stays absent rather than inventing measured values.
     journal.append_new("round_started", round_index=1)
     journal.append_new("round_settled", round_index=1, progress=True)
-    legacy = journal.events()[-1]
-    assert legacy.supported_transitions is None
-    assert legacy.llm_calls_at_settle is None
+    unmeasured = journal.events()[-1]
+    assert unmeasured.supported_transitions is None
+    assert unmeasured.llm_calls_at_settle is None
     assert journal.rebuild() is not None
 
 
@@ -413,7 +414,8 @@ def test_budget_counters_decrement_and_reject_at_zero(tmp_path: Path) -> None:
     _run_one_tool_step(journal, "step-0", "rcpt-0")
     with pytest.raises(EventTransitionError, match="max_successful_tool_calls"):
         journal.append_new(
-            "tool_call_started", logical_step_id="step-1", input_fingerprint="fp-1"
+            "tool_call_started", tool_kind="run_open_analysis",
+            logical_step_id="step-1", input_fingerprint="fp-1"
         )
 
     journal.append_new("round_settled", round_index=0, progress=True)
@@ -442,14 +444,15 @@ def test_failed_tool_calls_do_not_consume_the_success_budget(tmp_path: Path) -> 
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new(
-        "tool_call_started", logical_step_id="step-0", input_fingerprint="fp-0"
+        "tool_call_started", tool_kind="run_open_analysis",
+        logical_step_id="step-0", input_fingerprint="fp-0"
     )
     state = journal.append_new(
         "tool_call_failed", logical_step_id="step-0", error="query timeout"
     )
     assert state.tool_calls_committed == 0
     assert state.remaining_tool_call_budget == 3
-    assert state.pending_logical_step_id is None
+    assert state.pending_tool_steps == {}
     assert state.failure_history == ["query timeout"]
 
 
@@ -584,7 +587,7 @@ def test_crash_before_llm_return_marks_uncertain_and_consumes_reservation(
 
     recovered = JsonlExplorationJournal(journal.path)
     state = recovered.claim_recovery()
-    assert state.pending_call_id is None
+    assert state.pending_call_ids == ()
     assert state.llm_calls_uncertain == 1
     assert state.llm_calls_settled == 0
     assert state.remaining_llm_call_budget == 3  # reservation fully consumed
@@ -611,8 +614,8 @@ def test_crash_after_response_body_adopts_bound_step_before_marking_uncertain(
         )
     )
 
-    assert state.pending_call_id is None
-    assert state.pending_call_step_id is None
+    assert state.pending_call_ids == ()
+    assert state.pending_call_steps == {}
     assert state.llm_calls_settled == 1
     assert state.llm_calls_uncertain == 0
     assert "step-llm-0" in state.completed_step_ids
@@ -667,15 +670,17 @@ def test_crash_before_receipt_commit_allows_logical_rerun_exactly_once(
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new(
-        "tool_call_started", logical_step_id="step-corr", input_fingerprint="fp-1"
+        "tool_call_started", tool_kind="run_open_analysis",
+        logical_step_id="step-corr", input_fingerprint="fp-1"
     )
 
     recovered = JsonlExplorationJournal(journal.path)
     state = recovered.claim_recovery()
-    assert state.pending_logical_step_id is None
+    assert state.pending_tool_steps == {}
     assert state.failure_history[-1].startswith("tool outcome unknown after crash")
     recovered.append_new(
-        "tool_call_started", logical_step_id="step-corr", input_fingerprint="fp-1"
+        "tool_call_started", tool_kind="run_open_analysis",
+        logical_step_id="step-corr", input_fingerprint="fp-1"
     )
     recovered.append_new(
         "receipt_prepared", logical_step_id="step-corr", receipt_id="rcpt-1"
@@ -697,7 +702,8 @@ def test_crash_after_receipt_commit_adopts_the_committed_receipt(tmp_path: Path)
     assert state.step_receipt_refs == {"step-corr": "rcpt-1"}
     with pytest.raises(EventTransitionError, match="already committed"):
         recovered.append_new(
-            "tool_call_started", logical_step_id="step-corr", input_fingerprint="fp-1"
+            "tool_call_started", tool_kind="run_open_analysis",
+            logical_step_id="step-corr", input_fingerprint="fp-1"
         )
 
 
@@ -705,7 +711,8 @@ def test_prepared_receipt_cannot_be_replaced_or_mismatched(tmp_path: Path) -> No
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new(
-        "tool_call_started", logical_step_id="step-0", input_fingerprint="fp-0"
+        "tool_call_started", tool_kind="run_open_analysis",
+        logical_step_id="step-0", input_fingerprint="fp-0"
     )
     journal.append_new("receipt_prepared", logical_step_id="step-0", receipt_id="rcpt-a")
     # Idempotent re-prepare of the same receipt is allowed (crash between the
@@ -725,7 +732,8 @@ def test_receipt_commit_requires_a_prepared_receipt(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new(
-        "tool_call_started", logical_step_id="step-0", input_fingerprint="fp-0"
+        "tool_call_started", tool_kind="run_open_analysis",
+        logical_step_id="step-0", input_fingerprint="fp-0"
     )
     with pytest.raises(EventTransitionError, match="prepared"):
         journal.append_new(
@@ -769,7 +777,8 @@ def test_pause_requested_drains_in_flight_work_but_blocks_new_work(
 
     with pytest.raises(EventTransitionError, match="pause"):
         journal.append_new(
-            "tool_call_started", logical_step_id="step-0", input_fingerprint="fp-0"
+            "tool_call_started", tool_kind="run_open_analysis",
+            logical_step_id="step-0", input_fingerprint="fp-0"
         )
 
 
@@ -852,7 +861,7 @@ def test_gate_and_reduction_cannot_commit_around_pending_work(tmp_path: Path) ->
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new(
-        "tool_call_started",
+        "tool_call_started", tool_kind="run_open_analysis",
         logical_step_id="pending-tool",
         input_fingerprint="pending-fp",
     )

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -20,12 +21,16 @@ import {
 } from "../../api/job-invalidation";
 import {
   jobFailure,
+  explorationJobOutcome,
+  explorationJobSection,
+  projectExplorationJobState,
   phaseProgress,
   TERMINAL_PHASES,
   useJobEvents,
   type JobEvent,
   type JobEventsState,
   type JobPhase,
+  type ExplorationDomainOutcome,
 } from "../../api/job-events";
 import { RunAgainButton } from "../../components/run-again";
 import { SessionQualitySummary } from "../../components/session-quality-summary";
@@ -46,6 +51,8 @@ const PHASE_LABELS: Record<JobPhase, string> = {
   limited: "Resource limited",
   failed: "Failed",
   cancelled: "Cancelled",
+  paused: "Paused · resumable",
+  outcome_unknown: "Outcome unavailable",
   disconnected: "Stream lost",
 };
 
@@ -803,8 +810,14 @@ function JobObserver({
   trackedJob: ActiveJob;
   onSnapshot: (jobId: string, snapshot: JobActivitySnapshot) => void;
 }) {
-  const state = useJobEvents(trackedJob.jobId, trackedJob.eventsUrl);
-  const kind = useJob(trackedJob.jobId).data?.kind;
+  const stream = useJobEvents(trackedJob.jobId, trackedJob.eventsUrl);
+  const job = useJob(trackedJob.jobId).data;
+  const kind = job?.kind;
+  const domainOutcome = (job as { domain_outcome?: ExplorationDomainOutcome | null } | undefined)?.domain_outcome;
+  const state = useMemo(
+    () => projectExplorationJobState(stream, kind, job?.status, domainOutcome),
+    [stream, kind, job?.status, domainOutcome],
+  );
   const queryClient = useQueryClient();
   const { claimSettlement } = useJobActivity();
 
@@ -872,7 +885,7 @@ function RunRow({
               {activityKindLabel(snapshot?.kind)}
             </Marquee>
             <span className={`shrink-0 text-xs font-medium ${phaseTone(phase)}`}>
-              {PHASE_LABELS[phase]}
+              {(terminal && snapshot && explorationJobOutcome(snapshot.state)?.label) || PHASE_LABELS[phase]}
             </span>
           </span>
           <Marquee className="mt-1 block font-mono text-[11px] text-status-neutral">
@@ -895,12 +908,12 @@ function RunRow({
           <Link
             to={sessionSectionPath(
               trackedJob.projectId,
-              resultSessionId,
-              "data-map",
+              snapshot?.kind === "exploration_run" ? trackedJob.sourceSessionId : resultSessionId,
+              snapshot?.kind === "exploration_run" ? explorationJobSection(snapshot.state) : "data-map",
             )}
             className="text-xs font-medium text-primary hover:underline"
           >
-            Open result
+            {snapshot?.kind === "exploration_run" ? "Open exploration" : "Open result"}
           </Link>
         )}
         {terminal && (
@@ -1058,7 +1071,8 @@ function AgentActivityCenter() {
   }).length;
   const attentionCount = trackedJobs.filter((trackedJob) => {
     const phase = snapshots.get(trackedJob.jobId)?.state.phase;
-    return phase === "limited" || phase === "failed" || phase === "disconnected";
+    return phase === "limited" || phase === "failed" || phase === "disconnected" ||
+      phase === "paused" || phase === "outcome_unknown";
   }).length;
 
   const close = () => {
@@ -1099,6 +1113,14 @@ function AgentActivityCenter() {
             <SessionQualitySummary metrics={metrics.data} compact />
           )}
           <div className="flex flex-wrap items-center gap-2">
+            {selectedKind === "exploration_run" && (
+              <Link
+                to={sessionSectionPath(activeJob.projectId, activeJob.sourceSessionId, explorationJobSection(selectedState))}
+                className="rounded-base border border-border px-2 py-1 text-xs hover:bg-code-bg"
+              >
+                Open exploration
+              </Link>
+            )}
             {/* The backend's cancel_job is kind-agnostic and every worker
               * handler receives a cancel_check, so any live run may be
               * stopped; only settled runs have nothing left to cancel. */}
@@ -1182,7 +1204,7 @@ function AgentActivityCenter() {
                   aria-hidden
                   className={`h-1.5 w-1.5 rounded-full ${phaseDot(selectedPhase)}`}
                 />
-                {PHASE_LABELS[selectedPhase]}
+                {(selectedTerminal && selectedState && explorationJobOutcome(selectedState)?.label) || PHASE_LABELS[selectedPhase]}
                 {selectedState?.cancelRequested && !selectedTerminal
                   ? " · cancel requested"
                   : ""}

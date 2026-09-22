@@ -54,6 +54,55 @@ class _Answer(BaseModel):
     value: str = "ok"
 
 
+def test_offline_calls_do_not_require_remote_reservations_on_restart() -> None:
+    events: list[TraceEvent] = []
+    policy = SessionBudgetPolicy(max_requests=2)
+    client = LedgerLLMClient(
+        OfflineLLMClient(),
+        session_id="offline-run",
+        emit=events.append,
+        budget=SessionBudgetState(policy),
+    )
+    client.text(task="routing", payload={})
+    with pytest.raises(RuntimeError):
+        client.structured(task="offline-plan", schema=_Answer, payload={})
+    assert len(events) == 2
+    assert all(event.summary["provider"] == "offline" for event in events)
+    restored = restore_run_budget_state(policy, events)
+    assert restored.requests_used == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"provider": "openai"},
+        {"usage_known": False},
+        {"total_tokens": 1},
+        {"total_tokens": False},
+        {"estimated_cost_usd": None},
+        {"estimated_cost_usd": 0.01},
+    ],
+)
+def test_unproven_offline_usage_does_not_bypass_reservation_checks(change: dict) -> None:
+    event = TraceEvent(
+        session_id="s",
+        event_type=LLM_USAGE_EVENT,
+        name="request",
+        call_id="unreserved",
+        summary={
+            "provider": "offline",
+            "usage_known": True,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost_usd": 0,
+            **change,
+        },
+    )
+    with pytest.raises(BudgetUsageUncertain):
+        restore_run_budget_state(SessionBudgetPolicy(max_requests=2), [event])
+
+
 class _FakeLLM:
     """Meters every call; raises on the task named ``boom``."""
 
@@ -96,9 +145,7 @@ class _MissingUsageLLM(_FakeLLM):
 
     def text(self, *, task: str, payload: dict) -> str:
         self.calls += 1
-        self._last = LLMResultMetadata(
-            provider="fake", model="fake-1", usage_reported=False
-        )
+        self._last = LLMResultMetadata(provider="fake", model="fake-1", usage_reported=False)
         return "text"
 
 

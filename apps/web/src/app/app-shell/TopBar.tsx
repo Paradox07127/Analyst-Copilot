@@ -19,6 +19,8 @@ import {
 } from "../../components/ui";
 import {
   JOB_KIND_ACTIVITY,
+  explorationJobOutcome,
+  TERMINAL_PHASES,
   phaseProgress,
   type JobPhase,
   type PhaseState,
@@ -58,6 +60,7 @@ function jobKindLabel(kind: string | undefined): string {
   if (kind === "auto_eda") return "EDA";
   if (kind === "report_generate") return "Report";
   if (kind === "question_exec") return "Question";
+  if (kind === "exploration_run") return "Exploration";
   if (kind === "cleaning_apply" || kind === "cleaning_preview") return "Cleanup";
   return kind ? "Task" : "Job";
 }
@@ -81,6 +84,8 @@ function jobPhaseLabel(
   if (phase === "completed") return `${name} · complete`;
   if (phase === "failed") return `${name} · failed`;
   if (phase === "cancelled") return `${name} · stopped`;
+  if (phase === "paused") return `${name} · paused`;
+  if (phase === "outcome_unknown") return `${name} · outcome unavailable`;
   if (phase === "queued" || phase === "connecting") return `${name} · queued`;
   return `${name} · ${currentPhase?.label ?? "working"}`;
 }
@@ -91,6 +96,8 @@ function jobStatusLabel(phase: JobPhase, degraded: boolean): string {
   if (phase === "completed") return "Completed";
   if (phase === "failed") return "Failed";
   if (phase === "cancelled") return "Stopped";
+  if (phase === "paused") return "Paused · resumable";
+  if (phase === "outcome_unknown") return "Outcome unavailable";
   if (phase === "queued" || phase === "connecting") return "Queued";
   if (phase === "disconnected") return "Connection lost";
   return "Running";
@@ -197,21 +204,25 @@ function TopBarJobProgress({
     (candidate) => candidate.state === "done" || candidate.state === "failed",
   );
   const degraded = isDegraded(snapshot);
+  const exploration = snapshot && TERMINAL_PHASES.has(phase)
+    ? explorationJobOutcome(snapshot.state) : null;
 
   const states: PhaseState[] =
     kind === "auto_eda"
       ? phases.map((phase) => phase.state)
-      : phase === "completed" || phase === "limited" || phase === "failed" || phase === "cancelled"
+      : TERMINAL_PHASES.has(phase)
         ? Array.from({ length: 3 }, () =>
-            phase === "completed" ? "done" : "failed",
+            phase === "completed" ? "done" : phase === "paused" || phase === "outcome_unknown" ? "skipped" : "failed",
           )
       : phase === "running"
         ? ["done", "active", "pending"]
         : ["active", "pending", "pending"];
-  const label = jobPhaseLabel(phase, kind, current, degraded);
-  const status = jobStatusLabel(phase, degraded);
+  const label = exploration?.label ?? jobPhaseLabel(phase, kind, current, degraded);
+  const status = exploration?.label ?? jobStatusLabel(phase, degraded);
   const lastEvent = snapshot?.state.events.at(-1);
   const detail =
+    exploration?.detail ??
+    (phase === "outcome_unknown" ? "The worker finished. Open the exploration to check its outcome." : undefined) ??
     detailFromSummary(snapshot) ??
     (degraded ? "This job continued with a reduced capability or budget." : undefined) ??
     mostRecentPhase?.activity ??

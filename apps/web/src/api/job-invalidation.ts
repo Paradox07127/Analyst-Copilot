@@ -16,6 +16,7 @@ export const JOB_KINDS = [
   "cleaning_apply",
   "dataset_distributions",
   "custom_chart",
+  "exploration_run",
 ] as const;
 
 export type JobKind = (typeof JOB_KINDS)[number];
@@ -105,6 +106,14 @@ const JOB_RESULT_KEYS: Record<JobKind, KeyFactory> = {
   ],
   dataset_distributions: () => [],
   custom_chart: () => [],
+  exploration_run: ({ sourceSessionId, sessionId }) => [
+    queryKeys.explorations(sourceSessionId),
+    ["exploration", sourceSessionId],
+    queryKeys.findings(sourceSessionId),
+    queryKeys.artifactsRoot(sessionId),
+    queryKeys.sessionMetrics(sourceSessionId),
+    queryKeys.traceRoot(sourceSessionId),
+  ],
 };
 
 export function jobInvalidationKeys(

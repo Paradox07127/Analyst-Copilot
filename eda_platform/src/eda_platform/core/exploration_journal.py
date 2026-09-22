@@ -287,18 +287,17 @@ def reduce_exploration_event(
             result_digests = dict(state.step_result_digests)
             result_digests[event.logical_step_id] = event.result_digest
             values["step_result_digests"] = result_digests
-        tool_kind = slot.tool_kind or "legacy_unknown"
+        tool_kind = slot.tool_kind
         values["tool_calls_by_kind"] = {
             **state.tool_calls_by_kind,
             tool_kind: state.tool_calls_by_kind.get(tool_kind, 0) + 1,
         }
         values["rows_scanned"] = state.rows_scanned + event.rows_scanned
         values["result_cells"] = state.result_cells + event.result_cells
-        if slot.input_fingerprint is not None:
-            values["completed_probe_fingerprints"] = [
-                *state.completed_probe_fingerprints,
-                slot.input_fingerprint,
-            ]
+        values["completed_probe_fingerprints"] = [
+            *state.completed_probe_fingerprints,
+            slot.input_fingerprint,
+        ]
         _remove_tool_slot(values, state, event.logical_step_id)
         values["tool_calls_committed"] = state.tool_calls_committed + 1
         values["remaining_tool_call_budget"] = state.remaining_tool_call_budget - 1
@@ -365,12 +364,9 @@ def reduce_exploration_event(
         values["consecutive_empty_frontier"] = (
             state.consecutive_empty_frontier + 1 if event.frontier_empty else 0
         )
-        # None = pre-plan-B event: counted as movement so a resumed legacy
-        # journal can never soft-stop on rounds it never measured.
         values["consecutive_no_adjudication"] = (
             0
-            if event.adjudicated_transitions is None
-            or event.adjudicated_transitions > 0
+            if event.adjudicated_transitions > 0
             else state.consecutive_no_adjudication + 1
         )
         values["pending_terminal_reason"] = event.terminal_reason

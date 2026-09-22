@@ -233,6 +233,24 @@ class EvidenceInterleaveSession:
             rejected_count=sum(1 for item in self._exchanges if item.rejection is not None),
         )
 
+    def restore(self, transcript: InterleaveTranscript) -> None:
+        """Restore a checkpointed read session without resolving or emitting again."""
+        if (
+            transcript.per_section_limit != self._per_section_limit
+            or transcript.total_limit != self._total_limit
+        ):
+            raise ValueError("Evidence quota policy changed during report execution.")
+        self._exchanges = list(transcript.exchanges)
+        self._section_counts = {}
+        self._total_count = 0
+        for exchange in self._exchanges:
+            # Refusals made after a quota was exhausted never consumed quota.
+            if exchange.rejection and exchange.rejection.reason_code == "budget_exhausted":
+                continue
+            self._total_count += 1
+            bucket = exchange.section or _DEFAULT_SECTION
+            self._section_counts[bucket] = self._section_counts.get(bucket, 0) + 1
+
     def request(
         self, request: EvidenceRequest, *, section: str | None = None
     ) -> EvidenceGrant | EvidenceRejection:

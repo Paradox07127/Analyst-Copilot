@@ -69,7 +69,6 @@ from eda_platform.core.provider_registry import (
     provider_spec,
 )
 from eda_platform.core.request_dialect import forget_learned_repairs
-from eda_platform.core.tool_calling_probe import forget_probe_results
 from eda_platform.schemas.resource_metrics import EdaResourcePolicy
 
 DEFAULT_SESSION_ID = "default"
@@ -722,14 +721,13 @@ def _model_catalog_cache_key(settings: LLMSettings) -> str:
 
 
 def _forget_endpoint_learning(before: LLMSettings, after: LLMSettings) -> None:
-    """Both caches are keyed by (provider, model), which is not enough to
+    """The dialect cache is keyed by (provider, model), which is not enough to
     identify a server: the same model id behind a new base URL is a different
-    endpoint, and its dialect and tool support have to be rediscovered."""
+    endpoint, and its dialect has to be rediscovered."""
     identity = (before.provider, before.resolved_base_url, before.model)
     if identity == (after.provider, after.resolved_base_url, after.model):
         return
     forget_learned_repairs()
-    forget_probe_results()
 
 
 def _display_endpoint(endpoint: str) -> str:

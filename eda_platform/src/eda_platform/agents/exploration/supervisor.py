@@ -1,9 +1,9 @@
-"""Deterministic E4a exploration supervisor.
+"""Domain services for the checkpointed LangGraph exploration workflow.
 
-The supervisor owns control flow, not analysis semantics.  Candidate generation,
+LangGraph owns execution position and phase transitions. Candidate generation,
 scheduling, probe execution, validation, reduction, and final rendering are narrow
-ports so E4a components can evolve independently.  The journal remains the recovery
-authority: a paid step recorded as completed is recovered and is never sent again.
+ports so components can evolve independently. The journal owns business facts and
+effect commits: a paid step recorded as completed is adopted without resending.
 
 Normal rounds follow the explicit state sequence from the authoritative plan::
 
@@ -22,8 +22,9 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypedDict
 
+from eda_platform.core.graph_execution import GraphPersistence
 from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.exploration import (
     MAIN_LINE_ID,
@@ -35,12 +36,8 @@ from eda_platform.schemas.exploration import (
 JournalStatus = Literal["running", "pause_requested", "paused", "stopped"]
 InsightTransition = Literal["new", "reinforced", "refuted", "inconclusive"]
 
-_PROGRESS_TRANSITIONS = frozenset({"new", "reinforced", "refuted"})
-_SUPPORTED_TRANSITIONS = frozenset({"new", "reinforced"})
-
-
 class SupervisorPhase(StrEnum):
-    """Typed outer-loop states.  PAUSED is resumable and never a stop reason."""
+    """Domain phase labels for audit and control checks, not an execution cursor."""
 
     ORIENT = "ORIENT"
     GENERATE = "GENERATE"
@@ -452,12 +449,17 @@ class SupervisorInvariantError(RuntimeError):
     """A dependency violated its durable/fail-closed contract."""
 
 
-@dataclass(slots=True)
-class _Cursor:
+class ExplorationRunChannels(TypedDict):
+    """Domain context and phase audit channels in the LangGraph state.
+
+    These values do not select the next node. LangGraph owns execution position;
+    phase/transitions record the domain boundary observed by control checks.
+    """
+
     phase: SupervisorPhase
     transitions: list[PhaseTransition]
-    context: PhaseContext | None = None
-    reduction: ReductionOutcome | None = None
+    context: PhaseContext | None
+    reduction: ReductionOutcome | None
 
 
 def phase_step_id(
@@ -497,7 +499,7 @@ def _json_scalar(value: object) -> str:
 
 
 class ExplorationSupervisor:
-    """Single-authority E4a state machine with fail-closed recovery semantics."""
+    """Exploration domain policies and ports composed by the LangGraph workflow."""
 
     def __init__(
         self,
@@ -515,9 +517,11 @@ class ExplorationSupervisor:
         finalizer: FinalizerPort,
         recovery: CompletedStepRecoveryPort,
         branch_deriver: BranchConstraintPort | None = None,
+        persistence: GraphPersistence | None = None,
     ) -> None:
         if config.branch_trigger_stagnant_rounds is not None and branch_deriver is None:
             raise ValueError("branch mode requires a branch constraint deriver.")
+        self._persistence = persistence
         self._config = config
         self._journal = journal
         self._witness = witness
@@ -540,96 +544,11 @@ class ExplorationSupervisor:
         if initial.status in {"pause_requested", "paused"}:
             return self._pause_result(initial, ())
 
-        cursor = _Cursor(phase=SupervisorPhase.ORIENT, transitions=[])
-        try:
-            self._enter(cursor, SupervisorPhase.ORIENT, source=None, round_index=None)
-            return self._drive(cursor)
-        except SupervisorPauseRequested:
-            return self._pause_result(self._journal.snapshot(), cursor.transitions)
-        except SupervisorCancelled:
-            return self._abort(cursor, "cancelled", error=None)
-        except _WitnessChanged:
-            return self._terminal(cursor, "state_witness_changed", error=None)
-        except SupervisorBudgetExhausted as exc:
-            return self._budget_exhausted_terminal(cursor, error=str(exc) or None)
-        except Exception as exc:
-            # Any unclassified dependency/recovery fault is terminal.  No partial
-            # result is presented as a successful/no-information exploration.
-            return self._terminal(
-                cursor,
-                "failed",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+        from eda_platform.agents.exploration.graph import run_exploration_graph
 
-    def _drive(self, cursor: _Cursor) -> SupervisorRunResult:
-        while True:
-            settled = self._journal.snapshot()
-            if settled.pending_terminal_reason is not None:
-                return self._resume_settled_terminal(cursor, settled)
-            state, context = self._orient(cursor)
-            cursor.context = context
+        return run_exploration_graph(self)
 
-            if state.current_round_reduction_committed:
-                self._move(cursor, SupervisorPhase.REDUCE)
-                reduction = self._recover_reduction(context)
-                cursor.reduction = reduction
-                result = self._settle_reduction(cursor, reduction)
-                if result is not None:
-                    return result
-                continue
-
-            self._move(cursor, SupervisorPhase.GENERATE)
-            candidates = self._generate(context.for_phase(SupervisorPhase.GENERATE))
-
-            self._move(cursor, SupervisorPhase.ADMIT_AND_SCORE)
-            frontier = self._scheduler.admit_and_score(
-                context.for_phase(SupervisorPhase.ADMIT_AND_SCORE), candidates
-            )
-            self._require_type(frontier, ScoredFrontier, "scheduler frontier")
-            if not frontier.items:
-                result = self._settle_empty_frontier(cursor, frontier)
-                if result is not None:
-                    return result
-                continue
-
-            self._move(cursor, SupervisorPhase.SELECT)
-            selection = self._scheduler.select(
-                context.for_phase(SupervisorPhase.SELECT), frontier
-            )
-            if selection is None:
-                raise SupervisorInvariantError(
-                    "scheduler returned no selection for a non-empty frontier."
-                )
-            self._require_type(selection, ProbeSelection, "scheduler selection")
-
-            self._move(cursor, SupervisorPhase.EXECUTE_PROBES)
-            probes = self._executor.execute(
-                self._fresh_context(context, SupervisorPhase.EXECUTE_PROBES), selection
-            )
-            self._require_type(probes, ProbeOutcome, "probe outcome")
-
-            self._move(cursor, SupervisorPhase.VALIDATE)
-            validated = self._validator.validate(
-                self._fresh_context(context, SupervisorPhase.VALIDATE), probes
-            )
-            self._require_type(validated, ValidationOutcome, "validation outcome")
-            if validated.validator_exhausted:
-                raise SupervisorInvariantError("validator retry budget exhausted.")
-
-            self._move(cursor, SupervisorPhase.REDUCE)
-            reduction = self._reduce(
-                self._fresh_context(context, SupervisorPhase.REDUCE),
-                validated,
-                frontier,
-            )
-            cursor.reduction = reduction
-            result = self._settle_reduction(cursor, reduction)
-            if result is not None:
-                return result
-
-    def _orient(
-        self, cursor: _Cursor
-    ) -> tuple[SupervisorJournalState, PhaseContext]:
+    def _open_round(self) -> tuple[SupervisorJournalState, PhaseContext]:
         state = self._journal.snapshot()
         self._honor_journal_control(state)
         if state.remaining_round_budget <= 0 and state.current_round_index is None:
@@ -758,75 +677,6 @@ class ExplorationSupervisor:
                 "recovered reduction digests do not match the journal commit."
             )
         return recovered
-    def _settle_reduction(
-        self, cursor: _Cursor, reduction: ReductionOutcome
-    ) -> SupervisorRunResult | None:
-        context = self._require_context(cursor)
-        before_settle = self._journal.snapshot()
-        adjudicated_transitions = sum(
-            1
-            for transition in reduction.transitions
-            if transition in _PROGRESS_TRANSITIONS
-        )
-        # A refutation is real work but not a finding; kept separate so the two
-        # can be compared as value signals.
-        supported_transitions = sum(
-            1
-            for transition in reduction.transitions
-            if transition in _SUPPORTED_TRANSITIONS
-        )
-        progress = bool(
-            before_settle.current_round_receipt_ids
-            and (adjudicated_transitions > 0 or reduction.admitted_bundle_count > 0)
-        )
-        terminal_reason, should_branch = self._settle_decision(
-            before_settle,
-            progress=progress,
-            adjudicated_transitions=adjudicated_transitions,
-            frontier=reduction.frontier,
-            goal_satisfied=(
-                reduction.goal_satisfied or reduction.coverage_target_met
-            ),
-        )
-        self._journal.settle_round(
-            context.round_index,
-            progress=progress,
-            terminal_reason=terminal_reason,
-            frontier_empty=not reduction.frontier.items,
-            adjudicated_transitions=adjudicated_transitions,
-            supported_transitions=supported_transitions,
-            llm_calls_at_settle=before_settle.llm_calls_settled,
-            tool_calls_at_settle=before_settle.tool_calls_committed,
-        )
-
-        if terminal_reason is not None:
-            return self._graceful_terminal(cursor, terminal_reason, reduction)
-        if should_branch:
-            self._abandon_current_line(cursor)
-        self._move(cursor, SupervisorPhase.ORIENT)
-        cursor.context = None
-        cursor.reduction = None
-        return None
-
-    def _settle_empty_frontier(
-        self, cursor: _Cursor, frontier: ScoredFrontier
-    ) -> SupervisorRunResult | None:
-        """Commit a probe-free reduction, then settle like any other round.
-
-        The round still produced scheduling decisions, and ``frontier_digest``
-        on the reduction event is the only thing that binds them to the journal;
-        settling without one leaves them unverifiable (the E4a issuer rejects
-        such a root). Routing through the normal settle path also keeps the
-        finalizer — and therefore the report artifact — on the terminal edge.
-        """
-        context = self._require_context(cursor)
-        self._move(cursor, SupervisorPhase.REDUCE)
-        reduction = self._reduce_without_probes(
-            self._fresh_context(context, SupervisorPhase.REDUCE), frontier
-        )
-        cursor.reduction = reduction
-        return self._settle_reduction(cursor, reduction)
-
     def _settle_decision(
         self,
         state: SupervisorJournalState,
@@ -882,8 +732,8 @@ class ExplorationSupervisor:
             return "budget_exhausted", False
         return None, False
 
-    def _abandon_current_line(self, cursor: _Cursor) -> None:
-        context = self._require_context(cursor)
+    def _abandon_current_line(self, run_state: ExplorationRunChannels) -> None:
+        context = self._require_context(run_state)
         deriver = self._branch_deriver
         if deriver is None:
             raise SupervisorInvariantError(
@@ -908,7 +758,7 @@ class ExplorationSupervisor:
 
     def _resume_settled_terminal(
         self,
-        cursor: _Cursor,
+        run_state: ExplorationRunChannels,
         state: SupervisorJournalState,
     ) -> SupervisorRunResult:
         reason = state.pending_terminal_reason
@@ -925,17 +775,17 @@ class ExplorationSupervisor:
             soft_countdown_context=render_soft_countdown(self._budget.remaining(state)),
             completed_step_ids=state.completed_step_ids,
         )
-        cursor.context = context
+        run_state["context"] = context
         if not state.pending_terminal_has_reduction:
-            return self._terminal(cursor, reason, error=None)
-        self._move(cursor, SupervisorPhase.REDUCE)
+            return self._terminal(run_state, reason, error=None)
+        self._record_phase(run_state, SupervisorPhase.REDUCE)
         reduction = self._recover_reduction(context)
-        cursor.reduction = reduction
-        return self._graceful_terminal(cursor, reason, reduction)
+        run_state["reduction"] = reduction
+        return self._graceful_terminal(run_state, reason, reduction)
 
     def _budget_exhausted_terminal(
         self,
-        cursor: _Cursor,
+        run_state: ExplorationRunChannels,
         *,
         error: str | None,
     ) -> SupervisorRunResult:
@@ -963,23 +813,23 @@ class ExplorationSupervisor:
                     terminal_reason="budget_exhausted",
                 )
                 reduction = self._recover_reduction(context)
-                cursor.context = context
-                cursor.reduction = reduction
+                run_state["context"] = context
+                run_state["reduction"] = reduction
                 return self._graceful_terminal(
-                    cursor,
+                    run_state,
                     "budget_exhausted",
                     reduction,
                     deterministic_only=True,
                     error=error,
                 )
             except Exception:
-                cursor.context = None
-                cursor.reduction = None
-        return self._terminal(cursor, "budget_exhausted", error=error)
+                run_state["context"] = None
+                run_state["reduction"] = None
+        return self._terminal(run_state, "budget_exhausted", error=error)
 
     def _graceful_terminal(
         self,
-        cursor: _Cursor,
+        run_state: ExplorationRunChannels,
         reason: ExplorationStopReason,
         reduction: ReductionOutcome,
         *,
@@ -987,9 +837,9 @@ class ExplorationSupervisor:
         error: str | None = None,
     ) -> SupervisorRunResult:
         if not (self._config.synthesize_on_graceful_stop or deterministic_only):
-            return self._terminal(cursor, reason, error=error)
-        context = self._require_context(cursor)
-        self._move(cursor, SupervisorPhase.SYNTHESIZE)
+            return self._terminal(run_state, reason, error=error)
+        context = self._require_context(run_state)
+        self._record_phase(run_state, SupervisorPhase.SYNTHESIZE)
         synth_context = self._fresh_context(context, SupervisorPhase.SYNTHESIZE)
         if deterministic_only:
             outcome = self._require_type(
@@ -998,7 +848,7 @@ class ExplorationSupervisor:
                 "deterministic finalization outcome",
             )
             return self._terminal(
-                cursor, reason, error=error, report_ref=outcome.report_ref
+                run_state, reason, error=error, report_ref=outcome.report_ref
             )
         step_id = phase_step_id(
             context.exploration_id, context.round_index, SupervisorPhase.SYNTHESIZE
@@ -1029,7 +879,7 @@ class ExplorationSupervisor:
                 outcome, FinalizationOutcome, "deterministic finalization outcome"
             )
         return self._terminal(
-            cursor,
+            run_state,
             reason,
             error=error,
             report_ref=outcome.report_ref,
@@ -1037,38 +887,38 @@ class ExplorationSupervisor:
 
     def _terminal(
         self,
-        cursor: _Cursor,
+        run_state: ExplorationRunChannels,
         reason: ExplorationStopReason,
         *,
         error: str | None,
         report_ref: str | None = None,
     ) -> SupervisorRunResult:
-        self._move(cursor, SupervisorPhase.STOP)
+        self._record_phase(run_state, SupervisorPhase.STOP)
         state = self._journal.stop(reason, report_ref=report_ref)
-        return self._result_from_state(state, cursor.transitions, error=error)
+        return self._result_from_state(state, run_state["transitions"], error=error)
 
     def _abort(
         self,
-        cursor: _Cursor,
+        run_state: ExplorationRunChannels,
         reason: Literal["cancelled"],
         *,
         error: str | None,
     ) -> SupervisorRunResult:
         # Cancellation was itself observed at a checkpoint (or propagated by a
         # bounded component), so do not call a second checkpoint that can mask it.
-        if cursor.phase is not SupervisorPhase.STOP:
-            cursor.transitions.append(
+        if run_state["phase"] is not SupervisorPhase.STOP:
+            run_state["transitions"].append(
                 PhaseTransition(
-                    source=cursor.phase,
+                    source=run_state["phase"],
                     target=SupervisorPhase.STOP,
                     round_index=(
-                        None if cursor.context is None else cursor.context.round_index
+                        None if run_state["context"] is None else run_state["context"].round_index
                     ),
                 )
             )
-            cursor.phase = SupervisorPhase.STOP
+            run_state["phase"] = SupervisorPhase.STOP
         state = self._journal.stop(reason, report_ref=None)
-        return self._result_from_state(state, cursor.transitions, error=error)
+        return self._result_from_state(state, run_state["transitions"], error=error)
 
     def _pause_result(
         self,
@@ -1091,18 +941,18 @@ class ExplorationSupervisor:
             rounds_settled=state.rounds_settled,
         )
 
-    def _move(self, cursor: _Cursor, target: SupervisorPhase) -> None:
-        context = cursor.context
-        self._enter(
-            cursor,
+    def _record_phase(self, run_state: ExplorationRunChannels, target: SupervisorPhase) -> None:
+        context = run_state["context"]
+        self._record_transition(
+            run_state,
             target,
-            source=cursor.phase,
+            source=run_state["phase"],
             round_index=None if context is None else context.round_index,
         )
 
-    def _enter(
+    def _record_transition(
         self,
-        cursor: _Cursor,
+        run_state: ExplorationRunChannels,
         target: SupervisorPhase,
         *,
         source: SupervisorPhase | None,
@@ -1111,8 +961,8 @@ class ExplorationSupervisor:
         transition = PhaseTransition(source=source, target=target, round_index=round_index)
         self._control.checkpoint(transition)
         self._honor_journal_control(self._journal.snapshot())
-        cursor.transitions.append(transition)
-        cursor.phase = target
+        run_state["transitions"].append(transition)
+        run_state["phase"] = target
 
     @staticmethod
     def _raise_witness_changed() -> tuple[SupervisorJournalState, PhaseContext]:
@@ -1143,10 +993,10 @@ class ExplorationSupervisor:
         )
 
     @staticmethod
-    def _require_context(cursor: _Cursor) -> PhaseContext:
-        if cursor.context is None:
+    def _require_context(run_state: ExplorationRunChannels) -> PhaseContext:
+        if run_state["context"] is None:
             raise SupervisorInvariantError("supervisor context is unavailable.")
-        return cursor.context
+        return run_state["context"]
 
     @staticmethod
     def _require_type[T](value: object, expected: type[T], label: str) -> T:

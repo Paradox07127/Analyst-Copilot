@@ -296,6 +296,7 @@ def test_llm_refinement_is_accepted_only_when_number_and_causal_gates_pass(
             project_id="project_di4",
             brief_artifact_id=brief_id,
             llm=accepted_llm,
+            execution_id="accepted-refinement",
         ),
     )
     assert accepted.narrative_status == "llm_refined"

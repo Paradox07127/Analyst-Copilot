@@ -43,6 +43,12 @@ class TraceEvent(BaseModel):
     parent_span_id: str | None = None
     call_id: str | None = None
     attempt_id: str | None = None
+    turn_id: str | None = None
+    execution_id: str | None = None
+    parent_execution_id: str | None = None
+    graph_node: str | None = None
+    checkpoint_ns: str | None = None
+    effect_id: str | None = None
     # Durable worker correlation. These fields are also indexed as dedicated
     # trace_events columns so job SSE never infers ownership from cursor ranges.
     job_id: str | None = None

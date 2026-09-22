@@ -410,6 +410,10 @@ class DataToolContext:
         if persist and self.store is not None:
             self.store.save_artifact(artifact)
 
+    def restore_artifacts(self, artifacts: list[Artifact]) -> None:
+        for artifact in artifacts:
+            self.add_artifact(artifact, persist=False)
+
     def artifact(self, artifact_id: str) -> Artifact:
         artifact = self._artifacts_by_id.get(artifact_id)
         if artifact is None:
@@ -735,6 +739,9 @@ def _bind_payload_policy(context: DataToolContext, tool: AgentTool) -> AgentTool
         description=tool.description,
         args_schema=tool.args_schema,
         execute=policy_bound_execute,
+        # Local analytical calls use stable logical-step IDs and receipt outboxes;
+        # open analysis also checkpoints its nested paid model calls separately.
+        retry_safe=True,
     )
 
 

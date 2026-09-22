@@ -14,25 +14,26 @@ It is registered with ApprovalService (kind `chat_plan`) and surfaced as a
 `plan.pending` frame; approving re-enters the driver via its `approved_plan`
 path, which is the driver's own authorization boundary.
 
-The session buffer is per-process and in memory, so turns fall into three
-states across a restart: completed turns are durable (they land in the JSONL
-transcript); turns still executing are lost with their stream; and a turn that
-stopped at `awaiting_approval` is recoverable — its pending_actions row and its
-transcript line both survive, and `list_pending_plans` reads the same durable
-approval token so the client can finish it without rotating state on GET.
+The stream buffer is per-process; native agent execution is persisted in SQLite.
+After a restart, read-only discovery exposes unfinished/undelivered turns for an
+explicit resume action. Pending plan approval stays on its separate authorized
+re-entry path; reading either recovery endpoint never calls a model.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import uuid
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from types import SimpleNamespace
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -43,10 +44,13 @@ from eda_platform.application.dto import (
     ChatPendingPlan,
     ChatPendingPlanList,
     ChatPlanRejected,
+    ChatRecoverableTurn,
+    ChatRecoverableTurnList,
     ChatStreamEvent,
     ChatTurnCancelled,
 )
 from eda_platform.application.services.approval_service import (
+    ApprovalConsumedError,
     ApprovalExpiredError,
     ApprovalNotFoundError,
     ApprovalService,
@@ -64,16 +68,30 @@ from eda_platform.core.bounded_pagination import (
     encode_bound_cursor,
 )
 from eda_platform.core.budget import SessionBudgetPolicy
+from eda_platform.core.cancellation import cancellation_scope
 from eda_platform.core.env import load_llm_settings_from_env_file
-from eda_platform.core.ids import INTERNAL_SESSION_MARKER
-from eda_platform.core.llm import LLMClient, LLMSettings, OfflineLLMClient, create_llm_client
+from eda_platform.core.graph_execution import GraphEffectUncertain
+from eda_platform.core.ids import INTERNAL_SESSION_MARKER, stable_hash
+from eda_platform.core.llm import (
+    LLMClient,
+    LLMSettings,
+    OfflineLLMClient,
+    create_llm_client,
+    llm_execution_fingerprint,
+)
 from eda_platform.core.llm_ledger import (
     BUDGET_EVENT_TYPES,
     meter_llm_client,
     restore_run_budget_state,
 )
+from eda_platform.core.permissions import action_hash as compute_action_hash
 from eda_platform.core.permissions import analysis_plan_action
 from eda_platform.core.store import ArtifactStore
+from eda_platform.core.trace_correlation import trace_execution_scope
+from eda_platform.infrastructure.chat_execution import (
+    ChatAdmissionConflict,
+    ChatExecutionRepository,
+)
 from eda_platform.schemas.artifacts import ArtifactType
 from eda_platform.schemas.chat import ChatMessage
 from eda_platform.schemas.plans import AnalysisPlan
@@ -192,12 +210,21 @@ class _TurnSession:
     message_id: str
     session_id: str
     project_id: str
+    resume_mode: Literal["tool", "structured"] | None = None
+    repository: ChatExecutionRepository | None = None
+    is_recovery: bool = False
+    attempt: int = 1
     events: list[ChatStreamEvent] = field(default_factory=list)
     done: bool = False
     truncated: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
     next_seq: int = 1
+    stream_start_seq: int = 0
     cancel_requested: threading.Event = field(default_factory=threading.Event)
+
+    @property
+    def recovering(self) -> bool:
+        return self.is_recovery or self.resume_mode is not None
 
     def append(self, event_type: str, data: dict[str, Any]) -> None:
         with self.lock:
@@ -208,7 +235,17 @@ class _TurnSession:
                 type=event_type,
                 data=data,
             )
-            self.next_seq += 1
+            if self.repository is not None:
+                event = ChatStreamEvent.model_validate(
+                    self.repository.append_event(
+                        self.project_id,
+                        self.session_id,
+                        self.message_id,
+                        event_type,
+                        data,
+                    )
+                )
+            self.next_seq = event.seq + 1
             self.events.append(event)
             if event_type in TERMINAL_EVENT_TYPES:
                 self.done = True
@@ -256,6 +293,15 @@ class _TurnTracingStore(ArtifactStore):
 
     def append_trace(self, project_id: str, event: TraceEvent) -> Path:
         path = super().append_trace(project_id, event)
+        if event.event_type == "graph.node_started":
+            self._session.append(
+                "progress",
+                {
+                    "stage": event.name,
+                    "execution_id": event.execution_id,
+                    "step": event.summary.get("step"),
+                },
+            )
         if event.event_type in _STREAMED_TRACE_TYPES:
             self._session.append(
                 "tool.call",
@@ -287,6 +333,7 @@ class ChatService:
     ) -> None:
         self._store = store
         self._approvals = approvals
+        self._executions = ChatExecutionRepository(store)
         self._budget_policy = budget_policy or SessionBudgetPolicy()
         self._sessions: OrderedDict[str, _TurnSession] = OrderedDict()
         self._sessions_lock = threading.Lock()
@@ -378,22 +425,176 @@ class ChatService:
         session = self._reserve_session(session_id, project_id)
         try:
             self._append_message(
-                project_id, session_id, ChatMessage(role="user", content=text)
+                project_id,
+                session_id,
+                ChatMessage(
+                    turn_id=session.message_id,
+                    llm_mode=cast(Literal["env", "offline"], llm),
+                    role="user",
+                    content=text,
+                ),
             )
         except Exception:
             self._discard_session(session)
             raise
-        self._spawn(
-            session,
-            lambda: self._run_turn(
+        try:
+            self._executions.admit(
+                project_id,
+                session_id,
+                session.message_id,
+                {
+                    "question": text,
+                    "settings_digest": _chat_settings_digest(effective, llm),
+                    "llm": llm,
+                    "approved": None,
+                },
+            )
+            self._spawn(
                 session,
-                message=text,
-                llm_mode=llm,
-                effective=effective,
-                approved=None,
-            ),
-        )
+                lambda: self._run_turn(
+                    session,
+                    message=text,
+                    llm_mode=llm,
+                    effective=effective,
+                    approved=None,
+                ),
+            )
+        except Exception:
+            self._discard_session(session)
+            raise
         return _accepted(session)
+
+    def list_recoverable_turns(self, session_id: str) -> ChatRecoverableTurnList:
+        from eda_platform.agents.agent_recovery import list_recoverable_turns
+
+        project_id = self._project_for_run(session_id)
+        with self._sessions_lock:
+            active = {s.message_id for s in self._sessions.values() if not s.done}
+        turns = list_recoverable_turns(self._store.session_dir(project_id, session_id))
+        found = {
+            t.message_id: ChatRecoverableTurn(
+                message_id=t.message_id,
+                question=t.question,
+                updated_at=t.updated_at,
+                status=t.status,
+                reason=t.reason,
+            )
+            for t in turns
+        }
+        for record in self._executions.unfinished(project_id, session_id):
+            turn_id = record["turn_id"]
+            if turn_id not in found or record["status"] == "blocked":
+                found[turn_id] = ChatRecoverableTurn(
+                    message_id=turn_id,
+                    question=record["payload"]["question"],
+                    updated_at=datetime.fromisoformat(record["updated_at"]),
+                    status="blocked" if record["status"] == "blocked" else "interrupted",
+                    reason="A previous result is unknown. Start a new question."
+                    if record["status"] == "blocked"
+                    else "Execution stopped before delivery. Continue from saved progress.",
+                )
+        return ChatRecoverableTurnList(
+            session_id=session_id,
+            turns=[
+                t
+                for t in found.values()
+                if t.message_id not in active
+                and (self._executions.get(project_id, session_id, t.message_id) or {}).get("status")
+                not in {"delivered", "cancelled"}
+            ],
+        )
+
+    def resume_turn(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        effective_settings: EffectiveSettings | None = None,
+    ) -> ChatMessageAccepted:
+        from eda_platform.agents.agent_recovery import read_recoverable_turn
+
+        project_id = self._project_for_run(session_id)
+        recovery = read_recoverable_turn(
+            self._store.session_dir(project_id, session_id),
+            message_id,
+        )
+        record = self._executions.get(project_id, session_id, message_id)
+        if record is not None and record["status"] in {"delivered", "cancelled"}:
+            raise ChatMessageNotFoundError(message_id)
+        if recovery is None and (record is None or record["status"] in {"delivered", "cancelled"}):
+            raise ChatMessageNotFoundError(message_id)
+        if record is not None and record["status"] == "blocked":
+            raise ChatValidationError(
+                "This execution requires a new question; it cannot safely resume."
+            )
+        if recovery is not None and recovery.status == "blocked":
+            raise ChatValidationError(recovery.reason or "This turn cannot safely resume.")
+        effective = _freeze_effective_settings(effective_settings)
+        payload = record["payload"] if record else {}
+        original_mode = payload.get("llm") or self._original_llm_mode(
+            project_id, session_id, message_id
+        )
+        question = payload.get("question") or (recovery.question if recovery else "")
+        approved = payload.get("approved")
+        if payload.get("settings_digest") and payload["settings_digest"] != _chat_settings_digest(
+            effective, original_mode
+        ):
+            raise ChatValidationError(
+                "The original model or data-sharing settings changed; start a new turn."
+            )
+        session = self._reserve_session(session_id, project_id, message_id=message_id)
+        session.is_recovery = True
+        session.resume_mode = recovery.mode if recovery and recovery.mode != "approved" else None
+        try:
+            if record is None:
+                self._executions.admit(
+                    project_id,
+                    session_id,
+                    message_id,
+                    {
+                        "question": question,
+                        "llm": original_mode,
+                        "approved": None,
+                    },
+                )
+            self._spawn(
+                session,
+                lambda: self._run_turn(
+                    session,
+                    message=question,
+                    llm_mode=original_mode,
+                    effective=effective,
+                    approved=(
+                        AnalysisPlan.model_validate(approved["plan"]),
+                        approved["action_hash"],
+                    )
+                    if approved
+                    else None,
+                ),
+            )
+        except Exception:
+            self._discard_session(session)
+            raise
+        return _accepted(session)
+
+    def _original_llm_mode(self, project_id: str, session_id: str, message_id: str) -> str:
+        """Recover the explicit answer-engine choice without loading the transcript."""
+        index = JsonlPageIndex(self._store.db_path, self._store.root)
+        state = index.ensure(self._transcript_path(project_id, session_id), accept=lambda _: True)
+        end = state.valid_count
+        while end:
+            page = index.page(state, start=end, limit=MAX_PAGE_LIMIT, reverse=True)
+            for record in reversed(page):
+                if record.oversized:
+                    continue
+                try:
+                    message = ChatMessage.model_validate_json(record.payload)
+                except ValidationError:
+                    continue
+                if message.role == "user" and message.turn_id == message_id:
+                    return message.llm_mode or "env"
+            end = page[0].ordinal if page else 0
+        return "env"
 
     def approve_plan(
         self, session_id: str, plan_id: str, *, action_hash: str, approval_token: str
@@ -401,26 +602,51 @@ class ChatService:
         project_id = self._project_for_run(session_id)
         session = self._reserve_session(session_id, project_id)
         try:
-            plan, question = self._consume_plan(
-                session_id, plan_id, action_hash, approval_token
+            payload, digest, status = self._approvals.inspect_payload(
+                action_hash, session_id=session_id
             )
-
-            def run_approved() -> None:
-                self._run_turn(
+            row = self._store.get_pending_action(action_hash, session_id=session_id)
+            if (
+                row is None
+                or row["generation"] != approval_token
+                or row["kind"] != APPROVAL_KIND_CHAT_PLAN
+            ):
+                raise ApprovalNotFoundError(action_hash)
+            if status == "consumed":
+                raise ApprovalConsumedError(action_hash)
+            if status != "pending" or row["expires_at"] <= datetime.now(UTC).isoformat():
+                raise ApprovalExpiredError(action_hash)
+            if payload.get("plan_id") != plan_id:
+                raise ChatValidationError("The approval belongs to a different plan.")
+            plan = AnalysisPlan.model_validate(payload["plan"])
+            question = str(payload.get("question") or plan.question)
+            self._executions.admit(
+                project_id,
+                session_id,
+                session.message_id,
+                {
+                    "question": question,
+                    "llm": "offline",
+                    "approved": {
+                        "plan": plan.model_dump(mode="json"),
+                        "action_hash": action_hash,
+                    },
+                },
+                approval=(action_hash, approval_token, digest),
+            )
+            self._spawn(
+                session,
+                lambda: self._run_turn(
                     session,
                     message=question,
                     llm_mode="offline",
                     effective=_freeze_effective_settings(None),
                     approved=(plan, action_hash),
-                )
-                if any(
-                    event.type == "turn.failed"
-                    for event in session.after(0).events
-                ):
-                    self._store.restore_pending_action(action_hash, session_id=session_id)
-
-            with self._approvals.compensate_on_failure(action_hash, session_id=session_id):
-                self._spawn(session, run_approved)
+                ),
+            )
+        except ChatAdmissionConflict as exc:
+            self._discard_session(session)
+            raise ApprovalConsumedError(action_hash) from exc
         except Exception:
             self._discard_session(session)
             raise
@@ -513,11 +739,27 @@ class ChatService:
         )
 
     def events_after(self, session_id: str, message_id: str, after_seq: int) -> ChatStreamPage:
-        session = self._session(session_id, message_id)
-        return session.after(after_seq)
+        project = self._project_for_run(session_id)
+        with self._sessions_lock:
+            live = self._sessions.get(message_id)
+        record = self._executions.get(project, session_id, message_id)
+        if record is None:
+            return self._session(session_id, message_id).after(after_seq)
+        events = [
+            ChatStreamEvent.model_validate(e)
+            for e in self._executions.events(
+                project,
+                session_id,
+                message_id,
+                after_seq,
+            )
+        ]
+        return ChatStreamPage(events=events, done=live.done if live else True, truncated=False)
 
     def require_session(self, session_id: str, message_id: str) -> None:
-        self._session(session_id, message_id)
+        project = self._project_for_run(session_id)
+        if self._executions.get(project, session_id, message_id) is None:
+            self._session(session_id, message_id)
 
     def _consume_plan(
         self, session_id: str, plan_id: str, action_hash: str, approval_token: str
@@ -530,9 +772,7 @@ class ChatService:
             try:
                 plan = AnalysisPlan.model_validate(payload.get("plan"))
             except ValidationError as exc:
-                raise ChatValidationError(
-                    "The approved plan is no longer readable."
-                ) from exc
+                raise ChatValidationError("The approved plan is no longer readable.") from exc
             return plan, str(payload.get("question") or plan.question)
 
         _payload, validated = self._approvals.validate_then_consume(
@@ -545,6 +785,34 @@ class ChatService:
         return validated
 
     def _run_turn(
+        self,
+        session: _TurnSession,
+        *,
+        message: str,
+        llm_mode: str,
+        effective: _EffectiveChatSettings,
+        approved: tuple[AnalysisPlan, str] | None,
+    ) -> None:
+        from eda_platform.drivers.chat import _ChatCancellation
+
+        session.attempt = self._executions.begin(
+            session.project_id, session.session_id, session.message_id
+        )
+        traced = _TurnTracingStore(self._store.root, session)
+        with (
+            trace_execution_scope(
+                session_id=session.session_id,
+                turn_id=session.message_id,
+                attempt_id=f"chat:{session.message_id}:{session.attempt}",
+                emit=lambda event: traced.append_trace(session.project_id, event),
+            ),
+            cancellation_scope(_ChatCancellation(session.cancel_requested.is_set)),
+        ):
+            self._execute_turn(
+                session, message=message, llm_mode=llm_mode, effective=effective, approved=approved
+            )
+
+    def _execute_turn(
         self,
         session: _TurnSession,
         *,
@@ -566,9 +834,7 @@ class ChatService:
             {"stage": "loading_datasets", "approved": approved is not None},
         )
         try:
-            loaded = load_run(
-                session.project_id, session.session_id, workspace=self._store.root
-            )
+            loaded = load_run(session.project_id, session.session_id, workspace=self._store.root)
             result = loaded.result
             if result is None or not result.loaded_datasets:
                 session.append(
@@ -616,9 +882,7 @@ class ChatService:
                         session_id=session.session_id,
                         event_types=BUDGET_EVENT_TYPES,
                     ),
-                    run_started_at=(
-                        None if earliest is None else datetime.fromisoformat(earliest)
-                    ),
+                    run_started_at=(None if earliest is None else datetime.fromisoformat(earliest)),
                 )
 
                 def emit_usage(event: TraceEvent) -> None:
@@ -629,9 +893,7 @@ class ChatService:
                     session_id=session.session_id,
                     emit=emit_usage,
                     budget=restored_budget,
-                    session_dir=self._store.session_dir(
-                        session.project_id, session.session_id
-                    ),
+                    session_dir=self._store.session_dir(session.project_id, session.session_id),
                 )
             turn = run_chat_turn(
                 message,
@@ -645,8 +907,14 @@ class ChatService:
                 approved_action_hash=approved[1] if approved else None,
                 payload_policy=effective.payload_policy,
                 cancel_check=session.cancel_requested.is_set,
+                turn_id=session.message_id,
+                resume_mode=session.resume_mode,
             )
         except Exception as exc:  # last-resort guard: never leak a traceback
+            if isinstance(exc, GraphEffectUncertain):
+                self._executions.finish(
+                    session.project_id, session.session_id, session.message_id, "blocked"
+                )
             logger.exception("Chat turn %s failed", session.message_id)
             session.append(
                 "turn.failed",
@@ -654,6 +922,10 @@ class ChatService:
             )
             return
 
+        if session.cancel_requested.is_set():
+            turn = turn.model_copy(
+                update={"status": "cancelled", "plan": None, "message": "Stopped at your request."}
+            )
         artifact_refs = [artifact.id for artifact in turn.artifacts]
         awaiting = turn.status == "awaiting_approval" and turn.plan is not None
         # Register before persisting: the transcript line carries the plan's
@@ -663,11 +935,20 @@ class ChatService:
             if awaiting and turn.plan is not None
             else None
         )
+        if awaiting and pending is None:
+            awaiting = False
+            turn = turn.model_copy(
+                update={
+                    "status": "refused",
+                    "message": "This plan's approval has already been decided or expired.",
+                }
+            )
         try:
             self._append_message(
                 session.project_id,
                 session.session_id,
                 ChatMessage(
+                    turn_id=session.message_id,
                     role="assistant",
                     content=turn.message,
                     status=turn.status,
@@ -677,6 +958,7 @@ class ChatService:
                     action_hash=pending.action_hash if pending else None,
                     expires_at=pending.expires_at if pending else None,
                 ),
+                deduplicate=session.recovering,
             )
         except Exception as exc:
             logger.exception("Chat transcript write failed for %s", session.message_id)
@@ -703,6 +985,7 @@ class ChatService:
                 )
             else:
                 session.append("plan.pending", pending.frame())
+                self._ack_delivery(session)
             return
         session.append(
             "message.completed",
@@ -717,6 +1000,16 @@ class ChatService:
                 ),
             },
         )
+        self._ack_delivery(session)
+
+    def _ack_delivery(self, session: _TurnSession) -> None:
+        from eda_platform.agents.agent_recovery import mark_turn_delivered
+
+        # The terminal event and delivery record are already committed together.
+        with suppress(OSError, sqlite3.Error):
+            mark_turn_delivered(
+                self._store.session_dir(session.project_id, session.session_id), session.message_id
+            )
 
     def _register_pending_plan(
         self,
@@ -726,21 +1019,38 @@ class ChatService:
         llm_mode: str,
     ) -> _PendingPlan | None:
         plan_id = next(
-            (
-                artifact.id
-                for artifact in artifacts
-                if artifact.type is ArtifactType.CHAT_TURN_PLAN
-            ),
+            (artifact.id for artifact in artifacts if artifact.type is ArtifactType.CHAT_TURN_PLAN),
             "",
         )
         if not plan_id:
             return None
+        action = analysis_plan_action(plan)
+        action_digest = compute_action_hash(action)
+        existing = self._store.get_pending_action(action_digest, session_id=session.session_id)
+        if existing is not None:
+            existing_payload = _load_payload(existing["payload_json"])
+            if session.recovering and existing_payload.get("turn_id") != session.message_id:
+                return None
+            if existing_payload.get("turn_id") == session.message_id:
+                if (
+                    existing["status"] != "pending"
+                    or existing["expires_at"] <= datetime.now(UTC).isoformat()
+                ):
+                    return None
+                return _PendingPlan(
+                    plan_id=plan_id,
+                    action_hash=action_digest,
+                    approval_token=existing["generation"],
+                    expires_at=datetime.fromisoformat(existing["expires_at"]),
+                    plan=plan,
+                )
         digest, token, expires_at = self._approvals.register(
             kind=APPROVAL_KIND_CHAT_PLAN,
             session_id=session.session_id,
             project_id=session.project_id,
             action=analysis_plan_action(plan),
             payload={
+                "turn_id": session.message_id,
                 "plan_id": plan_id,
                 "plan": plan.model_dump(mode="json"),
                 "question": plan.question,
@@ -759,6 +1069,8 @@ class ChatService:
         def guarded() -> None:
             try:
                 target()
+            except Exception:
+                logger.exception("Chat execution failed before delivery: %s", session.message_id)
             finally:
                 if not session.done:
                     session.append(
@@ -770,7 +1082,13 @@ class ChatService:
             target=guarded, name=f"chat-turn-{session.message_id}", daemon=True
         ).start()
 
-    def _reserve_session(self, session_id: str, project_id: str) -> _TurnSession:
+    def _reserve_session(
+        self,
+        session_id: str,
+        project_id: str,
+        *,
+        message_id: str | None = None,
+    ) -> _TurnSession:
         """Claim the run's single turn slot and register its session atomically.
 
         Checking for a live turn and registering the new one must happen under
@@ -779,8 +1097,15 @@ class ChatService:
         first one's stream is never handed to anybody.
         """
         session = _TurnSession(
-            message_id=uuid.uuid4().hex, session_id=session_id, project_id=project_id
+            message_id=message_id or uuid.uuid4().hex,
+            session_id=session_id,
+            project_id=project_id,
+            repository=self._executions,
         )
+        session.stream_start_seq = self._executions.cursor(
+            project_id, session_id, session.message_id
+        )
+        session.next_seq = session.stream_start_seq + 1
         with self._sessions_lock:
             for existing in self._sessions.values():
                 if existing.session_id == session_id and not existing.done:
@@ -808,10 +1133,25 @@ class ChatService:
             raise ChatMessageNotFoundError(message_id)
         return session
 
-    def _append_message(self, project_id: str, session_id: str, message: ChatMessage) -> None:
+    def _append_message(
+        self,
+        project_id: str,
+        session_id: str,
+        message: ChatMessage,
+        *,
+        deduplicate: bool = False,
+    ) -> None:
         from eda_platform.drivers.chat import append_chat_message
 
-        append_chat_message(self._store, project_id, session_id, message)
+        if deduplicate:
+            self._store.append_chat_line(
+                project_id,
+                session_id,
+                message.model_dump_json(),
+                deduplicate=True,
+            )
+        else:
+            append_chat_message(self._store, project_id, session_id, message)
 
     def _transcript_path(self, project_id: str, session_id: str) -> Path:
         """Mirrors drivers.chat._chat_session_path — one session per run. The
@@ -833,6 +1173,7 @@ def _accepted(session: _TurnSession) -> ChatMessageAccepted:
         message_id=session.message_id,
         stream_url=(
             f"/api/v1/sessions/{session.session_id}/chat/stream?message_id={session.message_id}"
+            + (f"&last_event_id={session.stream_start_seq}" if session.stream_start_seq else "")
         ),
     )
 
@@ -879,6 +1220,7 @@ def _parse_message(line: str, seq: int) -> ChatMessageView | None:
         return None
     return ChatMessageView(
         seq=seq,
+        turn_id=message.turn_id,
         role=message.role,
         content=message.content,
         status=message.status,
@@ -905,3 +1247,14 @@ def _load_payload(raw: Any) -> dict[str, Any]:
     except ValueError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _chat_settings_digest(effective: _EffectiveChatSettings, mode: str) -> str:
+    model = (
+        "offline"
+        if mode == "offline"
+        else llm_execution_fingerprint(
+            cast(Any, SimpleNamespace(settings=effective.llm)),
+        )
+    )
+    return stable_hash({"model": model, "payload_policy": effective.payload_policy})

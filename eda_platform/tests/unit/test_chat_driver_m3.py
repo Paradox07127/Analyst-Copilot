@@ -277,6 +277,8 @@ def test_run_chat_turn_builds_masked_value_context_and_plan_artifact(
         ]
     )
 
+    store.save_artifact(profile)
+
     result = run_chat_turn(
         "sales by region",
         datasets=[loaded],

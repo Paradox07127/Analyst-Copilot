@@ -161,6 +161,14 @@ class AgentHandoffDetail(ArtifactDetail):
     payload: AgentHandoffV3
 
 
+class JobDomainOutcome(BaseModel):
+    """Latest persisted exploration result for this job's current attempt."""
+
+    status: ExplorationRunStatus
+    stop_reason: ExplorationStopReason | None = None
+    exploration_id: str = Field(min_length=1)
+
+
 class JobStatus(BaseModel):
     job_id: str
     session_id: str
@@ -174,6 +182,7 @@ class JobStatus(BaseModel):
     finished_at: datetime | None = None
     error_code: str | None = None
     error_message: str | None = None
+    domain_outcome: JobDomainOutcome | None = None
     events_url: str
 
 
@@ -804,9 +813,7 @@ class CompareRuntimeView(BaseModel):
 
 
 class ComparabilityView(BaseModel):
-    verdict: Literal[
-        "controlled", "partially_controlled", "not_directly_comparable", "unknown"
-    ]
+    verdict: Literal["controlled", "partially_controlled", "not_directly_comparable", "unknown"]
     left: CompareRuntimeView
     right: CompareRuntimeView
     changed_dimensions: list[str] = Field(default_factory=list)
@@ -815,9 +822,7 @@ class ComparabilityView(BaseModel):
 
 
 class CompareLineageView(BaseModel):
-    relation: Literal[
-        "siblings", "direct_parent", "ancestor_descendant", "unrelated", "unknown"
-    ]
+    relation: Literal["siblings", "direct_parent", "ancestor_descendant", "unrelated", "unknown"]
     common_ancestor_session_id: str | None = None
     left_path: list[str] = Field(default_factory=list)
     right_path: list[str] = Field(default_factory=list)
@@ -874,9 +879,7 @@ class CompareView(BaseModel):
     datasets: CompareDatasetDiff
 
 
-CompareScopeName = Literal[
-    "questions", "analysis", "findings", "report", "artifacts", "execution"
-]
+CompareScopeName = Literal["questions", "analysis", "findings", "report", "artifacts", "execution"]
 CompareChange = Literal["added", "removed", "changed", "same", "unavailable"]
 CompareMatchStatus = Literal["exact", "strong", "probable", "unmatched"]
 
@@ -1079,6 +1082,7 @@ class ChatMessageView(BaseModel):
     doubles as the reverse-pagination cursor."""
 
     seq: int
+    turn_id: str | None = None
     role: str
     content: str
     status: str = "answer"
@@ -1101,6 +1105,19 @@ class ChatMessageAccepted(BaseModel):
     session_id: str
     message_id: str
     stream_url: str
+
+
+class ChatRecoverableTurn(BaseModel):
+    message_id: str
+    question: str
+    updated_at: datetime
+    status: Literal["interrupted", "awaiting_delivery", "blocked"]
+    reason: str | None = None
+
+
+class ChatRecoverableTurnList(BaseModel):
+    session_id: str
+    turns: list[ChatRecoverableTurn] = Field(default_factory=list)
 
 
 class ChatStreamEvent(BaseModel):
@@ -1361,9 +1378,7 @@ class SessionMetricsView(BaseModel):
     budget_rejected_calls: int = 0
     budget_uncertain_calls: int = 0
     budget_total_tokens: int = 0
-    budget_reconciliation: Literal[
-        "verified", "unverifiable", "not_applicable"
-    ] = "not_applicable"
+    budget_reconciliation: Literal["verified", "unverifiable", "not_applicable"] = "not_applicable"
     duration_seconds: float = 0.0
     resource_usage: AutoEdaResourceUsage = Field(default_factory=AutoEdaResourceUsage)
     event_count: int = 0
@@ -1431,6 +1446,19 @@ class SessionMetricsView(BaseModel):
 
 
 class TraceEventRow(BaseModel):
+    session_id: str | None = None
+    turn_id: str | None = None
+    execution_id: str | None = None
+    parent_execution_id: str | None = None
+    attempt_id: str | None = None
+    job_id: str | None = None
+    graph_node: str | None = None
+    checkpoint_ns: str | None = None
+    effect_id: str | None = None
+    call_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    job_generation: int | None = None
     event_id: int
     event_type: str
     name: str

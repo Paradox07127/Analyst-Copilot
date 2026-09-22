@@ -122,6 +122,7 @@ export type SkillTemplateCreateRequest = Schemas["SkillTemplateCreateRequest"];
 export type ChatMessageView = Schemas["ChatMessageView"];
 export type ChatMessagePage = Schemas["ChatMessagePage"];
 export type ChatMessageAccepted = Schemas["ChatMessageAccepted"];
+export type ChatRecoverableTurnList = Schemas["ChatRecoverableTurnList"];
 export type ChatPlanRejected = Schemas["ChatPlanRejected"];
 export type ChatPendingPlan = Schemas["ChatPendingPlan"];
 export type ChatPendingPlanList = Schemas["ChatPendingPlanList"];
@@ -922,6 +923,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  listRecoverableChatTurns: (sessionId: string, signal?: AbortSignal) =>
+    apiFetch<ChatRecoverableTurnList>(
+      `/sessions/${enc(sessionId)}/chat/recoverable-turns`, { signal },
+    ),
+
+  resumeChatTurn: (sessionId: string, messageId: string) =>
+    apiFetch<ChatMessageAccepted>(
+      `/sessions/${enc(sessionId)}/chat/turns/${enc(messageId)}/resume`,
+      { method: "POST" },
+    ),
 
   /* Cooperative stop: the in-flight turn halts at its next checkpoint and the
      stream then delivers a readable "stopped" result. */

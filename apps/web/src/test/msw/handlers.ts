@@ -2732,6 +2732,10 @@ export const defaultHandlers = [
     HttpResponse.json({ session_id: String(params["sessionId"]), plans: [] }),
   ),
 
+  http.get("/api/v1/sessions/:sessionId/chat/recoverable-turns", ({ params }) =>
+    HttpResponse.json({ session_id: String(params["sessionId"]), turns: [] }),
+  ),
+
   http.post("/api/v1/sessions/:sessionId/chat/cancel", ({ params }) =>
     HttpResponse.json({
       session_id: String(params["sessionId"]),

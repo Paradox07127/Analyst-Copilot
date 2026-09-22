@@ -103,5 +103,5 @@ def test_catalog_pins_the_gpt_56_family_and_keeps_it_verified() -> None:
         profile = agent_model_profile(LLMProvider.OPENAI, model)
         assert profile is not None and profile.tools_reasoning_effort == "", model
 
-    # tool_calling_probe's catalog fast path must keep answering from here.
+    # tool_calling_routing's catalog fast path must keep answering from here.
     assert is_verified_agent_model(LLMProvider.OPENAI, "gpt-5.6-luna")

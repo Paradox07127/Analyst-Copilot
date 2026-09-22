@@ -100,6 +100,7 @@ export const JOB_KIND_ACTIVITY: Record<string, string> = {
   cleaning_apply: "Applying the approved cleaning recipe",
   dataset_distributions: "Scanning the dataset for column distributions",
   custom_chart: "Scanning the dataset to build the custom chart",
+  exploration_run: "Exploring questions in the data",
 };
 
 /* step name -> index into JOB_PHASES. */
@@ -121,6 +122,7 @@ export const SSE_EVENT_TYPES = [
   "job.completed",
   "job.failed",
   "job.cancelled",
+  "exploration.attempt_finished",
   "step_started",
   "step_completed",
   "step_failed",
@@ -173,6 +175,8 @@ export type JobPhase =
   | "limited"
   | "failed"
   | "cancelled"
+  | "paused"
+  | "outcome_unknown"
   | "disconnected";
 
 export const TERMINAL_PHASES: ReadonlySet<JobPhase> = new Set([
@@ -180,9 +184,80 @@ export const TERMINAL_PHASES: ReadonlySet<JobPhase> = new Set([
   "limited",
   "failed",
   "cancelled",
+  "paused",
+  "outcome_unknown",
 ]);
 
+export interface ExplorationDomainOutcome {
+  status: string;
+  stop_reason: string | null;
+  exploration_id: string;
+}
+
+function explorationDomainOutcome(state: JobEventsState): ExplorationDomainOutcome | null {
+  const event = [...state.events].reverse().find((item) => item.type === "exploration.attempt_finished");
+  if (event && typeof event.summary["exploration_status"] === "string") {
+    return {
+      status: event.summary["exploration_status"],
+      stop_reason: typeof event.summary["stop_reason"] === "string" ? event.summary["stop_reason"] : null,
+      exploration_id: typeof event.summary["exploration_id"] === "string" ? event.summary["exploration_id"] : "",
+    };
+  }
+  return state.domainOutcome ?? null;
+}
+
+export function explorationJobSection(state: JobEventsState): string {
+  const id = explorationDomainOutcome(state)?.exploration_id;
+  return id ? `explorations/${encodeURIComponent(id)}` : "explorations";
+}
+
+export function explorationJobOutcome(state: JobEventsState): {
+  phase: JobPhase; label: string; detail: string;
+} | null {
+  const domain = explorationDomainOutcome(state);
+  if (!domain) return null;
+  if (domain.status === "paused") {
+    return { phase: "paused", label: "Exploration paused", detail: "Resume from the exploration page when ready." };
+  }
+  const reason = domain.stop_reason;
+  if (domain.status !== "stopped") return null;
+  switch (reason) {
+    case "completed":
+      return { phase: "completed", label: "Exploration complete", detail: "The exploration reached its goal." };
+    case "no_new_information":
+      return { phase: "limited", label: "No new information", detail: "Exploration stopped after finding no further useful evidence." };
+    case "budget_exhausted":
+      return { phase: "limited", label: "Budget exhausted", detail: "Exploration stopped at its budget limit. Saved evidence remains available." };
+    case "cancelled":
+      return { phase: "cancelled", label: "Exploration cancelled", detail: "Exploration was stopped at your request." };
+    case "state_witness_changed":
+      return { phase: "failed", label: "Source data changed", detail: "Exploration stopped because its source data changed. Start a new exploration with the current data." };
+    case "failed":
+      return { phase: "failed", label: "Exploration failed", detail: "Open the exploration to inspect its saved evidence and failure details." };
+    default:
+      return { phase: "outcome_unknown", label: "Outcome unavailable", detail: "The worker finished, but its exploration outcome is unavailable. Open the exploration to check its status." };
+  }
+}
+
+/** A completed worker snapshot alone does not establish exploration success. */
+export function projectExplorationJobState(
+  state: JobEventsState, kind: string | undefined, workerStatus: string | undefined,
+  domainOutcome?: ExplorationDomainOutcome | null,
+): JobEventsState {
+  if (kind !== "exploration_run") return state;
+  if (domainOutcome) state = { ...state, domainOutcome };
+  if (workerStatus !== "completed" && !TERMINAL_PHASES.has(state.phase)) return state;
+  const outcome = explorationJobOutcome(state);
+  if (outcome) return outcome.phase === state.phase ? state : { ...state, phase: outcome.phase };
+  if (workerStatus === "completed" || state.phase === "completed") {
+    return state.phase === "outcome_unknown" ? state : { ...state, phase: "outcome_unknown" };
+  }
+  return state;
+}
+
 export interface JobEventsState {
+  /** Persisted GET snapshot, used when the event stream has not replayed yet. */
+  domainOutcome?: ExplorationDomainOutcome;
   events: JobEvent[];
   phase: JobPhase;
   stagesDone: ReadonlySet<string>;
@@ -329,6 +404,10 @@ export function jobFailure(state: JobEventsState): JobFailure | null {
             : "The run failed before finishing. The Trace page has the details.",
     };
   }
+  const exploration = explorationJobOutcome(state);
+  if (exploration?.phase === "failed" || exploration?.phase === "cancelled") {
+    return { cancelled: exploration.phase === "cancelled", message: exploration.detail };
+  }
   return null;
 }
 
@@ -393,9 +472,9 @@ function reduce(state: JobEventsState, action: Action): JobEventsState {
     case "job.completed":
       if (event.name === jobId) {
         next.phase =
-          event.summary["session_status"] === "limited"
+          explorationJobOutcome(next)?.phase ?? (event.summary["session_status"] === "limited"
             ? "limited"
-            : "completed";
+            : "completed");
       }
       break;
     case "job.failed":

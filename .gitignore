@@ -8,10 +8,14 @@
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .pyright/
+.tox/
+.nox/
 .superpowers/
 __pycache__/
 *.py[cod]
+/build/
 
 # Runtime output
 /eda_platform/workspace/
@@ -20,9 +24,18 @@ eda_platform/.eda-run-*.lock
 /.sandbox-preflight/
 *.duckdb
 *.duckdb.wal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 .coverage
+.coverage.*
 htmlcov/
-/*.log
+*.log
 /apps/web/.logs/
 
 # Local test sandboxes and caches
@@ -32,7 +45,6 @@ htmlcov/
 /pytest-cache-files-*/
 
 /datasets/
-
 
 # Playwright CLI debug dumps (console/page snapshots); never commit
 .playwright-cli/
@@ -49,6 +61,9 @@ dist/
 coverage/
 playwright-report/
 .vite/
+*.tsbuildinfo
+
+# Dependency lockfiles (uv.lock and package-lock.json) stay versioned.
 
 # Per-machine workspace fence: the .identity file holds a local st_dev:st_ino
 # pair, so committing it would make another checkout claim the wrong workspace.

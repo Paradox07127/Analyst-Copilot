@@ -9,6 +9,7 @@
 import { useEffect, useState } from "react";
 import {
   JOB_KIND_ACTIVITY,
+  explorationJobOutcome,
   jobFailure,
   jobResourceLimit,
   phaseProgress,
@@ -109,7 +110,10 @@ function SingleStepProgress({
   kind: string | undefined;
 }) {
   const running = !TERMINAL_PHASES.has(job.phase);
+  const outcome = !running ? explorationJobOutcome(job) : null;
   const activity =
+    outcome?.detail ??
+    (job.phase === "outcome_unknown" ? "The worker finished. Open the exploration to check its outcome." : undefined) ??
     (kind && JOB_KIND_ACTIVITY[kind]) ?? "Working on this session";
 
   /* No per-step breakdown here on purpose: the SSE stream is filtered to the
@@ -125,7 +129,7 @@ function SingleStepProgress({
               ? "bg-status-critical"
               : running
                 ? "animate-breathe bg-status-warn"
-                : "bg-status-ok"
+                : job.phase === "completed" ? "bg-status-ok" : "bg-status-warn"
           }`}
         />
         <span className={running ? "text-text" : "text-status-neutral"}>

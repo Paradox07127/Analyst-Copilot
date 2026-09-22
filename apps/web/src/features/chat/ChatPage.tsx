@@ -30,6 +30,7 @@ import {
   useChatMessages,
   useDatasets,
   useChatPendingPlans,
+  useChatRecoverableTurns,
   useArtifact,
   useSandboxStatus,
 } from "../../api/hooks";
@@ -44,6 +45,16 @@ const STAGE_LABEL: Record<string, string> = {
   agent: "Agent is investigating with tools…",
   executing: "Running the approved plan…",
   starting: "Starting…",
+  model: "Thinking through the question…",
+  tool: "Analyzing the data…",
+  tools: "Analyzing the data…",
+  validate: "Checking the results…",
+  generate: "Preparing the analysis…",
+  sandbox: "Running the analysis…",
+  m3_route_intent: "Understanding the question…",
+  m3_build_plan: "Planning the analysis…",
+  question_read_only_sql: "Analyzing the data…",
+  di4_l1_interpretation: "Interpreting the results…",
 };
 
 const TRACE_LABEL: Record<string, string> = {
@@ -360,6 +371,12 @@ function MessageRow({
       <span className="text-[10px] font-medium uppercase text-status-neutral">
         {message.role}
       </span>
+      {!isUser && ["cancelled", "error", "refused"].includes(message.status ?? "") && (
+        <span className="text-xs font-medium" aria-label="Answer outcome">
+          {message.status === "cancelled" ? "Cancelled"
+            : message.status === "refused" ? "Refused" : "Failed"}
+        </span>
+      )}
       {/* The page shell is now the same width as every other page, so the
         * measure has to live here instead. Report prose is already held at
         * 72ch by report-markdown.css; this is the only other running text. */}
@@ -431,6 +448,7 @@ export function Component() {
     .map((dataset) => dataset.display_name)
     .filter((name): name is string => Boolean(name));
   const [turn, setTurn] = useState<ChatMessageAccepted | null>(null);
+  const [resumeAttempt, setResumeAttempt] = useState(0);
   const [draft, setDraft] = useState("");
   const location = useLocation();
   const navigate = useNavigate();
@@ -453,7 +471,9 @@ export function Component() {
    * not part of asking a question. */
   const [optionsOpen, setOptionsOpen] = useState(false);
   const sandbox = useSandboxStatus();
-  const stream = useChatStream(turn?.message_id ?? null, turn?.stream_url ?? null);
+  const stream = useChatStream(turn?.message_id ?? null, turn?.stream_url ?? null, resumeAttempt);
+  const busy = stream.phase === "connecting" || stream.phase === "running";
+  const recoverableTurns = useChatRecoverableTurns(sessionId, !busy);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const followLatestRef = useRef(true);
   const olderPagePositionRef = useRef<{
@@ -464,16 +484,37 @@ export function Component() {
 
   const refreshTranscript = useCallback(() => {
     void queryClient.invalidateQueries({
+      queryKey: queryKeys.session(sessionId),
+    });
+    void queryClient.invalidateQueries({
       queryKey: queryKeys.chatMessages(sessionId),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.chatRecoverableTurns(sessionId),
     });
   }, [queryClient, sessionId]);
 
-  /* The transcript is the durable record; refresh it once the turn settles. */
-  useEffect(() => {
-    if (stream.phase === "completed" || stream.phase === "failed") {
-      refreshTranscript();
+  const refreshTurnResults = useCallback(() => {
+    refreshTranscript();
+    for (const queryKey of [
+      queryKeys.traceRoot(sessionId),
+      queryKeys.sessionMetrics(sessionId),
+      queryKeys.artifactsRoot(sessionId),
+      queryKeys.sessionDebug(sessionId),
+      queryKeys.llmDebugCalls(sessionId),
+      queryKeys.workspaceUsageRoot,
+    ]) {
+      void queryClient.invalidateQueries({ queryKey });
     }
-  }, [stream.phase, refreshTranscript]);
+  }, [queryClient, refreshTranscript, sessionId]);
+
+  /* Refresh derived views once per settled stream, including approval pauses.
+   * Query updates are deliberately not dependencies of this effect. */
+  useEffect(() => {
+    if (["completed", "cancelled", "refused", "failed", "disconnected", "awaiting_approval"].includes(stream.phase)) {
+      refreshTurnResults();
+    }
+  }, [stream.phase, refreshTurnResults]);
 
   const scrollToLatest = useCallback((behavior: ScrollBehavior = "smooth") => {
     const viewport = transcriptRef.current;
@@ -517,6 +558,18 @@ export function Component() {
     },
   });
 
+  const resume = useMutation({
+    mutationFn: (messageId: string) => api.resumeChatTurn(sessionId, messageId),
+    onSuccess: (accepted) => {
+      followLatestRef.current = true;
+      setShowJumpToLatest(false);
+      setTurn(accepted);
+      setResumeAttempt((attempt) => attempt + 1);
+      stop.reset();
+      refreshTranscript();
+    },
+  });
+
   const decide = useMutation({
     mutationFn: ({ plan, approve }: { plan: PendingPlan; approve: boolean }) => {
       const body = {
@@ -531,7 +584,8 @@ export function Component() {
     },
     onSuccess: (accepted) => {
       setTurn(accepted ?? null);
-      refreshTranscript();
+      if (accepted) refreshTranscript();
+      else refreshTurnResults();
       /* The token this card carried is spent either way; a cached copy must
        * not come back if another plan later needs approving. */
       void queryClient.invalidateQueries({
@@ -549,8 +603,10 @@ export function Component() {
     messages.some(
       (message) =>
         message.role === "assistant" &&
-        message.content === stream.completed?.content &&
-        message.sql === stream.completed?.sql,
+        (message.turn_id
+          ? message.turn_id === turn?.message_id
+          : message.content === stream.completed?.content &&
+            message.sql === stream.completed?.sql),
     );
 
   /* A plan the stream left unapproved (reload, API restart, evicted session)
@@ -608,8 +664,6 @@ export function Component() {
       </div>
     );
   }
-
-  const busy = stream.phase === "connecting" || stream.phase === "running";
 
   return (
     <div className="mx-auto flex h-full min-h-0 w-[95%] max-w-data flex-col gap-3 overflow-hidden p-3 sm:p-6">
@@ -725,12 +779,65 @@ export function Component() {
 
             {stream.phase === "disconnected" && (
               <p role="alert" className="text-sm text-status-warn">
-                Lost the connection to this turn. Reload the page to see the
-                recorded result.
+                Lost the connection to this turn. Recorded answers and available
+                recovery actions appear below when the server is reachable.
               </p>
             )}
 
-            {stream.phase === "failed" && (
+            {!busy && (recoverableTurns.data?.turns ?? []).map((recovery) => (
+              <section
+                key={recovery.message_id}
+                aria-label="Unfinished answer"
+                className="flex flex-col gap-2 rounded-base border border-status-warn/50 p-3 text-sm"
+              >
+                <p className="font-medium">
+                  {recovery.status === "awaiting_delivery"
+                    ? "An answer is ready to recover."
+                    : recovery.status === "blocked"
+                      ? "This answer cannot be resumed."
+                    : "This answer was interrupted."}
+                </p>
+                <p>{recovery.question}</p>
+                <p className="text-xs text-status-neutral">
+                  {recovery.reason ?? (recovery.status === "awaiting_delivery"
+                    ? "Restore the completed answer to this conversation."
+                    : recovery.status === "blocked"
+                      ? "The saved run cannot be continued safely. Review the question and send a new message to start again."
+                      : "Continue from saved progress with the same data and model settings.")}
+                </p>
+                {recovery.status !== "blocked" && (
+                  <button
+                    type="button"
+                    disabled={resume.isPending || send.isPending || decide.isPending}
+                    onClick={() => resume.mutate(recovery.message_id)}
+                    className="self-start rounded-base bg-primary px-3 py-1.5 font-medium text-bg disabled:opacity-50"
+                  >
+                    {resume.isPending ? "Resuming…" : "Resume answer"}
+                  </button>
+                )}
+                {recovery.status === "blocked" && (
+                  <button
+                    type="button"
+                    onClick={() => setDraft(recovery.question)}
+                    className="self-start rounded-base border border-border px-3 py-1.5"
+                  >
+                    Use question in new message
+                  </button>
+                )}
+              </section>
+            ))}
+            {recoverableTurns.isError && !busy && (
+              <p className="text-xs text-status-warn">
+                Interrupted answers could not be checked. Reload to try again.
+              </p>
+            )}
+            {resume.isError && (
+              <p role="alert" className="text-sm text-status-critical">
+                {resume.error instanceof Error ? resume.error.message : "Could not resume the answer."}
+              </p>
+            )}
+
+            {stream.phase === "failed" && !stream.completed && (
               <p role="alert" className="text-sm text-status-critical">
                 {stream.error}
               </p>
@@ -770,7 +877,7 @@ export function Component() {
         onSubmit={(event) => {
           event.preventDefault();
           const text = draft.trim();
-          if (text && !busy) send.mutate(text);
+          if (text && !busy && !resume.isPending) send.mutate(text);
         }}
       >
         <label className="flex flex-col gap-1 text-sm">
@@ -787,7 +894,7 @@ export function Component() {
         <div className="flex items-center gap-2">
           <button
             type="submit"
-            disabled={busy || send.isPending || draft.trim().length === 0}
+            disabled={busy || send.isPending || resume.isPending || draft.trim().length === 0}
             className="rounded-base bg-primary px-3 py-1.5 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
           >
             {busy ? "Streaming…" : "Send"}

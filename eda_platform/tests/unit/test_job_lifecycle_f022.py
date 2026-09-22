@@ -304,7 +304,7 @@ def test_terminal_row_cannot_be_revived_by_stale_runner(
         "job.started",
         "job.completed",
     ]
-    with pytest.raises(SystemExit, match="legacy ungated"):
+    with pytest.raises(SystemExit, match="worker requires.*start gate"):
         from eda_platform.worker.runner import main
 
         main([str(store.root), str(job["job_id"]), "{}"])
@@ -525,3 +525,111 @@ def test_stubborn_cancel_after_deadline_uses_term_then_kill(
     )
     assert signals == [(os.getpid(), "stop"), (os.getpid(), "kill")]
     assert repository.finish(due, "cancelled") is True
+
+
+@pytest.mark.parametrize("boundary", ["trace", "heartbeat", "token"])
+def test_worker_bootstrap_failure_releases_durable_ownership(
+    lifecycle: tuple[ArtifactStore, JobLifecycleRepository],
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    from eda_platform.worker import runner
+
+    store, repository = lifecycle
+    _queue(repository)
+    claim = repository.claim_launch("job_f022", owner="test")
+    repository.acknowledge_spawn(claim, pid=os.getpid(), birth_identity="test")
+
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise OSError("bootstrap unavailable")
+
+    if boundary == "trace":
+        monkeypatch.setattr(JobLifecycleRepository, "materialize_trace", broken)
+    elif boundary == "heartbeat":
+        monkeypatch.setattr(runner.Heartbeat, "__enter__", broken)
+    else:
+        monkeypatch.setattr(runner, "_job_cancellation_token", broken)
+    run_job(str(store.root), claim.job_id, launch_token=claim.token, launch_attempt=claim.attempt)
+    job = store.get_job(claim.job_id)
+    assert job is not None and job["status"] == "failed" and job["finished_at"]
+    session = store.get_session_index_row("run_f022")
+    assert session is not None and session["status"] == "failed"
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute(
+            "select active_job_id from sessions where session_id = ?", ("run_f022",)
+        ).fetchone()[0] is None
+    assert _event_types(store, claim.job_id).count("job.failed") == 1
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_live_reconciliation_closes_dead_worker_without_api_restart(
+    lifecycle: tuple[ArtifactStore, JobLifecycleRepository], cancel: bool,
+) -> None:
+    import subprocess
+    import sys
+    import time
+
+    store, repository = lifecycle
+    _queue(repository)
+    claim = repository.claim_launch("job_f022", owner="test")
+    backend = LocalProcessJobBackend(store.root, store)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        identity = read_process_identity(process.pid)
+        assert identity is not None
+        repository.acknowledge_spawn(
+            claim, pid=process.pid, birth_identity=serialize_process_identity(identity)
+        )
+        assert repository.child_start(claim) is not None
+        assert backend.reconcile() == 0  # A healthy worker keeps its ownership.
+        if cancel:
+            repository.request_cancel(claim.job_id)
+        process.kill()
+        process.wait(timeout=5)
+        backend.start_reconciliation(interval=0.01)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = store.get_job(claim.job_id)
+            if job is not None and job["status"] in {"failed", "cancelled"}:
+                break
+            time.sleep(0.01)
+        assert job is not None and job["status"] == ("cancelled" if cancel else "failed")
+        assert backend.reconcile() == 0
+        session = store.get_session_index_row("run_f022")
+        assert session is not None
+        with sqlite3.connect(store.db_path) as conn:
+            assert conn.execute(
+                "select active_job_id from sessions where session_id = ?", ("run_f022",)
+            ).fetchone()[0] is None
+        assert session["status"] == job["status"]
+    finally:
+        backend.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_live_reconciliation_preserves_launch_handshake_and_stale_scan(
+    lifecycle: tuple[ArtifactStore, JobLifecycleRepository], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    store, repository = lifecycle
+    _queue(repository)
+    claim = repository.claim_launch("job_f022", owner="test")
+    assert repository.reconcile_dead_workers() == 0
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("update jobs set lease_expires_at = ? where job_id = ?", (
+            (datetime.now(UTC) - timedelta(seconds=1)).isoformat(), claim.job_id,
+        ))
+    stale = store.list_active_jobs()
+    identity = read_process_identity(os.getpid())
+    assert identity is not None
+    repository.acknowledge_spawn(
+        claim, pid=os.getpid(), birth_identity=serialize_process_identity(identity)
+    )
+    monkeypatch.setattr(store, "list_active_jobs", lambda: stale)
+    assert repository.reconcile_dead_workers() == 0
+    current = store.get_job(claim.job_id)
+    assert current is not None
+    assert current["status"] == "launching"

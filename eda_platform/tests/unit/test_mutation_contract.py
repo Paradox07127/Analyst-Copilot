@@ -54,8 +54,9 @@ def test_every_openapi_mutation_has_one_generated_policy(tmp_path: Path) -> None
     # import, 63), then the six exploration lifecycle mutations
     # (prepare/start/pause/resume/cancel/extend-budget, 69), then the
     # investigation retirement removed its eight mutations while job retry,
-    # chat-turn cancel, and randomized-design confirmation arrived (64).
-    assert len(operations) == 64
+    # chat-turn cancel, and randomized-design confirmation arrived (64),
+    # followed by explicit durable chat recovery (65).
+    assert len(operations) == 65
     operation_ids = {operation["operationId"] for operation in operations}
     assert operation_ids == (
         IDEMPOTENT_OPERATIONS | VERSIONED_OPERATIONS | INTRINSIC_OPERATIONS

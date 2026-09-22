@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -24,6 +25,7 @@ from eda_platform.agents.exploration.supervisor import (
     SupervisorBudgetExhausted,
     SupervisorConfig,
     SupervisorJournalState,
+    SupervisorPauseRequested,
     SupervisorPhase,
     SupervisorRunResult,
     ValidationOutcome,
@@ -31,6 +33,7 @@ from eda_platform.agents.exploration.supervisor import (
     reduction_outcome_digest,
     render_soft_countdown,
 )
+from eda_platform.core.graph_execution import GraphPersistence
 
 
 class FakeJournal:
@@ -413,6 +416,7 @@ def _supervisor(
     recovery: FakeRecovery | None = None,
     config: SupervisorConfig | None = None,
     branch_deriver: object | None = None,
+    persistence: GraphPersistence | None = None,
 ) -> tuple[ExplorationSupervisor, FakeControl, FakeGenerator, FakeExecutor, FakeReducer]:
     actual_control = control or FakeControl()
     actual_generator = generator or FakeGenerator(journal)
@@ -432,6 +436,7 @@ def _supervisor(
         finalizer=FakeFinalizer(journal),
         recovery=cast(CompletedStepRecoveryPort, recovery or FakeRecovery()),
         branch_deriver=cast("BranchConstraintPort | None", branch_deriver),
+        persistence=persistence,
     )
     return supervisor, actual_control, actual_generator, actual_executor, actual_reducer
 
@@ -1132,3 +1137,78 @@ def test_branching_disabled_keeps_the_existing_termination() -> None:
     assert result.stop_reason == "no_new_information"
     assert journal.abandonments == []
     assert journal.round_branch_ids == [None, None]
+
+
+class _WorkerExit(BaseException):
+    """Simulate process death, bypassing the workflow's domain error handling."""
+
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_sqlite_pause_resumes_in_a_new_supervisor_without_repeating_probes(
+    tmp_path: Path, drift: bool
+) -> None:
+    journal, recovery = FakeJournal(), FakeRecovery()
+    persistence = GraphPersistence(tmp_path, "pause-restart")
+
+    class PauseAtValidation(FakeControl):
+        def checkpoint(self, transition: PhaseTransition) -> None:
+            super().checkpoint(transition)
+            if transition.target == SupervisorPhase.VALIDATE:
+                journal.state = replace(journal.state, status="pause_requested")
+                raise SupervisorPauseRequested
+
+    first, _, first_generator, first_executor, _ = _supervisor(
+        journal, recovery=recovery, persistence=persistence, control=PauseAtValidation()
+    )
+    assert first.run().status == "paused"
+    assert persistence.path.is_file()
+    assert len(first_generator.calls) == len(first_executor.calls) == 1
+    journal.state = replace(journal.state, status="running")
+    resumed, _, generator, executor, reducer = _supervisor(
+        journal, recovery=recovery, persistence=persistence,
+        witness=FakeWitness([not drift]),
+    )
+    result = resumed.run()
+    assert result.stop_reason == ("state_witness_changed" if drift else "completed")
+    assert generator.calls == executor.calls == []
+    assert reducer.calls == (0 if drift else 1)
+    assert len(journal.settled) == (0 if drift else 1)
+
+
+@pytest.mark.parametrize("committed_operation", ["reduction", "settlement"])
+def test_sqlite_restart_adopts_domain_commit_ahead_of_graph_checkpoint(
+    tmp_path: Path, committed_operation: str
+) -> None:
+    class CrashingJournal(FakeJournal):
+        crash = True
+
+        def commit_reduction(self, **kwargs: str) -> SupervisorJournalState:
+            result = super().commit_reduction(**kwargs)
+            if self.crash and committed_operation == "reduction":
+                self.crash = False
+                raise _WorkerExit
+            return result
+
+        def settle_round(self, *args: object, **kwargs: object) -> SupervisorJournalState:
+            result = super().settle_round(*args, **kwargs)  # type: ignore[arg-type]
+            if self.crash and committed_operation == "settlement":
+                self.crash = False
+                raise _WorkerExit
+            return result
+
+    journal, recovery = CrashingJournal(), FakeRecovery()
+    persistence = GraphPersistence(tmp_path, "commit-restart")
+    first, _, _, _, first_reducer = _supervisor(
+        journal, recovery=recovery, persistence=persistence
+    )
+    with pytest.raises(_WorkerExit):
+        first.run()
+    resumed, _, generator, executor, reducer = _supervisor(
+        journal, recovery=recovery, persistence=persistence
+    )
+    result = resumed.run()
+    assert result.stop_reason == "completed"
+    assert generator.calls == executor.calls == []
+    assert first_reducer.calls == 1
+    assert reducer.calls == 0
+    assert len(journal.reductions) == len(journal.settled) == len(journal.stops) == 1

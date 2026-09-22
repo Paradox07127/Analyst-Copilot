@@ -28,6 +28,8 @@ class ChatTurnResult(BaseModel):
 
 
 class ChatMessage(BaseModel):
+    turn_id: str | None = None
+    llm_mode: Literal["env", "offline"] | None = None
     role: Literal["user", "assistant"]
     content: str
     status: str = "answer"

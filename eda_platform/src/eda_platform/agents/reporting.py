@@ -3,18 +3,31 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Literal
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from eda_platform.agents.evidence_interleave import (
     EvidenceInterleaveSession,
     InMemoryEvidenceResolver,
 )
 from eda_platform.agents.narrator import narrate_report
+from eda_platform.agents.report_graph import (
+    ReportWorkflow,
+    model_binding,
+    raise_recorded_error,
+    run_report_workflow,
+)
 from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.cancellation import CancellationError
 from eda_platform.core.claim_language import rewrite_causal_language
 from eda_platform.core.column_roles import ColumnRoleSet
+from eda_platform.core.graph_execution import (
+    GraphEffectUncertain,
+    GraphIdentityError,
+    GraphPersistence,
+)
 from eda_platform.core.llm import LLMClient, LLMResultMetadata, is_offline_client
 from eda_platform.schemas.artifacts import (
     Artifact,
@@ -95,6 +108,8 @@ class LLMTraceEvent:
     usage: LLMResultMetadata | None = None
     error_type: str = ""
     error: str = ""
+    call_index: int = 1
+    operation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -166,6 +181,41 @@ def generate_agentic_report(
     llm: LLMClient,
     payload_policy: PayloadPolicy = "schema+aggregates",
     narrator_llm: LLMClient | None = None,
+    persistence: GraphPersistence | None = None,
+) -> AgenticReportResult:
+    """Run the resumable report workflow over immutable evidence artifacts."""
+    adapter = TypeAdapter(AgenticReportResult)
+
+    def run(workflow: ReportWorkflow) -> dict[str, Any]:
+        result = _generate_agentic_report(
+            artifacts, project_id=project_id, session_id=session_id,
+            business_context=business_context, llm=llm, payload_policy=payload_policy,
+            narrator_llm=narrator_llm, workflow=workflow,
+        )
+        return adapter.dump_python(result, mode="json")
+
+    value = run_report_workflow(
+        run, persistence=persistence,
+        inputs={
+            "project_id": project_id, "session_id": session_id,
+            "business_context": business_context, "payload_policy": payload_policy,
+            "evidence": [artifact.model_dump(mode="json") for artifact in artifacts],
+            "model": model_binding(narrator_llm or llm),
+        },
+    )
+    return adapter.validate_python(value)
+
+
+def _generate_agentic_report(
+    artifacts: list[Artifact],
+    *,
+    project_id: str,
+    session_id: str,
+    business_context: str,
+    llm: LLMClient,
+    payload_policy: PayloadPolicy,
+    narrator_llm: LLMClient | None,
+    workflow: ReportWorkflow,
 ) -> AgenticReportResult:
     evidence_pack = build_evidence_pack(artifacts, payload_policy=payload_policy)
     question_results, sql_results = _extract_question_evidence(artifacts)
@@ -211,6 +261,7 @@ def generate_agentic_report(
             validation_events=validation_events,
             interleave=interleave_session,
             forced_interleave=forced_session,
+            workflow=workflow,
         )
     finally:
         if (
@@ -315,7 +366,9 @@ def generate_agentic_report(
     bundle.status = audit.status
     # Narration runs last, over claims that already cleared every gate, and may
     # only reuse their figures. A narrator failure costs prose, never a claim.
-    narration = narrate_report(bundle, llm=report_llm)
+    narration = narrate_report(bundle, llm=report_llm, workflow=workflow)
+    llm_calls.extend(narration.llm_calls)
+    llm_events.extend(TypeAdapter(list[LLMTraceEvent]).validate_python(narration.llm_events))
     if narration.attempted:
         note = (
             f"Wrote a connective narrative for {narration.written} of "
@@ -374,6 +427,7 @@ def _generate_with_repair(
     validation_events: list[ReportValidationTraceEvent],
     interleave: EvidenceInterleaveSession | None = None,
     forced_interleave: EvidenceInterleaveSession | None = None,
+    workflow: ReportWorkflow,
 ) -> tuple[ReportBundle, ReportAudit, bool]:
     if is_offline_client(llm):
         bundle = _deterministic_report_bundle(
@@ -421,26 +475,22 @@ def _generate_with_repair(
                 "Report repair stopped early after exceeding the rewrite token budget."
             )
             return gated_bundle, gated_audit, False
-        llm_started_at = datetime.now(UTC)
-        attempt_usages: list[LLMResultMetadata] = []
+        outcome = _plan_attempt(
+            workflow, attempt_number=attempt_number, evidence_pack=evidence_pack,
+            business_context=business_context, llm=llm, prior_error=prior_error,
+            prior_findings=prior_findings, prior_bundle=prior_bundle,
+            question_results=question_results, truncation_retry=truncation_retry,
+            interleave=interleave, forced_evidence=forced_evidence,
+        )
+        attempt_usages = [LLMResultMetadata.model_validate(item) for item in outcome["usages"]]
+        llm_events.extend(_plan_call_events(outcome, attempt_number))
         try:
-            draft = _request_plan(
-                evidence_pack,
-                business_context=business_context,
-                llm=llm,
-                prior_error=prior_error,
-                prior_findings=prior_findings,
-                prior_bundle=prior_bundle,
-                question_results=question_results,
-                truncation_retry=truncation_retry,
-                interleave=interleave,
-                forced_evidence=forced_evidence,
-                usages=attempt_usages,
-            )
-        except BudgetExceeded:
+            if outcome.get("error"):
+                raise_recorded_error(outcome["error"])
+            draft = ReportPlanDraft.model_validate(outcome["draft"])
+        except (CancellationError, BudgetExceeded, GraphEffectUncertain, GraphIdentityError):
             raise
         except (RuntimeError, ValidationError) as exc:
-            llm_finished_at = datetime.now(UTC)
             usage = attempt_usages[-1] if attempt_usages else None
             completion_cap = _completion_cap(llm)
             truncated = _completion_was_capped(usage, completion_cap)
@@ -460,23 +510,9 @@ def _generate_with_repair(
             llm_calls.extend(attempt_usages)
             if draft_total_tokens is not None:
                 repair_spent_tokens += _attempt_spend(attempt_usages)
-            llm_events.append(
-                LLMTraceEvent(
-                    task=_REPORT_PLAN_TASK,
-                    status="error",
-                    attempt=attempt_number,
-                    started_at=llm_started_at,
-                    finished_at=llm_finished_at,
-                    usage=usage,
-                    error_type="truncation" if truncated else type(exc).__name__,
-                    error=prior_error,
-                )
-            )
             continue
 
-        llm_finished_at = datetime.now(UTC)
         truncation_retry = False
-        usage = attempt_usages[-1] if attempt_usages else None
         llm_calls.extend(attempt_usages)
         if draft_total_tokens is None:
             # Missing usage counts as 0 so the breaker stays armed.
@@ -485,30 +521,20 @@ def _generate_with_repair(
             )
         else:
             repair_spent_tokens += _attempt_spend(attempt_usages)
-        llm_events.append(
-            LLMTraceEvent(
-                task=_REPORT_PLAN_TASK,
-                status="success",
-                attempt=attempt_number,
-                started_at=llm_started_at,
-                finished_at=llm_finished_at,
-                usage=usage,
-            )
-        )
 
         normalized_body_count = 0
-        bundle, dropped_focus_claims = _bundle_from_plan(
-            draft, project_id=project_id, session_id=session_id
+        validated = workflow.step(
+            "validate_claim_plan",
+            partial(
+                _validate_plan, draft, project_id=project_id, session_id=session_id,
+                question_results=question_results, evidence_pack=evidence_pack,
+                sql_results=sql_results,
+            ),
         )
-        # Deterministic question claims never depend on the LLM; inject before
-        # validation so they pass the same evidence gate as authored claims.
-        _inject_question_claims(bundle, question_results)
-        audit = validate_report_bundle(bundle, evidence_pack, sql_results=sql_results)
-        deterministic_repair_count = _apply_deterministic_repairs(
-            bundle, audit, evidence_pack=evidence_pack
-        )
-        if deterministic_repair_count:
-            audit = validate_report_bundle(bundle, evidence_pack, sql_results=sql_results)
+        bundle = ReportBundle.model_validate(validated["bundle"])
+        audit = ReportAudit.model_validate(validated["audit"])
+        deterministic_repair_count = validated["repair_count"]
+        dropped_focus_claims = validated["dropped_focus_claims"]
         validation_events.append(
             _validation_trace_event(
                 audit,
@@ -695,6 +721,98 @@ def _share_denominator_instruction() -> str:
     )
 
 
+def _validate_plan(
+    draft: ReportPlanDraft, *, project_id: str, session_id: str,
+    question_results: list[QuestionExecutionResult], evidence_pack: EvidencePack,
+    sql_results: dict[str, SqlResult],
+) -> dict[str, Any]:
+    bundle, dropped_focus_claims = _bundle_from_plan(
+        draft, project_id=project_id, session_id=session_id,
+    )
+    _inject_question_claims(bundle, question_results)
+    audit = validate_report_bundle(bundle, evidence_pack, sql_results=sql_results)
+    repaired = _apply_deterministic_repairs(bundle, audit, evidence_pack=evidence_pack)
+    if repaired:
+        audit = validate_report_bundle(bundle, evidence_pack, sql_results=sql_results)
+    return {
+        "bundle": bundle.model_dump(mode="json"), "audit": audit.model_dump(mode="json"),
+        "repair_count": repaired, "dropped_focus_claims": dropped_focus_claims,
+    }
+
+
+def _plan_call_events(outcome: dict[str, Any], attempt: int) -> list[LLMTraceEvent]:
+    events: list[LLMTraceEvent] = []
+    for index, record in enumerate(outcome["call_records"], start=1):
+        raw_usage = record["usage"]
+        usage = LLMResultMetadata.model_validate(raw_usage) if raw_usage else None
+        error = record.get("error", {})
+        invalid = not record.get("valid_shape", False)
+        failed = bool(error) or invalid
+        truncated = failed and _completion_was_capped(usage, outcome["completion_cap"])
+        events.append(LLMTraceEvent(
+            task=_REPORT_PLAN_TASK,
+            status="error" if failed else "success",
+            attempt=attempt,
+            call_index=index,
+            operation_id=record["operation_id"],
+            started_at=datetime.fromisoformat(record["started_at"]),
+            finished_at=datetime.fromisoformat(record["finished_at"]),
+            usage=usage,
+            error_type=(
+                "truncation" if truncated
+                else error.get("type", "invalid_shape" if invalid else "")
+            ),
+            error=error.get("message", "Invalid report plan shape." if invalid else ""),
+        ))
+    return events
+
+
+def _plan_attempt(
+    workflow: ReportWorkflow, *, attempt_number: int,
+    evidence_pack: EvidencePack, business_context: str, llm: LLMClient,
+    prior_error: str | None, prior_findings: list[str], prior_bundle: ReportBundle | None,
+    question_results: list[QuestionExecutionResult], truncation_retry: bool,
+    interleave: EvidenceInterleaveSession | None, forced_evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    def run() -> dict[str, Any]:
+        usages: list[LLMResultMetadata] = []
+        call_records: list[dict[str, Any]] = []
+        outcome: dict[str, Any] = {"started_at": datetime.now(UTC).isoformat()}
+        try:
+            draft = _request_plan(
+                evidence_pack, business_context=business_context, llm=llm,
+                prior_error=prior_error, prior_findings=prior_findings, prior_bundle=prior_bundle,
+                question_results=question_results, truncation_retry=truncation_retry,
+                interleave=interleave, forced_evidence=forced_evidence, usages=usages,
+                workflow=workflow, attempt_number=attempt_number, call_records=call_records,
+            )
+            outcome["draft"] = draft.model_dump(mode="json")
+        except (CancellationError, BudgetExceeded, GraphEffectUncertain, GraphIdentityError):
+            raise
+        except (RuntimeError, ValidationError) as exc:
+            outcome["error"] = {
+                "type": getattr(exc, "source_type", type(exc).__name__), "message": str(exc),
+            }
+        outcome.update(
+            usages=[item.model_dump(mode="json") for item in usages],
+            call_records=call_records,
+            finished_at=datetime.now(UTC).isoformat(),
+            interleave=interleave.transcript.model_dump(mode="json") if interleave else None,
+            completion_cap=_completion_cap(llm),
+        )
+        if call_records:
+            outcome["started_at"] = call_records[0]["started_at"]
+            outcome["finished_at"] = call_records[-1]["finished_at"]
+        return outcome
+
+    outcome = workflow.step("claim_plan_attempt", run)
+    if interleave is not None and outcome["interleave"] is not None:
+        interleave.restore(InterleaveTranscript.model_validate(outcome["interleave"]))
+    if outcome["completion_cap"] is not None:
+        _set_completion_budget(llm, outcome["completion_cap"])
+    return outcome
+
+
 def _request_plan(
     evidence_pack: EvidencePack,
     *,
@@ -707,7 +825,10 @@ def _request_plan(
     truncation_retry: bool = False,
     interleave: EvidenceInterleaveSession | None = None,
     forced_evidence: list[dict[str, Any]] | None = None,
-    usages: list[LLMResultMetadata] | None = None,
+    usages: list[LLMResultMetadata],
+    workflow: ReportWorkflow,
+    attempt_number: int,
+    call_records: list[dict[str, Any]],
 ) -> ReportPlanDraft:
     max_claims = _plan_claim_budget(
         len(question_results), truncation_retry=truncation_retry
@@ -792,17 +913,19 @@ def _request_plan(
     # Resolve bounded persisted-evidence requests before finalizing the plan.
     requested_evidence: list[dict[str, Any]] = []
     draft = ReportPlanDraft()
-    for _ in range(_PLAN_INTERLEAVE_ROUNDS):
-        try:
-            draft = llm.structured(
-                task=_REPORT_PLAN_TASK,
-                schema=ReportPlanDraft,
-                payload=payload,
-            )
-        finally:
-            # F5: every provider call in the attempt is metered, not only the
-            # last one; the raising call's usage (when available) counts too.
-            _record_call_usage(llm, usages)
+    for round_index in range(_PLAN_INTERLEAVE_ROUNDS):
+        result = workflow.structured(
+            key=f"plan:{attempt_number}:{round_index}", llm=llm,
+            task_name=_REPORT_PLAN_TASK, schema=ReportPlanDraft, payload=payload,
+        )
+        call_records.append(result)
+        if result["usage"] is not None:
+            usages.append(LLMResultMetadata.model_validate(result["usage"]))
+        if result.get("error"):
+            raise_recorded_error(result["error"])
+        if not result["valid_shape"]:
+            raise RuntimeError("Report plan returned an invalid response shape.")
+        draft = ReportPlanDraft.model_validate(result["draft"])
         if (
             interleave is None
             or not draft.evidence_requests
@@ -815,18 +938,6 @@ def _request_plan(
         payload = dict(payload)
         payload["requested_evidence"] = list(requested_evidence)
     return draft
-
-
-def _record_call_usage(
-    llm: LLMClient, usages: list[LLMResultMetadata] | None
-) -> None:
-    if usages is None:
-        return
-    usage = llm.last_usage()
-    # Identity guard: a transport error can leave last_usage() at the previous
-    # call's object; never double-count it.
-    if usage is not None and (not usages or usages[-1] is not usage):
-        usages.append(usage)
 
 
 def _attempt_spend(usages: list[LLMResultMetadata]) -> int:
@@ -886,7 +997,7 @@ def _retry_error_message(
     completion_cap: int | None,
     truncated: bool,
 ) -> str:
-    base = f"{type(exc).__name__}: {str(exc)[:600]}"
+    base = f"{getattr(exc, 'source_type', type(exc).__name__)}: {str(exc)[:600]}"
     if not truncated:
         return base[:800]
     completion_tokens = usage.usage.completion_tokens if usage is not None else 0

@@ -569,3 +569,35 @@ def test_the_question_batch_job_never_runs_without_a_hard_budget() -> None:
     assert QUESTION_AGENT_BUDGET_FUSE.max_cost_usd is not None
     assert QUESTION_AGENT_BUDGET_FUSE.max_wall_seconds is not None
     assert QUESTION_AGENT_BUDGET_FUSE.max_total_tokens >= 100_000
+
+
+@pytest.mark.parametrize("error_name", ["GraphIdentityError", "GraphEffectUncertain"])
+def test_question_graph_control_errors_do_not_become_failed_results_or_sql_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_name: str,
+) -> None:
+    from eda_platform.agents.runtime import AgentRuntime
+    from eda_platform.core import graph_execution
+    from eda_platform.drivers.question_exec import execute_question_with_tools
+
+    store, dataset = _context(tmp_path)
+    error = getattr(graph_execution, error_name)("Execution cannot be resumed safely")
+    calls = 0
+
+    def blocked(self: AgentRuntime, **kwargs: Any) -> AgentRunResult:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    monkeypatch.setattr(AgentRuntime, "run", blocked)
+    with pytest.raises(type(error), match="cannot be resumed safely"):
+        execute_question_with_tools(
+            _candidate(), datasets=[dataset], project_id="project_demo",
+            session_id="question_run", parent_ids=[], llm=_ScriptedQuestionLLM([]),
+            context_artifacts=[], store=store,
+        )
+    assert calls == 1
+    assert store.list_artifacts(project_id="project_demo", session_id="question_run") == []
+    assert store.list_trace_events(
+        project_id="project_demo", session_id="question_run",
+        event_types=["question_agent_failed", "agent_route_degraded"],
+    ) == []

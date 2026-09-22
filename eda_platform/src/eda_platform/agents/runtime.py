@@ -1,21 +1,16 @@
-"""A small, provider-neutral runtime for bounded, tool-using agents.
-
-The product already owns important boundaries (workspace scoping, SQL safety,
-approval, sandboxing, budget accounting and trace storage).  This module adds
-the missing orchestration seam without replacing those boundaries with an
-opaque framework.  Providers only choose *which* registered tool to ask for;
-the local registry validates and executes every request.
-"""
+"""LangGraph tool-agent nodes over the project's typed execution contracts."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypedDict, cast
 
+from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 from pydantic import BaseModel, ValidationError
 
 from eda_platform.agents.tool_context import (
@@ -25,8 +20,22 @@ from eda_platform.agents.tool_context import (
 )
 from eda_platform.core.budget import BudgetExceeded
 from eda_platform.core.cancellation import CancellationError
+from eda_platform.core.graph_execution import (
+    GraphEffectUncertain,
+    GraphExecution,
+    GraphIdentityError,
+    GraphPersistence,
+    graph_execution,
+)
 from eda_platform.core.ids import stable_hash
-from eda_platform.core.llm import LLMToolCall, ToolCallingLLM
+from eda_platform.core.llm import (
+    LLMToolCall,
+    LLMToolResponse,
+    ToolCallingLLM,
+    llm_execution_fingerprint,
+)
+from eda_platform.core.store import ArtifactStore
+from eda_platform.schemas.artifacts import Artifact
 
 TraceSink = Callable[[str, str, dict[str, Any]], None]
 ToolExecutor = Callable[[BaseModel], "AgentToolResult"]
@@ -36,7 +45,12 @@ AnswerValidator = Callable[[str, list[Any]], tuple[bool, str]]
 # Replaying a call that overran the budget or lost a cancellation race spends
 # more of the resource that just ran out, so these two never become an
 # observation the model is invited to retry.
-_TERMINAL_TOOL_ERRORS = (BudgetExceeded, CancellationError)
+_TERMINAL_TOOL_ERRORS = (
+    BudgetExceeded,
+    CancellationError,
+    GraphEffectUncertain,
+    GraphIdentityError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +61,7 @@ class AgentTool:
     description: str
     args_schema: type[BaseModel]
     execute: ToolExecutor
+    retry_safe: bool = False
 
     def provider_schema(self) -> dict[str, Any]:
         return {
@@ -60,11 +75,7 @@ def canonical_tool_arguments(
     args_schema: type[BaseModel], arguments: BaseModel | Mapping[str, Any]
 ) -> dict[str, Any]:
     """Validate and include schema defaults exactly as the executor does."""
-    raw = (
-        arguments.model_dump(mode="json")
-        if isinstance(arguments, BaseModel)
-        else dict(arguments)
-    )
+    raw = arguments.model_dump(mode="json") if isinstance(arguments, BaseModel) else dict(arguments)
     return args_schema.model_validate(raw).model_dump(mode="json")
 
 
@@ -114,6 +125,276 @@ class AgentRunResult:
     error: str | None = None
 
 
+class AgentState(TypedDict):
+    messages: list[dict[str, Any]]
+    artifacts: list[Any]
+    step: int
+    tool_calls: int
+    tool_names: list[str]
+    pending_calls: list[dict[str, Any]]
+    rewrites: int
+    rejection: str
+    answer: str
+    status: str
+    error: str | None
+
+
+@dataclass
+class AgentServices:
+    agent: AgentRuntime
+    execution: GraphExecution
+    run_id: str
+
+
+def _cancelled_update(agent: AgentRuntime, state: AgentState) -> dict[str, Any] | None:
+    if agent._cancel_check is None or not agent._cancel_check():
+        return None
+    agent._emit(
+        "agent_cancelled", "agent_runtime",
+        {"step": state["step"], "tool_calls": state["tool_calls"]},
+    )
+    return {"status": "cancelled", "answer": "", "error": "The turn was stopped."}
+
+
+def _model_node(state: AgentState, runtime: Runtime[AgentServices]) -> dict[str, Any]:
+    services = runtime.context
+    agent = services.agent
+    if agent._cancel_check is not None and agent._cancel_check():
+        agent._emit(
+            "agent_cancelled",
+            "agent_runtime",
+            {
+                "step": state["step"] + 1,
+                "tool_calls": state["tool_calls"],
+            },
+        )
+        return {"status": "cancelled", "error": "The turn was stopped before its next step."}
+    if state["step"] >= agent._max_steps:
+        status = "answer_unverified" if state["rejection"] else "limit_reached"
+        agent._emit(
+            "agent_limit_reached",
+            "agent_runtime",
+            {
+                "step": state["step"],
+                "tool_calls": state["tool_calls"],
+                "step_cap": agent._max_steps,
+            },
+        )
+        return {
+            "status": status,
+            "error": state["rejection"]
+            or "The agent reached its reasoning-step safety limit before producing a final answer.",
+        }
+    step = state["step"] + 1
+    request = {
+        "task": agent._task,
+        "messages": state["messages"],
+        "tools": [tool.provider_schema() for tool in agent._tools.values()],
+    }
+    response = LLMToolResponse.model_validate(
+        services.execution.model_effect(
+            f"model:{step}",
+            request,
+            lambda: agent._llm.tool_call(**request).model_dump(mode="json"),
+        )
+    )
+    if cancelled := _cancelled_update(agent, state):
+        return {**cancelled, "step": step}
+    if not response.tool_calls:
+        answer = response.content.strip()
+        return {
+            "step": step,
+            "answer": answer,
+            "status": "validate" if answer else "failed",
+            "error": None
+            if answer
+            else "The model ended the agent turn without an answer or a tool call.",
+        }
+    if state["tool_calls"] + len(response.tool_calls) > agent._max_tool_calls:
+        agent._emit(
+            "agent_limit_reached",
+            "agent_runtime",
+            {
+                "step": step,
+                "tool_calls": state["tool_calls"],
+                "tool_call_cap": agent._max_tool_calls,
+            },
+        )
+        return {
+            "step": step,
+            "status": "limit_reached",
+            "error": (
+                "The agent reached its tool-call safety limit before producing a final answer."
+            ),
+        }
+    return {
+        "step": step,
+        "status": "tools",
+        "pending_calls": [call.model_dump(mode="json") for call in response.tool_calls],
+        "messages": [
+            *state["messages"],
+            _assistant_message(
+                response.content,
+                response.tool_calls,
+                response.provider_state,
+            ),
+        ],
+    }
+
+
+def _tool_node(state: AgentState, runtime: Runtime[AgentServices]) -> dict[str, Any]:
+    services = runtime.context
+    agent = services.agent
+    call = LLMToolCall.model_validate(state["pending_calls"][0])
+    sequence = state["tool_calls"] + 1
+    if agent._cancel_check is not None and agent._cancel_check():
+        return {"status": "cancelled", "error": "The turn was stopped before its next tool."}
+
+    def execute() -> dict[str, Any]:
+        observation, artifacts = agent._invoke(
+            call,
+            step=state["step"],
+            run_id=services.run_id,
+            sequence_index=sequence,
+        )
+        references = []
+        for artifact in artifacts:
+            if agent._artifact_store is not None:
+                if not isinstance(artifact, Artifact):
+                    raise TypeError("Persisted agent outputs must be typed artifacts.")
+                agent._artifact_store.save_artifact(artifact)
+                ref = {
+                    "id": artifact.id,
+                    "project_id": artifact.project_id,
+                    "session_id": artifact.session_id,
+                    "digest": stable_hash(
+                        artifact.model_dump(mode="json", exclude={"created_at"}),
+                        length=64,
+                    ),
+                }
+            else:
+                ref = artifact
+            if ref not in references:
+                references.append(ref)
+        return {
+            "artifacts": references,
+            "content": _observation_text(observation, limit=agent._max_observation_chars),
+        }
+
+    result = services.execution.effect(
+        f"tool:{sequence}",
+        {"step": state["step"], "call": call.model_dump(mode="json")},
+        execute,
+        retry_pending=bool(agent._tools.get(call.name) and agent._tools[call.name].retry_safe),
+    )
+    references = list(state["artifacts"])
+    for ref in result["artifacts"]:
+        if agent._artifact_store is not None:
+            references = [
+                old
+                for old in references
+                if (old["project_id"], old["session_id"], old["id"])
+                != (ref["project_id"], ref["session_id"], ref["id"])
+            ]
+        if ref not in references:
+            references.append(ref)
+    if agent._restore_artifacts is not None:
+        agent._restore_artifacts(agent._load_artifacts(cast(AgentState, {"artifacts": references})))
+    pending = state["pending_calls"][1:]
+    return {
+        "artifacts": references,
+        "tool_calls": sequence,
+        "tool_names": [*state["tool_names"], call.name],
+        "pending_calls": pending,
+        "status": "tools" if pending else "model",
+        "messages": [
+            *state["messages"],
+            {
+                "role": "tool",
+                "tool_call_id": call.call_id,
+                "name": call.name,
+                "content": result["content"],
+            },
+        ],
+    }
+
+
+def _validate_node(state: AgentState, runtime: Runtime[AgentServices]) -> dict[str, Any]:
+    agent = runtime.context.agent
+    if cancelled := _cancelled_update(agent, state):
+        return cancelled
+    if agent._answer_validator is not None:
+        admitted, reason = agent._answer_validator(state["answer"], agent._load_artifacts(state))
+        if cancelled := _cancelled_update(agent, state):
+            return cancelled
+        if not admitted:
+            agent._emit(
+                "agent_answer_rejected",
+                "agent_runtime",
+                {
+                    "step": state["step"],
+                    "rewrite": state["rewrites"],
+                    "reason": reason[:800],
+                },
+            )
+            if state["rewrites"] >= agent._max_answer_rewrites:
+                return {
+                    "status": "answer_unverified",
+                    "answer": "",
+                    "rejection": reason,
+                    "error": (
+                        f"The answer could not be verified against the evidence it cites: {reason}"
+                    ),
+                }
+            return {
+                "status": "model",
+                "answer": "",
+                "rejection": reason,
+                "rewrites": state["rewrites"] + 1,
+                "messages": [
+                    *state["messages"],
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Validation feedback:\n{reason}\n"
+                            "Every figure must come from a tool result in this session. "
+                            "Fix the errors and try again."
+                        ),
+                    },
+                ],
+            }
+    agent._emit(
+        "agent_completed",
+        "agent_runtime",
+        {
+            "step": state["step"],
+            "tool_calls": state["tool_calls"],
+        },
+    )
+    return {"status": "completed"}
+
+
+def build_agent_graph() -> StateGraph[AgentState, AgentServices]:
+    builder = StateGraph(AgentState, context_schema=AgentServices)
+    builder.add_node("model", _model_node)
+    builder.add_node("tool", _tool_node)
+    builder.add_node("validate", _validate_node)
+    builder.add_edge(START, "model")
+    routes: dict[Hashable, str] = {
+        "model": "model",
+        "tools": "tool",
+        "validate": "validate",
+        "end": END,
+    }
+
+    def route(state: AgentState) -> str:
+        return state["status"] if state["status"] in routes else "end"
+
+    for name in ("model", "tool", "validate"):
+        builder.add_conditional_edges(name, route, routes)
+    return builder
+
+
 class AgentRuntime:
     """Execute a bounded ReAct-style loop over locally registered tools.
 
@@ -136,6 +417,9 @@ class AgentRuntime:
         max_answer_rewrites: int = 1,
         trace: TraceSink | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        persistence: GraphPersistence | None = None,
+        artifact_store: ArtifactStore | None = None,
+        restore_artifacts: Callable[[list[Any]], None] | None = None,
     ) -> None:
         if max_steps < 1 or max_tool_calls < 1:
             raise ValueError("Agent runtime limits must be positive.")
@@ -154,185 +438,96 @@ class AgentRuntime:
         self._max_answer_rewrites = max_answer_rewrites
         self._trace = trace
         self._cancel_check = cancel_check
+        self._persistence = persistence
+        self._artifact_store = artifact_store
+        self._restore_artifacts = restore_artifacts
+        if persistence is not None and artifact_store is None:
+            raise ValueError("Durable agents require an artifact store.")
 
     def run(self, *, system_prompt: str, user_message: str) -> AgentRunResult:
-        run_id = "agentrun_" + uuid.uuid4().hex
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ]
-        all_artifacts: list[Any] = []
-        tool_calls = 0
-        tool_names: list[str] = []
-        answer_rewrites = 0
-        last_rejection = ""
-
-        for step in range(1, self._max_steps + 1):
-            # Between-step checkpoint: a stop request never interrupts a call
-            # already in flight, it only prevents the next one from starting.
-            if self._cancel_check is not None and self._cancel_check():
-                self._emit(
-                    "agent_cancelled",
-                    "agent_runtime",
-                    {"step": step, "tool_calls": tool_calls},
-                )
-                return AgentRunResult(
-                    status="cancelled",
-                    artifacts=_unique_artifacts(all_artifacts),
-                    tool_calls=tool_calls,
-                    tool_names=tool_names,
-                    error="The turn was stopped before its next step.",
-                )
-            response = self._llm.tool_call(
-                task=self._task,
-                messages=messages,
-                tools=[tool.provider_schema() for tool in self._tools.values()],
-            )
-            if not response.tool_calls:
-                answer = response.content.strip()
-                if not answer:
-                    return AgentRunResult(
-                        status="failed",
-                        artifacts=_unique_artifacts(all_artifacts),
-                        tool_calls=tool_calls,
-                        tool_names=tool_names,
-                        error=(
-                            "The model ended the agent turn without an answer or a tool call."
-                        ),
-                    )
-                evidence = _unique_artifacts(all_artifacts)
-                if self._answer_validator is not None:
-                    admitted, reason = self._answer_validator(answer, evidence)
-                    if not admitted:
-                        last_rejection = reason
-                        self._emit(
-                            "agent_answer_rejected",
-                            "agent_runtime",
-                            {
-                                "step": step,
-                                "rewrite": answer_rewrites,
-                                "reason": reason[:800],
-                            },
-                        )
-                        if answer_rewrites >= self._max_answer_rewrites:
-                            return AgentRunResult(
-                                status="answer_unverified",
-                                artifacts=evidence,
-                                tool_calls=tool_calls,
-                                tool_names=tool_names,
-                                error=(
-                                    "The answer could not be verified against the "
-                                    f"evidence it cites: {reason}"
-                                ),
-                            )
-                        answer_rewrites += 1
-                        # Feedback carries the reason only. Replaying the rejected
-                        # text invites the model to defend it instead of rewriting.
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"Validation feedback:\n{reason}\n"
-                                    "Every figure must come from a tool result in this "
-                                    "session. Fix the errors and try again."
-                                ),
-                            }
-                        )
-                        continue
-                self._emit(
-                    "agent_completed",
-                    "agent_runtime",
-                    {"step": step, "tool_calls": tool_calls},
-                )
-                return AgentRunResult(
-                    status="completed",
-                    answer=answer,
-                    artifacts=evidence,
-                    tool_calls=tool_calls,
-                    tool_names=tool_names,
-                )
-
-            if tool_calls + len(response.tool_calls) > self._max_tool_calls:
-                self._emit(
-                    "agent_limit_reached",
-                    "agent_runtime",
-                    {
-                        "step": step,
-                        "tool_calls": tool_calls,
-                        "tool_call_cap": self._max_tool_calls,
-                    },
-                )
-                return AgentRunResult(
-                    status="limit_reached",
-                    artifacts=_unique_artifacts(all_artifacts),
-                    tool_calls=tool_calls,
-                    tool_names=tool_names,
-                    error=(
-                        "The agent reached its tool-call safety limit before producing "
-                        "a final answer."
-                    ),
-                )
-
-            messages.append(
-                _assistant_message(
-                    response.content,
-                    response.tool_calls,
-                    response.provider_state,
-                )
-            )
-            for call in response.tool_calls:
-                tool_calls += 1
-                tool_names.append(call.name)
-                observation, artifacts = self._invoke(
-                    call,
-                    step=step,
-                    run_id=run_id,
-                    sequence_index=tool_calls,
-                )
-                all_artifacts.extend(artifacts)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.call_id,
-                        "name": call.name,
-                        "content": _observation_text(
-                            observation,
-                            limit=self._max_observation_chars,
-                        ),
-                    }
-                )
-
-        if last_rejection:
-            # The step cap is the symptom; the answer failing its gate is the cause.
-            return AgentRunResult(
-                status="answer_unverified",
-                artifacts=_unique_artifacts(all_artifacts),
-                tool_calls=tool_calls,
-                tool_names=tool_names,
-                error=(
-                    "The agent ran out of reasoning steps while rewriting an answer "
-                    f"that could not be verified: {last_rejection}"
-                ),
-            )
-        self._emit(
-            "agent_limit_reached",
-            "agent_runtime",
-            {
-                "step": self._max_steps,
-                "tool_calls": tool_calls,
-                "step_cap": self._max_steps,
-            },
+        inputs = {
+            "model_fingerprint": llm_execution_fingerprint(self._llm),
+            "system_prompt": system_prompt,
+            "user_message": user_message,
+            "tools": [tool.provider_schema() for tool in self._tools.values()],
+            "tool_retry_policy": {tool.name: tool.retry_safe for tool in self._tools.values()},
+            "max_steps": self._max_steps,
+            "max_tool_calls": self._max_tool_calls,
+            "max_answer_rewrites": self._max_answer_rewrites,
+            "max_observation_chars": self._max_observation_chars,
+        }
+        run_id = (
+            self._persistence.execution_id if self._persistence else "agentrun_" + uuid.uuid4().hex
         )
+        with graph_execution(
+            self._persistence,
+            definition=self._task,
+            inputs=inputs,
+            recursion_limit=2 * self._max_steps + self._max_tool_calls + 10,
+        ) as execution:
+            graph = build_agent_graph().compile(checkpointer=execution.saver)
+            initial: AgentState = {
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "artifacts": [],
+                "step": 0,
+                "tool_calls": 0,
+                "tool_names": [],
+                "pending_calls": [],
+                "rewrites": 0,
+                "rejection": "",
+                "answer": "",
+                "status": "model",
+                "error": None,
+            }
+            snapshot = graph.get_state(execution.config) if execution.saver else None
+            if snapshot is not None and snapshot.values:
+                restored = self._load_artifacts(cast(AgentState, snapshot.values))
+                if self._restore_artifacts is not None:
+                    self._restore_artifacts(restored)
+            if snapshot is not None and snapshot.values and not snapshot.next:
+                state = snapshot.values
+            else:
+                state = graph.invoke(
+                    None if snapshot is not None and snapshot.values else initial,
+                    execution.config,
+                    context=AgentServices(self, execution, run_id),
+                    durability="sync" if execution.saver else None,
+                )
         return AgentRunResult(
-            status="limit_reached",
-            artifacts=_unique_artifacts(all_artifacts),
-            tool_calls=tool_calls,
-            tool_names=tool_names,
-            error=(
-                "The agent reached its reasoning-step safety limit before producing "
-                "a final answer."
-            ),
+            status=state["status"],
+            answer=state["answer"],
+            artifacts=self._load_artifacts(cast(AgentState, state)),
+            tool_calls=state["tool_calls"],
+            tool_names=state["tool_names"],
+            error=state["error"],
         )
+
+    def _load_artifacts(self, state: AgentState) -> list[Any]:
+        if self._artifact_store is None:
+            return _unique_artifacts(state["artifacts"])
+        artifacts = []
+        for ref in state["artifacts"]:
+            try:
+                artifact = self._artifact_store.get_artifact(
+                    ref["id"],
+                    project_id=ref["project_id"],
+                    session_id=ref["session_id"],
+                )
+            except (FileNotFoundError, KeyError) as exc:
+                raise GraphIdentityError("Saved agent evidence disappeared; start anew.") from exc
+            if (
+                stable_hash(
+                    artifact.model_dump(mode="json", exclude={"created_at"}),
+                    length=64,
+                )
+                != ref["digest"]
+            ):
+                raise GraphIdentityError("Saved agent evidence changed; start anew.")
+            artifacts.append(artifact)
+        return artifacts
 
     def _invoke(
         self,

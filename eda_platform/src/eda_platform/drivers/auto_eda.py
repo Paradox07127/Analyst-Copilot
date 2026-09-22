@@ -13,6 +13,11 @@ from typing import Any, ClassVar, Literal, cast
 
 import pandas as pd
 
+from eda_platform.agents.model_workflow import (
+    ModelWorkflow,
+    WorkflowModelClient,
+    run_model_workflow,
+)
 from eda_platform.agents.question_agent import propose_llm_question_candidates
 from eda_platform.agents.reporting import generate_agentic_report
 from eda_platform.agents.semantic_bootstrap import bootstrap_semantics
@@ -24,8 +29,9 @@ from eda_platform.core.column_roles import (
     infer_column_roles,
 )
 from eda_platform.core.config import resolve_workspace_path
+from eda_platform.core.graph_execution import GraphPersistence
 from eda_platform.core.ids import hash_file, make_artifact_id, make_dataset_id, stable_hash
-from eda_platform.core.kernel import SessionContext, run_pipeline
+from eda_platform.core.kernel import SessionContext, artifact_input_fingerprints, run_pipeline
 from eda_platform.core.llm import (
     LLMClient,
     OfflineLLMClient,
@@ -44,6 +50,7 @@ from eda_platform.core.process_metrics import PeakRssMeasurement, process_peak_r
 from eda_platform.core.provenance import env_digest
 from eda_platform.core.semantic import (
     JoinWhitelist,
+    SemanticSeeds,
     join_whitelist_path,
     load_join_whitelist,
     save_join_whitelist,
@@ -58,8 +65,8 @@ from eda_platform.core.session_metrics import (
 )
 from eda_platform.core.skills_store import catalog_block
 from eda_platform.core.store import ArtifactStore
-from eda_platform.core.support_docs import extract_support_snippets, load_support_docs
-from eda_platform.core.tool_calling_probe import tool_calling_readiness
+from eda_platform.core.support_docs import SupportDoc, extract_support_snippets, load_support_docs
+from eda_platform.core.tool_calling_routing import tool_calling_readiness
 from eda_platform.core.tool_guard import ToolGuardError
 from eda_platform.drivers.cancellation import raise_if_cancelled
 from eda_platform.drivers.question_exec import (
@@ -337,6 +344,9 @@ class EmitCleaningRecipeStep:
     def __init__(self, recipe: CleaningRecipe) -> None:
         self.recipe = recipe
 
+    def cache_key(self, ctx: SessionContext) -> str:
+        return stable_hash(self.recipe.model_dump(mode="json"))
+
     def run(self, ctx: SessionContext) -> list[Artifact]:
         payload = self.recipe.model_dump(mode="json")
         # A data-changing clean was auto-applied without an interactive HITL
@@ -381,12 +391,11 @@ class ProfileDatasetStep:
         self.parent_ids = parent_ids or []
 
     def cache_key(self, ctx: SessionContext) -> str:
-        del ctx
         return stable_hash(
             {
-                "dataset_id": self.loaded.record.dataset_id,
+                "dataset": self.loaded.record.model_dump(mode="json", exclude={"created_at"}),
                 "content_hash": self.loaded.record.content_hash,
-                "parents": self.parent_ids,
+                "parents": artifact_input_fingerprints(ctx, self.parent_ids),
             }
         )
 
@@ -417,8 +426,7 @@ class ScanQualityStep:
         self.profile_artifact_id = profile_artifact_id
 
     def cache_key(self, ctx: SessionContext) -> str:
-        del ctx
-        return self.profile_artifact_id
+        return stable_hash(artifact_input_fingerprints(ctx, [self.profile_artifact_id]))
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         profile_artifact = ctx.store.get_artifact(
@@ -457,12 +465,12 @@ class BuildQualityContextStep:
         self.quality_artifact_id = quality_artifact_id
 
     def cache_key(self, ctx: SessionContext) -> str:
-        del ctx
         return stable_hash(
             {
-                "dataset_id": self.loaded.record.dataset_id,
-                "profile": self.profile_artifact_id,
-                "quality": self.quality_artifact_id,
+                "dataset": self.loaded.record.model_dump(mode="json", exclude={"created_at"}),
+                "content_hash": self.loaded.record.content_hash,
+                "profile": artifact_input_fingerprints(ctx, [self.profile_artifact_id]),
+                "quality": artifact_input_fingerprints(ctx, [self.quality_artifact_id]),
             }
         )
 
@@ -503,6 +511,12 @@ class BuildValueMapStep:
     ) -> None:
         self.source_artifact_ids = source_artifact_ids
         self.business_context = business_context
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        return stable_hash({
+            "sources": artifact_input_fingerprints(ctx, self.source_artifact_ids),
+            "business_context": self.business_context,
+        })
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         source_artifacts = [
@@ -548,11 +562,11 @@ class CreateChartSpecsStep:
         self.profile_artifact_id = profile_artifact_id
 
     def cache_key(self, ctx: SessionContext) -> str:
-        del ctx
         return stable_hash(
             {
-                "dataset_id": self.loaded.record.dataset_id,
-                "profile": self.profile_artifact_id,
+                "dataset": self.loaded.record.model_dump(mode="json", exclude={"created_at"}),
+                "content_hash": self.loaded.record.content_hash,
+                "profile": artifact_input_fingerprints(ctx, [self.profile_artifact_id]),
             }
         )
 
@@ -589,7 +603,7 @@ class RecordRawDatasetStep:
         del ctx
         return stable_hash(
             {
-                "dataset_id": self.loaded.record.dataset_id,
+                "dataset": self.loaded.record.model_dump(mode="json", exclude={"created_at"}),
                 "content_hash": self.loaded.record.content_hash,
             }
         )
@@ -650,11 +664,11 @@ class CreateAnalysisTablesStep:
         self.profile_artifact_id = profile_artifact_id
 
     def cache_key(self, ctx: SessionContext) -> str:
-        del ctx
         return stable_hash(
             {
-                "dataset_id": self.loaded.record.dataset_id,
-                "profile": self.profile_artifact_id,
+                "dataset": self.loaded.record.model_dump(mode="json", exclude={"created_at"}),
+                "content_hash": self.loaded.record.content_hash,
+                "profile": artifact_input_fingerprints(ctx, [self.profile_artifact_id]),
             }
         )
 
@@ -721,11 +735,11 @@ class SessionStatTestsStep:
         self.comparison_count = comparison_count
 
     def cache_key(self, ctx: SessionContext) -> str:
-        del ctx
         return stable_hash(
             {
-                "dataset_id": self.loaded.record.dataset_id,
-                "profile": self.profile_artifact_id,
+                "dataset": self.loaded.record.model_dump(mode="json", exclude={"created_at"}),
+                "content_hash": self.loaded.record.content_hash,
+                "profile": artifact_input_fingerprints(ctx, [self.profile_artifact_id]),
                 "spec": self.spec,
                 "comparison_count": self.comparison_count,
             }
@@ -819,11 +833,11 @@ class SessionBaselineModelStep:
         self.time_column = time_column
 
     def cache_key(self, ctx: SessionContext) -> str:
-        del ctx
         return stable_hash(
             {
-                "dataset_id": self.loaded.record.dataset_id,
-                "profile": self.profile_artifact_id,
+                "dataset": self.loaded.record.model_dump(mode="json", exclude={"created_at"}),
+                "content_hash": self.loaded.record.content_hash,
+                "profile": artifact_input_fingerprints(ctx, [self.profile_artifact_id]),
                 "target": self.target_column,
                 "time": self.time_column,
             }
@@ -895,6 +909,15 @@ class DiscoverRelationshipsStep:
         self.loaded_datasets = list(loaded_datasets)
         self.profile_artifact_ids = profile_artifact_ids
 
+    def cache_key(self, ctx: SessionContext) -> str:
+        return stable_hash({
+            "datasets": [
+                loaded.record.model_dump(mode="json", exclude={"created_at"})
+                for loaded in self.loaded_datasets
+            ],
+            "profiles": artifact_input_fingerprints(ctx, self.profile_artifact_ids),
+        })
+
     def run(self, ctx: SessionContext) -> list[Artifact]:
         artifacts, candidates, validations = _build_relationship_artifacts(
             self.loaded_datasets,
@@ -923,9 +946,7 @@ def _build_relationship_artifacts(
 ) -> tuple[list[Artifact], RelationshipCandidateSet, RelationshipValidationSet]:
     catalog = build_catalog(loaded_datasets, relation_key="dataset_id")
     candidates = discover_relationship_candidates(loaded_datasets, catalog.engine)
-    validations = validate_relationships(
-        eager_validation_candidates(candidates), catalog.engine
-    )
+    validations = validate_relationships(eager_validation_candidates(candidates), catalog.engine)
     diagram = build_er_diagram(candidates, validations)
     candidate_payload = candidates.model_dump(mode="json")
     validation_payload = validations.model_dump(mode="json")
@@ -982,6 +1003,42 @@ def _relationship_trace_summary(
 _LLM_PRIMARY_MAX_QUESTIONS = 12
 
 
+@dataclass(frozen=True)
+class _DiscoveryContext:
+    artifacts: dict[str, Artifact]
+    seeds: SemanticSeeds | None
+    support_docs: list[SupportDoc]
+    skills: str
+    whitelist: JoinWhitelist
+
+
+def _join_decision_binding(
+    whitelist: JoinWhitelist,
+    relationship_artifacts: list[Artifact],
+    dataset_ids: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Bind user decisions, excluding joins derived by this same workflow.
+
+    A proposed entry that this run's verified inputs would machine-confirm is
+    an explicit withheld/revoked permission: merge_proposals preserves it.
+    Timestamps, usage counters and automatic proposals are not user decisions.
+    """
+    candidates = _relationship_candidates(relationship_artifacts)
+    validations = _relationship_validations(relationship_artifacts)
+    derived_status = {
+        entry.label(): entry.status
+        for entry in (propose_join_candidates(candidates, validations) if candidates else [])
+    }
+    return [
+        entry.model_dump(mode="json", exclude={"proposed_at", "confirmed_at", "usage_count"})
+        for entry in sorted(whitelist.entries, key=lambda item: item.label())
+        if entry.validation_freshness(dataset_ids) == "fresh"
+        and (entry.status == "confirmed"
+             or entry.label() not in derived_status
+             or entry.status != derived_status[entry.label()])
+    ]
+
+
 class DiscoverQuestionsStep:
     name: ClassVar[str] = "discover_questions"
     # Analysis tables are optional: narrow datasets can legitimately produce none.
@@ -1016,37 +1073,89 @@ class DiscoverQuestionsStep:
         self.business_context = business_context
         self.payload_policy: PayloadPolicy = payload_policy
 
+    def _freeze(self, ctx: SessionContext) -> _DiscoveryContext:
+        project_dir = ctx.store.project_dir(ctx.project_id)
+        ids = [*self.profile_artifact_ids, *self.quality_artifact_ids,
+               *self.quality_context_artifact_ids, *self.analysis_artifact_ids,
+               *self.relationship_artifact_ids, self.value_map_artifact_id]
+        return _DiscoveryContext(
+            artifacts={key: ctx.store.get_artifact(
+                key, project_id=ctx.project_id, session_id=ctx.session_id
+            ) for key in dict.fromkeys(ids)},
+            seeds=load_semantic_seeds_safe(ctx.store, ctx.project_id),
+            support_docs=load_support_docs(project_dir),
+            skills=catalog_block(project_dir),
+            whitelist=_load_join_whitelist_safe(
+                project_dir, session_id=ctx.session_id, emit=ctx.emit_trace
+            ),
+        )
+
+    def _binding(self, ctx: SessionContext, frozen: _DiscoveryContext) -> dict[str, Any]:
+        return {
+            "execution": ctx.execution_fingerprint,
+            "profiles": self.profile_artifact_ids, "quality": self.quality_artifact_ids,
+            "quality_context": self.quality_context_artifact_ids,
+            "analysis": self.analysis_artifact_ids, "relations": self.relationship_artifact_ids,
+            "value_map": self.value_map_artifact_id,
+            "datasets": [
+                loaded.record.model_dump(mode="json", exclude={"created_at"})
+                for loaded in self.loaded_datasets
+            ],
+            "business_context": self.business_context, "payload_policy": self.payload_policy,
+            "model": llm_execution_fingerprint(self.llm),
+            "source_artifacts": {
+                key: stable_hash(item.model_dump(mode="json", exclude={"created_at"}), length=64)
+                for key, item in frozen.artifacts.items()
+            },
+            "seeds": (frozen.seeds.model_dump(mode="json", exclude={"version"})
+                      if frozen.seeds is not None else None),
+            "support_docs": [doc.model_dump(mode="json") for doc in frozen.support_docs],
+            "skills": frozen.skills,
+            "join_decisions": _join_decision_binding(
+                frozen.whitelist,
+                [frozen.artifacts[key] for key in self.relationship_artifact_ids],
+                {item.record.name: item.record.dataset_id for item in self.loaded_datasets},
+            ),
+        }
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        return stable_hash(self._binding(ctx, self._freeze(ctx)), length=32)
+
     def run(self, ctx: SessionContext) -> list[Artifact]:
+        frozen = self._freeze(ctx)
+        binding = self._binding(ctx, frozen)
+
+        def run(active: ModelWorkflow) -> dict[str, Any]:
+            artifacts = self._run(ctx, WorkflowModelClient(self.llm, active), frozen)
+            return {"artifacts": [item.model_dump(mode="json") for item in artifacts]}
+
+        saved = run_model_workflow(
+            run,
+            persistence=GraphPersistence(
+                ctx.store.session_dir(ctx.project_id, ctx.session_id), "discover-questions"
+            ),
+            definition="question-discovery-functional-v1",
+            inputs=binding,
+        )
+        return [Artifact.model_validate(item) for item in saved["artifacts"]]
+
+    def _run(
+        self, ctx: SessionContext, llm: LLMClient, frozen: _DiscoveryContext
+    ) -> list[Artifact]:
         profile_artifacts = [
-            ctx.store.get_artifact(
-                artifact_id,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-            )
+            frozen.artifacts[artifact_id]
             for artifact_id in self.profile_artifact_ids
         ]
         quality_artifacts = [
-            ctx.store.get_artifact(
-                artifact_id,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-            )
+            frozen.artifacts[artifact_id]
             for artifact_id in self.quality_artifact_ids
         ]
         analysis_artifacts = [
-            ctx.store.get_artifact(
-                artifact_id,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-            )
+            frozen.artifacts[artifact_id]
             for artifact_id in self.analysis_artifact_ids
         ]
         relationship_artifacts = [
-            ctx.store.get_artifact(
-                artifact_id,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-            )
+            frozen.artifacts[artifact_id]
             for artifact_id in self.relationship_artifact_ids
         ]
         relationship_candidates = _relationship_candidates(relationship_artifacts)
@@ -1057,9 +1166,8 @@ class DiscoverQuestionsStep:
             *analysis_artifacts,
             *relationship_artifacts,
         ]
-        seeds = load_semantic_seeds_safe(ctx.store, ctx.project_id)
-        # Optional user reference docs feed bootstrap as priors; none → no-op.
-        support_docs = load_support_docs(ctx.store.project_dir(ctx.project_id))
+        seeds = frozen.seeds
+        support_docs = frozen.support_docs
 
         # Bootstrap semantic roles before question discovery.
         loaded_by_id = {loaded.record.dataset_id: loaded for loaded in self.loaded_datasets}
@@ -1078,7 +1186,7 @@ class DiscoverQuestionsStep:
             )
             bootstrap = bootstrap_semantics(
                 profile,
-                llm=self.llm,
+                llm=llm,
                 frame=loaded.frame if loaded is not None else None,
                 seeds=seeds,
                 support_doc_snippets=snippets,
@@ -1141,11 +1249,7 @@ class DiscoverQuestionsStep:
                 meaning_drafts,
                 request_key=f"auto-eda-proposals:{ctx.session_id}",
             )
-        whitelist = _load_join_whitelist_safe(
-            project_dir,
-            session_id=ctx.session_id,
-            emit=ctx.emit_trace,
-        )
+        whitelist = frozen.whitelist.model_copy(deep=True)
         if relationship_candidates is not None:
             proposals = propose_join_candidates(
                 relationship_candidates,
@@ -1186,14 +1290,14 @@ class DiscoverQuestionsStep:
 
         llm_result = propose_llm_question_candidates(
             source_artifacts,
-            llm=self.llm,
+            llm=llm,
             relationship_candidates=relationship_candidates,
             relationship_validations=relationship_validations,
             business_context=self.business_context,
             max_questions=_LLM_PRIMARY_MAX_QUESTIONS,
             payload_policy=self.payload_policy,
             seeds=seeds,
-            skills_catalog=catalog_block(project_dir),
+            skills_catalog=frozen.skills,
             role_sets=role_sets,
             confirmed_joins=confirmed_joins,
             on_guard_rejected=lambda error: ctx.emit_trace(
@@ -1228,7 +1332,7 @@ class DiscoverQuestionsStep:
                 "candidate_count": len(llm_result.candidates),
                 **route_health,
             }
-            m4_usage = self.llm.last_usage()
+            m4_usage = llm.last_usage()
             if m4_usage is not None:
                 m4_summary.update(
                     {
@@ -1315,19 +1419,11 @@ class DiscoverQuestionsStep:
                 )
             )
         quality_context_artifacts = [
-            ctx.store.get_artifact(
-                artifact_id,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-            )
+            frozen.artifacts[artifact_id]
             for artifact_id in self.quality_context_artifact_ids
         ]
         value_map = ValueMap.model_validate(
-            ctx.store.get_artifact(
-                self.value_map_artifact_id,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-            ).payload
+            frozen.artifacts[self.value_map_artifact_id].payload
         )
         enriched = enrich_question_candidates(
             [
@@ -1463,14 +1559,40 @@ class ExecuteTopQuestionsStep:
         *,
         question_candidate_artifact_id: str,
         relationship_artifact_ids: list[str],
+        context_artifact_ids: list[str],
         llm: LLMClient | None = None,
         payload_policy: PayloadPolicy = "schema+aggregates",
     ) -> None:
         self.loaded_datasets = list(loaded_datasets)
         self.question_candidate_artifact_id = question_candidate_artifact_id
         self.relationship_artifact_ids = relationship_artifact_ids
+        self.context_artifact_ids = list(context_artifact_ids)
         self.llm = llm
         self.payload_policy: PayloadPolicy = payload_policy
+
+    def cache_key(self, ctx: SessionContext) -> str:
+        relations = [ctx.store.get_artifact(
+            key, project_id=ctx.project_id, session_id=ctx.session_id
+        ) for key in self.relationship_artifact_ids]
+        whitelist = _load_join_whitelist_safe(
+            ctx.store.project_dir(ctx.project_id), session_id=ctx.session_id, emit=ctx.emit_trace
+        )
+        return stable_hash({
+            "datasets": [
+                loaded.record.model_dump(mode="json", exclude={"created_at"})
+                for loaded in self.loaded_datasets
+            ],
+            "sources": artifact_input_fingerprints(
+                ctx, [self.question_candidate_artifact_id, *self.relationship_artifact_ids]
+            ),
+            "context": artifact_input_fingerprints(ctx, self.context_artifact_ids),
+            "model": llm_execution_fingerprint(self.llm) if self.llm is not None else None,
+            "payload_policy": self.payload_policy,
+            "join_decisions": _join_decision_binding(
+                whitelist, relations,
+                {item.record.name: item.record.dataset_id for item in self.loaded_datasets},
+            ),
+        })
 
     def run(self, ctx: SessionContext) -> list[Artifact]:
         question_artifact = ctx.store.get_artifact(
@@ -1523,7 +1645,9 @@ class ExecuteTopQuestionsStep:
         # The agent must see what this run already produced (profiles, quality,
         # roles, relationships) or it can only guess at the data.
         context_artifacts = (
-            ctx.store.list_artifacts(project_id=ctx.project_id, session_id=ctx.session_id)
+            [ctx.store.get_artifact(
+                key, project_id=ctx.project_id, session_id=ctx.session_id
+            ) for key in self.context_artifact_ids]
             if agent_route
             else []
         )
@@ -1570,8 +1694,10 @@ class ExecuteTopQuestionsStep:
                     parent_ids=parent_ids,
                     llm=self.llm,
                     confirmed_joins=confirmed_joins,
-                    catalog=(
-                        llm_catalog if candidate.origin == "llm" else template_catalog
+                    catalog=(llm_catalog if candidate.origin == "llm" else template_catalog),
+                    persistence=GraphPersistence(
+                        ctx.store.session_dir(ctx.project_id, ctx.session_id),
+                        "question-sql:" + candidate.question_id,
                     ),
                 )
             artifacts.extend(produced)
@@ -1630,24 +1756,10 @@ class ExecuteTopQuestionsStep:
         ctx: SessionContext,
         selected: Sequence[QuestionCandidate],
     ) -> bool:
-        """Probe tool calling only when a selected question actually needs it."""
+        """Select the native route without spending on a separate capability probe."""
         if not any(question_needs_method_agent(candidate) for candidate in selected):
             return False
         readiness = tool_calling_readiness(self.llm)
-        if readiness.source in {"probe", "cached"}:
-            ctx.emit_trace(
-                TraceEvent(
-                    session_id=ctx.session_id,
-                    event_type="tool_calling_probe",
-                    name="execute_top_questions",
-                    finished_at=datetime.now(UTC),
-                    summary={
-                        "usable": readiness.usable,
-                        "source": readiness.source,
-                        "detail": readiness.detail,
-                    },
-                )
-            )
         if not readiness.usable:
             ctx.emit_trace(
                 TraceEvent(
@@ -1656,8 +1768,7 @@ class ExecuteTopQuestionsStep:
                     name="execute_top_questions",
                     finished_at=datetime.now(UTC),
                     summary={
-                        "reason": readiness.detail
-                        or "This client cannot drive the tool loop.",
+                        "reason": readiness.detail or "This client cannot drive the tool loop.",
                         "source": readiness.source,
                     },
                 )
@@ -1700,7 +1811,9 @@ class ExportAgenticReportStep:
         """Bind this report's checkpoint to its inputs and LLM config."""
         return stable_hash(
             {
-                "artifact_ids": self.artifact_ids,
+                "artifacts": artifact_input_fingerprints(
+                    ctx, self.artifact_ids, session_ids=self.artifact_session_ids
+                ),
                 "artifact_session_ids": self.artifact_session_ids,
                 "business_context": self.business_context,
                 "payload_policy": self.payload_policy,
@@ -1732,6 +1845,10 @@ class ExportAgenticReportStep:
             llm=self.llm,
             narrator_llm=self.narrator_llm,
             payload_policy=self.payload_policy,
+            persistence=GraphPersistence(
+                ctx.store.session_dir(ctx.project_id, ctx.session_id),
+                "report:" + self.cache_key(ctx),
+            ),
         )
         # A live-LLM run that fell back to the deterministic report must not
         # look identical to a healthy one: this flag is what marks the job
@@ -2162,19 +2279,13 @@ def run_auto_eda(
             cancel_check=(
                 None
                 if cancel_check is None
-                else lambda: raise_if_cancelled(
-                    cancel_check, operation="raw input loading"
-                )
+                else lambda: raise_if_cancelled(cancel_check, operation="raw input loading")
             )
         )
-        raw_frame_bytes.append(
-            int(loaded.frame.memory_usage(index=True, deep=True).sum())
-        )
+        raw_frame_bytes.append(int(loaded.frame.memory_usage(index=True, deep=True).sum()))
         raw_rows.append(len(loaded.frame))
         raw_columns.append(len(loaded.frame.columns))
-        raw_artifacts.extend(
-            run_pipeline([RecordRawDatasetStep(loaded)], ctx).artifacts
-        )
+        raw_artifacts.extend(run_pipeline([RecordRawDatasetStep(loaded)], ctx).artifacts)
         del loaded
 
     cleaning_recipe_result = run_pipeline(
@@ -2202,21 +2313,15 @@ def run_auto_eda(
     # operation.  Only typed artifacts and DatasetSource handles survive the
     # loop, making peak memory a function of the largest table rather than the
     # sum of every table in the run.
-    for source, parent_ids in zip(
-        dataset_sources, profile_parent_ids, strict=True
-    ):
+    for source, parent_ids in zip(dataset_sources, profile_parent_ids, strict=True):
         loaded = source.materialize(
             cancel_check=(
                 None
                 if cancel_check is None
-                else lambda: raise_if_cancelled(
-                    cancel_check, operation="analysis input loading"
-                )
+                else lambda: raise_if_cancelled(cancel_check, operation="analysis input loading")
             )
         )
-        analysis_frame_bytes.append(
-            int(loaded.frame.memory_usage(index=True, deep=True).sum())
-        )
+        analysis_frame_bytes.append(int(loaded.frame.memory_usage(index=True, deep=True).sum()))
         analysis_rows.append(len(loaded.frame))
         analysis_columns.append(len(loaded.frame.columns))
 
@@ -2231,31 +2336,21 @@ def run_auto_eda(
         )
         profile_artifacts.append(profile_artifact)
 
-        produced_quality = run_pipeline(
-            [ScanQualityStep(profile_artifact.id)], ctx
-        ).artifacts
+        produced_quality = run_pipeline([ScanQualityStep(profile_artifact.id)], ctx).artifacts
         quality_artifact = produced_quality[0]
         quality_artifacts.extend(produced_quality)
 
         quality_context_artifacts.extend(
             run_pipeline(
-                [
-                    BuildQualityContextStep(
-                        loaded, profile_artifact.id, quality_artifact.id
-                    )
-                ],
+                [BuildQualityContextStep(loaded, profile_artifact.id, quality_artifact.id)],
                 ctx,
             ).artifacts
         )
         chart_artifacts.extend(
-            run_pipeline(
-                [CreateChartSpecsStep(loaded, profile_artifact.id)], ctx
-            ).artifacts
+            run_pipeline([CreateChartSpecsStep(loaded, profile_artifact.id)], ctx).artifacts
         )
         analysis_artifacts.extend(
-            run_pipeline(
-                [CreateAnalysisTablesStep(loaded, profile_artifact.id)], ctx
-            ).artifacts
+            run_pipeline([CreateAnalysisTablesStep(loaded, profile_artifact.id)], ctx).artifacts
         )
 
         profile = DatasetProfile.model_validate(profile_artifact.payload)
@@ -2299,9 +2394,7 @@ def run_auto_eda(
         raw_columns=raw_columns,
     )
     store.save_artifact(
-        _resource_preflight_artifact(
-            preflight, project_id=project_id, session_id=actual_session_id
-        )
+        _resource_preflight_artifact(preflight, project_id=project_id, session_id=actual_session_id)
     )
     ctx.emit_trace(
         TraceEvent(
@@ -2474,6 +2567,12 @@ def run_auto_eda(
                 dataset_sources,
                 question_candidate_artifact_id=question_candidate_artifact.id,
                 relationship_artifact_ids=[artifact.id for artifact in relationship_artifacts],
+                context_artifact_ids=[
+                    artifact.id for artifact in [
+                        *core_eda_artifacts, handoff_artifact,
+                        *value_map_result.artifacts, *question_result.artifacts,
+                    ]
+                ],
                 llm=llm,
                 payload_policy=payload_policy,
             )
@@ -2613,6 +2712,8 @@ def generate_report_on_demand(
         store=store,
         budget_policy=effective_budget_policy,
         restored_session_budget=restored_budget,
+        manage_session_status=False,
+        cancel_check=cancel_check,
     )
     run_llm = meter_llm_client(
         llm or OfflineLLMClient(),
@@ -3244,6 +3345,27 @@ def _llm_session_title(
     """Request a run title from the LLM, returning ``None`` on failure."""
     if is_offline_client(llm):
         return None
+    if not isinstance(llm, WorkflowModelClient):
+        def run(active: ModelWorkflow) -> dict[str, Any]:
+            return {"title": _llm_session_title(
+                ctx, WorkflowModelClient(llm, active), dataset_names=dataset_names,
+                business_context=business_context, report_artifacts=report_artifacts,
+            )}
+
+        saved = run_model_workflow(
+            run,
+            persistence=GraphPersistence(
+                ctx.store.session_dir(ctx.project_id, ctx.session_id), "session-title"
+            ),
+            definition="session-title-functional-v1",
+            inputs={
+                "execution": ctx.execution_fingerprint, "datasets": list(dataset_names),
+                "business_context": business_context,
+                "claims": _executive_summary_claims(report_artifacts),
+                "model": llm_execution_fingerprint(llm),
+            },
+        )
+        return saved["title"]
     started_at = datetime.now(UTC)
     try:
         raw = llm.text(

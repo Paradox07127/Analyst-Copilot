@@ -13,12 +13,12 @@ from pathlib import Path, PurePosixPath
 
 from eda_platform.core.config import require_absolute_workspace
 from eda_platform.core.debug_log import mirror_event_to_debug_log
-from eda_platform.core.ids import AUDIT_SESSION_ID, validate_session_id
+from eda_platform.core.ids import AUDIT_SESSION_ID, stable_hash, validate_session_id
 from eda_platform.core.observability import mirror_trace_event
 from eda_platform.core.process_control import pid_is_alive
 from eda_platform.core.provenance import env_digest
 from eda_platform.core.session_fence import session_key_lock
-from eda_platform.core.trace_correlation import current_trace_job
+from eda_platform.core.trace_correlation import current_trace_execution, current_trace_job
 from eda_platform.schemas.artifacts import RETIRED_ARTIFACT_TYPES, Artifact, ArtifactType
 from eda_platform.schemas.sessions import SessionInfo, SessionManifest, TraceEvent
 
@@ -371,8 +371,7 @@ class ArtifactStore:
         """
         retired = ",".join("?" for _ in RETIRED_ARTIFACT_TYPES)
         sql = (
-            "select path from artifacts where artifact_id = ?"
-            f" and artifact_type not in ({retired})"
+            f"select path from artifacts where artifact_id = ? and artifact_type not in ({retired})"
         )
         params: list[object] = [artifact_id, *RETIRED_ARTIFACT_TYPES]
         if project_id is not None:
@@ -417,7 +416,7 @@ class ArtifactStore:
         removed, so downstream consumers cannot observe stale evidence.
         """
         session_dir = self.session_dir(project_id, session_id)
-        output_dirs = ("artifacts", "charts", "checkpoints", "report")
+        output_dirs = ("artifacts", "charts", "graphs", "report")
         output_files = ("trace.jsonl", "debug.jsonl", "loop.journal.jsonl")
         with self._session_write_transaction(project_id, session_id) as conn:
             for dirname in output_dirs:
@@ -434,6 +433,11 @@ class ArtifactStore:
                 "delete from trace_events where project_id = ? and session_id = ?",
                 (project_id, session_id),
             )
+            for table in ("chat_executions", "chat_execution_events"):
+                conn.execute(
+                    f"delete from {table} where project_id=? and session_id=?",
+                    (project_id, session_id),
+                )
             conn.execute(
                 "delete from pending_actions where project_id = ? and session_id = ?",
                 (project_id, session_id),
@@ -1201,6 +1205,34 @@ class ArtifactStore:
         return SessionManifest.model_validate_json(path.read_text(encoding="utf-8"))
 
     def append_trace(self, project_id: str, event: TraceEvent) -> Path:
+        from dataclasses import asdict
+
+        execution = current_trace_execution()
+        fields = {
+            key: value
+            for key, value in asdict(execution).items()
+            if key != "session_id" and value is not None and getattr(event, key) is None
+        }
+        if fields:
+            event = event.model_copy(update=fields)
+        if (
+            event.event_key is None
+            and event.execution_id
+            and event.event_type == "code_agent_attempt"
+        ):
+            event = event.model_copy(
+                update={
+                    "event_key": "code-attempt:"
+                    + stable_hash(
+                        {
+                            "project": project_id,
+                            "session": event.session_id,
+                            "execution": event.execution_id,
+                            "attempt": event.summary.get("attempt"),
+                        }
+                    )
+                }
+            )
         correlation = current_trace_job()
         if correlation is not None:
             if event.job_id is not None and event.job_id != correlation.job_id:
@@ -1428,10 +1460,27 @@ class ArtifactStore:
             ).fetchall()
         return [(int(row[0]), str(row[1])) for row in rows]
 
+    def latest_job_trace_payload(
+        self, *, job_id: str, job_generation: int, event_type: str
+    ) -> str | None:
+        """One indexed event from the exact job generation, newest first."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                select payload from trace_events
+                where job_id = ? and job_generation = ? and event_type = ?
+                order by id desc limit 1
+                """,
+                (job_id, job_generation, event_type),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def persist_step_failure_fallback(
         self,
         project_id: str,
         event: TraceEvent,
+        *,
+        update_session_status: bool = True,
     ) -> None:
         """Minimal DB-only failure record when normal reporting is broken.
 
@@ -1447,10 +1496,10 @@ class ArtifactStore:
             try:
                 cursor = conn.execute(
                     """
-                    update sessions set status = ?
+                    update sessions set status = case when ? then ? else status end
                     where session_id = ? and project_id = ? and storage_state = 'live'
                     """,
-                    ("failed", event.session_id, project_id),
+                    (update_session_status, "failed", event.session_id, project_id),
                 )
                 if cursor.rowcount != 1:
                     raise KeyError(f"Session not found: {event.session_id}")
@@ -1990,14 +2039,94 @@ class ArtifactStore:
                 ),
             )
 
-    def append_chat_line(self, project_id: str, session_id: str, line: str) -> Path:
+    def append_chat_line(
+        self,
+        project_id: str,
+        session_id: str,
+        line: str,
+        *,
+        deduplicate: bool = False,
+    ) -> Path:
         """Append one already-serialized chat line under the shared run fence."""
-        with self._session_write_transaction(project_id, session_id):
+        with self._session_write_transaction(project_id, session_id) as conn:
             path = self.project_dir(project_id) / "chat" / f"{session_id}.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
+            previous_size = path.stat().st_size if path.exists() else 0
+            if deduplicate and path.exists():
+                # Only recovery pays for a scan. Stream the whole transcript in
+                # bounded chunks: an old unfinished turn can outlive any tail
+                # window, and the crash may have preceded its delivery marker.
+                incoming = json.loads(line)
+                turn_id = incoming.get("turn_id")
+                if not turn_id:
+                    raise ValueError("Recovery transcript writes require a turn_id.")
+                incomplete_offset: int | None = None
+                with path.open("rb") as reader:
+                    offset = reader.tell()
+                    while raw := reader.readline(1024 * 1024 + 1):
+                        # ChatMessage serializes identity before the content;
+                        # retain that tiny header even for oversized answers.
+                        header = raw.partition(b',"content":')[0]
+                        oversized = len(raw) > 1024 * 1024
+                        while not raw.endswith(b"\n"):
+                            chunk = reader.readline(1024 * 1024 + 1)
+                            if not chunk:
+                                incomplete_offset = offset
+                                break
+                            raw = chunk
+                            oversized = True
+                        if incomplete_offset is not None:
+                            break
+                        try:
+                            existing = json.loads(header + b"}" if oversized else raw)
+                        except (ValueError, UnicodeDecodeError):
+                            existing = None
+                        if (
+                            isinstance(existing, dict)
+                            and existing.get("turn_id") == turn_id
+                            and existing.get("role") == incoming.get("role")
+                        ):
+                            self._update_chat_count(
+                                conn, project_id, session_id, path, previous_size, 0
+                            )
+                            return path
+                        offset = reader.tell()
+                if incomplete_offset is not None:
+                    # An interrupted file write never committed its newline.
+                    # Replace that tail before appending the recovered answer.
+                    with path.open("r+b") as writer:
+                        writer.truncate(incomplete_offset)
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(f"{line}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._update_chat_count(conn, project_id, session_id, path, previous_size, 1)
             return path
+
+    def _update_chat_count(
+        self,
+        conn: sqlite3.Connection,
+        project_id: str,
+        session_id: str,
+        path: Path,
+        previous_size: int,
+        appended: int,
+    ) -> None:
+        row = conn.execute(
+            "SELECT chat_indexed_bytes,chat_message_count FROM sessions "
+            "WHERE project_id=? AND session_id=?",
+            (project_id, session_id),
+        ).fetchone()
+        count = (
+            int(row[1]) + appended
+            if row and int(row[0]) == previous_size
+            else (self._count_chat_messages(project_id, session_id))
+        )
+        conn.execute(
+            "UPDATE sessions SET chat_message_count=?,chat_indexed_bytes=?,updated_at=? "
+            "WHERE project_id=? AND session_id=?",
+            (count, path.stat().st_size, datetime.now(UTC).isoformat(), project_id, session_id),
+        )
 
     def write_session_text(
         self,
@@ -2459,6 +2588,17 @@ class ArtifactStore:
                     status text not null default 'running'
                 );
 
+                create table if not exists chat_executions (
+                    project_id text not null, session_id text not null, turn_id text not null,
+                    payload text not null, status text not null, attempt integer not null default 0,
+                    updated_at text not null, primary key(project_id,session_id,turn_id)
+                );
+                create table if not exists chat_execution_events (
+                    project_id text not null, session_id text not null, turn_id text not null,
+                    seq integer not null, payload text not null,
+                    primary key(project_id,session_id,turn_id,seq)
+                );
+
                 create table if not exists artifacts (
                     artifact_id text not null,
                     artifact_type text not null,
@@ -2631,6 +2771,9 @@ class ArtifactStore:
             self._ensure_column(conn, "sessions", "report_status", "text")
             self._ensure_column(
                 conn, "sessions", "chat_message_count", "integer not null default 0"
+            )
+            self._ensure_column(
+                conn, "sessions", "chat_indexed_bytes", "integer not null default 0"
             )
             self._ensure_column(conn, "sessions", "source_session_id", "text")
             self._ensure_column(conn, "sessions", "code_version", "text")

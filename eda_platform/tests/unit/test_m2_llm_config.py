@@ -581,7 +581,7 @@ def test_an_unlisted_anthropic_model_still_reaches_the_endpoint() -> None:
     )
 
     response = client.tool_call(
-        task="tool_calling_probe",
+        task="provider_capability_test",
         messages=[{"role": "user", "content": "hi"}],
         tools=[],
     )

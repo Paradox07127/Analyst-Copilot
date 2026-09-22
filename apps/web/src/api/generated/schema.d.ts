@@ -1333,6 +1333,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/chat/recoverable-turns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Recoverable Chat Turns
+         * @description Discover interrupted or undelivered answers without executing them.
+         */
+        get: operations["list_recoverable_chat_turns_api_v1_sessions__session_id__chat_recoverable_turns_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/chat/turns/{message_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Chat Turn */
+        post: operations["resume_chat_turn_api_v1_sessions__session_id__chat_turns__message_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/chat/pending-plans": {
         parameters: {
             query?: never;
@@ -2646,6 +2683,8 @@ export interface components {
         ChatMessageView: {
             /** Seq */
             seq: number;
+            /** Turn Id */
+            turn_id?: string | null;
             /** Role */
             role: string;
             /** Content */
@@ -2730,6 +2769,32 @@ export interface components {
              * @default rejected
              */
             status: string;
+        };
+        /** ChatRecoverableTurn */
+        ChatRecoverableTurn: {
+            /** Message Id */
+            message_id: string;
+            /** Question */
+            question: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "interrupted" | "awaiting_delivery" | "blocked";
+            /** Reason */
+            reason?: string | null;
+        };
+        /** ChatRecoverableTurnList */
+        ChatRecoverableTurnList: {
+            /** Session Id */
+            session_id: string;
+            /** Turns */
+            turns?: components["schemas"]["ChatRecoverableTurn"][];
         };
         /** ChatSendRequest */
         ChatSendRequest: {
@@ -5219,6 +5284,21 @@ export interface components {
             /** Events Url */
             events_url: string;
         };
+        /**
+         * JobDomainOutcome
+         * @description Latest persisted exploration result for this job's current attempt.
+         */
+        JobDomainOutcome: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "pause_requested" | "paused" | "stopped";
+            /** Stop Reason */
+            stop_reason?: ("completed" | "budget_exhausted" | "cancelled" | "failed" | "state_witness_changed" | "no_new_information") | null;
+            /** Exploration Id */
+            exploration_id: string;
+        };
         /** JobStatus */
         JobStatus: {
             /** Job Id */
@@ -5246,6 +5326,7 @@ export interface components {
             error_code?: string | null;
             /** Error Message */
             error_message?: string | null;
+            domain_outcome?: components["schemas"]["JobDomainOutcome"] | null;
             /** Events Url */
             events_url: string;
         };
@@ -8071,6 +8152,32 @@ export interface components {
         };
         /** TraceEventRow */
         TraceEventRow: {
+            /** Session Id */
+            session_id?: string | null;
+            /** Turn Id */
+            turn_id?: string | null;
+            /** Execution Id */
+            execution_id?: string | null;
+            /** Parent Execution Id */
+            parent_execution_id?: string | null;
+            /** Attempt Id */
+            attempt_id?: string | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Graph Node */
+            graph_node?: string | null;
+            /** Checkpoint Ns */
+            checkpoint_ns?: string | null;
+            /** Effect Id */
+            effect_id?: string | null;
+            /** Call Id */
+            call_id?: string | null;
+            /** Span Id */
+            span_id?: string | null;
+            /** Parent Span Id */
+            parent_span_id?: string | null;
+            /** Job Generation */
+            job_generation?: number | null;
             /** Event Id */
             event_id: number;
             /** Event Type */
@@ -14523,6 +14630,172 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ChatTurnCancelled"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Remote deployment CSRF policy rejected the request. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_recoverable_chat_turns_api_v1_sessions__session_id__chat_recoverable_turns_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatRecoverableTurnList"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    resume_chat_turn_api_v1_sessions__session_id__chat_turns__message_id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-EDA-Session"?: string | null;
+                /** @description Optional for backward compatibility. When supplied, the key is content-bound and a completed retry replays the original response. */
+                "Idempotency-Key"?: string;
+            };
+            path: {
+                session_id: string;
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatMessageAccepted"];
                 };
             };
             /** @description Bad Request */

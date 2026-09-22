@@ -861,6 +861,19 @@ class TraceService:
             else None
         )
         return TraceEventRow(
+            session_id=event.session_id,
+            turn_id=event.turn_id,
+            execution_id=event.execution_id,
+            parent_execution_id=event.parent_execution_id,
+            attempt_id=event.attempt_id,
+            job_id=event.job_id,
+            graph_node=event.graph_node,
+            checkpoint_ns=event.checkpoint_ns,
+            effect_id=event.effect_id,
+            call_id=event.call_id,
+            span_id=event.span_id,
+            parent_span_id=event.parent_span_id,
+            job_generation=event.job_generation,
             event_id=event_id,
             event_type=event.event_type,
             name=event.name,

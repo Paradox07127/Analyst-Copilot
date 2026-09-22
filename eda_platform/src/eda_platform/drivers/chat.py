@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import tempfile
+import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import duckdb
 from pydantic import ValidationError
 
+from eda_platform.agents.chat_graph import (
+    chat_stage,
+    execute_chat_stage,
+    freeze_chat_artifacts,
+    run_approved_chat_graph,
+    run_structured_chat_graph,
+)
 from eda_platform.agents.chat_router import route_intent
 from eda_platform.agents.code_agent import CodeAgent
 from eda_platform.agents.data_tools import (
@@ -16,15 +25,25 @@ from eda_platform.agents.data_tools import (
     OpenAnalysisArguments,
     build_data_tools,
 )
+from eda_platform.agents.model_workflow import ModelWorkflow, WorkflowModelClient
 from eda_platform.agents.planner import build_plan, guard_plan_references
 from eda_platform.agents.runtime import AgentRuntime, AgentToolResult
+from eda_platform.agents.tool_context import current_execution_context
 from eda_platform.core.budget import Budget, BudgetExceeded
-from eda_platform.core.ids import make_artifact_id
+from eda_platform.core.cancellation import CancellationContext, CancellationError
+from eda_platform.core.graph_execution import (
+    GraphEffectUncertain,
+    GraphIdentityError,
+    GraphPersistence,
+)
+from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.llm import (
+    CancellableLLMClient,
     LLMResultMetadata,
     StructuredLLM,
     ToolCallingLLM,
     ToolCallingUnsupportedError,
+    llm_execution_fingerprint,
 )
 from eda_platform.core.method_skills import method_skill_guidance
 from eda_platform.core.permissions import (
@@ -47,7 +66,7 @@ from eda_platform.core.sandbox_broker import SandboxBroker
 from eda_platform.core.semantic import SemanticSeeds
 from eda_platform.core.semantic_resources import load_semantic_seeds_safe
 from eda_platform.core.store import ArtifactStore
-from eda_platform.core.tool_calling_probe import tool_calling_readiness
+from eda_platform.core.tool_calling_routing import tool_calling_readiness
 from eda_platform.core.tool_guard import ToolGuardError
 from eda_platform.schemas.artifacts import (
     Artifact,
@@ -66,6 +85,29 @@ from eda_platform.tools.pii import tag_pii_columns
 from eda_platform.tools.sql_result_validator import validate_sql_result
 from eda_platform.tools.sql_runner import SqlCatalog, build_catalog, run_sql
 from eda_platform.tools.value_profile import top_n_values
+
+
+class _ChatCancellation(CancellationContext):
+    def __init__(self, check: Callable[[], bool] | None) -> None:
+        super().__init__()
+        self.check = check
+
+    def checkpoint(self) -> None:
+        if self.check is not None and self.check():
+            self.request_cancel("The chat turn was stopped.")
+        super().checkpoint()
+
+
+def _check_chat_cancel(check: Callable[[], bool] | None) -> None:
+    _ChatCancellation(check).checkpoint()
+
+
+def _cancelled_chat(message: str) -> ChatTurnResult:
+    return ChatTurnResult(
+        intent=Intent(kind="new_analysis", confidence=1.0, raw_message=message),
+        status="cancelled",
+        message="Stopped at your request.",
+    )
 
 
 def run_chat_turn(
@@ -87,6 +129,8 @@ def run_chat_turn(
     code_budget: Budget | None = None,
     payload_policy: PayloadPolicy = "schema+aggregates",
     cancel_check: Callable[[], bool] | None = None,
+    turn_id: str | None = None,
+    resume_mode: Literal["tool", "structured"] | None = None,
 ) -> ChatTurnResult:
     catalog = build_catalog(datasets)
 
@@ -139,48 +183,107 @@ def run_chat_turn(
                 session_id,
                 approved_started,
             )
-        plan_artifact = _plan_artifact(
-            approved_plan,
-            message=message,
-            project_id=project_id,
-            session_id=session_id,
-            parents=[artifact.id for artifact in artifacts or ()],
-        )
-        if store is not None:
-            store.save_artifact(plan_artifact)
-        return _execute_plan(
-            approved_plan,
-            intent=intent,
-            plan_artifact=plan_artifact,
+        actual_turn_id = turn_id or uuid.uuid4().hex
+
+        def execute_approved() -> ChatTurnResult:
+            _check_chat_cancel(cancel_check)
+            plan_artifact = _plan_artifact(
+                approved_plan,
+                message=message,
+                project_id=project_id,
+                session_id=session_id,
+                parents=[artifact.id for artifact in artifacts or ()],
+            )
+            if store is not None:
+                try:
+                    existing = store.get_artifact(
+                        plan_artifact.id, project_id=project_id, session_id=session_id
+                    )
+                except (KeyError, FileNotFoundError):
+                    existing = None
+                if existing is not None:
+                    if existing.payload != plan_artifact.payload:
+                        raise GraphIdentityError(
+                            "Approved plan evidence changed; start a new turn."
+                        )
+                    plan_artifact = existing
+                else:
+                    store.save_artifact(plan_artifact)
+            return _execute_plan(
+                approved_plan,
+                intent=intent,
+                plan_artifact=plan_artifact,
+                catalog=catalog,
+                project_id=project_id,
+                session_id=session_id,
+                store=store,
+                preview_rows=preview_rows,
+                timeout_seconds=timeout_seconds,
+            )
+
+        try:
+            return run_approved_chat_graph(
+                execute_approved,
+                store=store,
+                persistence=GraphPersistence(
+                    store.session_dir(project_id, session_id), "chat-approved:" + actual_turn_id
+                )
+                if store
+                else None,
+                inputs={
+                    "plan": approved_plan.model_dump(mode="json"),
+                    "action_hash": approved_action_hash,
+                    "datasets": [d.record.content_hash for d in datasets],
+                },
+                message=message,
+                turn_id=actual_turn_id,
+            )
+        except CancellationError:
+            return _cancelled_chat(message)
+
+    if resume_mode == "tool":
+        return _run_agentic_chat_turn(
+            message,
+            datasets=datasets,
             catalog=catalog,
             project_id=project_id,
             session_id=session_id,
+            llm=cast(ToolCallingLLM, llm),
+            artifacts=list(artifacts or ()),
+            store=store,
+            code_backend=code_backend,
+            code_limits=code_limits,
+            code_budget=code_budget,
+            payload_policy=payload_policy,
+            timeout_seconds=timeout_seconds,
+            cancel_check=cancel_check,
+            turn_id=turn_id,
+        )
+
+    if resume_mode == "structured":
+        return _run_structured_chat_turn(
+            message,
+            datasets=datasets,
+            catalog=catalog,
+            project_id=project_id,
+            session_id=session_id,
+            llm=llm,
+            value_context=value_context,
+            artifacts=artifacts,
             store=store,
             preview_rows=preview_rows,
             timeout_seconds=timeout_seconds,
+            code_backend=code_backend,
+            code_limits=code_limits,
+            code_budget=code_budget,
+            payload_policy=payload_policy,
+            turn_id=turn_id,
+            cancel_check=cancel_check,
         )
 
-    # The legacy planner remains the compatibility path for deterministic test
-    # clients and older provider adapters. Live providers now enter the bounded
-    # tool loop, where they can inspect evidence, execute several safe queries
-    # and choose a saved skill instead of being locked into one intent branch.
-    # Probed before the turn, not discovered by failing inside it: the loop is
-    # where the expensive calls are.
+    # Use known capabilities and let the first durable request test unknown
+    # providers. A separate probe would spend a call before graph admission.
     readiness = tool_calling_readiness(cast(Any, llm))
-    if readiness.source in {"probe", "cached"}:
-        _append_trace(
-            store,
-            project_id,
-            session_id,
-            event_type="tool_calling_probe",
-            name="chat_turn",
-            started_at=datetime.now(UTC),
-            summary={
-                "usable": readiness.usable,
-                "source": readiness.source,
-                "detail": readiness.detail,
-            },
-        )
     if readiness.usable:
         try:
             return _run_agentic_chat_turn(
@@ -198,10 +301,11 @@ def run_chat_turn(
                 payload_policy=payload_policy,
                 timeout_seconds=timeout_seconds,
                 cancel_check=cancel_check,
+                turn_id=turn_id,
             )
         except ToolCallingUnsupportedError as exc:
             # The provider itself refused the tools payload, so falling through
-            # to the legacy planner answers the question instead of failing it.
+            # to the structured workflow preserves the supported analysis capabilities.
             _append_trace(
                 store,
                 project_id,
@@ -212,164 +316,285 @@ def run_chat_turn(
                 summary={"reason": str(exc)[:500]},
             )
 
-    route_started = datetime.now(UTC)
-    intent = route_intent(message, llm=llm)
-    _append_trace(
-        store,
-        project_id,
-        session_id,
-        event_type="agent_intent",
-        name="m3_route_intent",
-        started_at=route_started,
-        summary={
-            "intent": intent.kind,
-            "confidence": intent.confidence,
-            "params": intent.params,
-        },
-    )
-    _append_llm_usage(store, project_id, session_id, "m3_route_intent", llm)
-
-    if intent.kind == "meta_help":
-        return ChatTurnResult(
-            intent=intent,
-            status="answer",
-            message=(
-                "Ask about loaded datasets, existing report artifacts, or request a new "
-                "read-only SQL analysis."
-            ),
-        )
-    if intent.kind == "out_of_scope":
-        return ChatTurnResult(
-            intent=intent,
-            status="refused",
-            message="This chat is scoped to the loaded EDA datasets and artifacts.",
-        )
-    if intent.kind == "ask_from_artifacts":
-        answer, used = _artifact_answer(message, artifacts or ())
-        return ChatTurnResult(
-            intent=intent,
-            status="answer",
-            message=answer,
-            artifacts=list(used),
-        )
-    if intent.kind == "refine_analysis":
-        # Only non-tool-calling providers reach this branch; tool-capable
-        # models handle refinements inside the agent loop above.
-        return ChatTurnResult(
-            intent=intent,
-            status="answer",
-            message=(
-                "The model configured for this session cannot revise an earlier "
-                "analysis mid-conversation. Ask again as a complete, standalone "
-                "question (including the change you want), or run it as a new "
-                "analysis from the Questions page."
-            ),
-        )
-    if intent.kind == "open_analysis":
-        return _execute_open_analysis(
-            message,
-            intent=intent,
-            datasets=datasets,
-            parent_artifacts=artifacts or (),
-            project_id=project_id,
-            session_id=session_id,
-            llm=llm,
-            store=store,
-            backend=code_backend,
-            limits=code_limits,
-            budget=code_budget,
-            timeout_seconds=timeout_seconds,
-        )
-
-    catalog_columns = _catalog_columns(datasets, catalog.relations)
-    effective_value_context: dict[str, list[str]] = {}
-    if payload_policy != "schema_only":
-        effective_value_context = (
-            value_context
-            if value_context is not None
-            else build_value_context(
-                datasets,
-                artifacts or (),
-                catalog.relations,
-                project_id=project_id,
-                session_id=session_id,
-            )
-        )
-    plan_started = datetime.now(UTC)
-    try:
-        plan = build_plan(
-            message,
-            llm=llm,
-            catalog_columns=catalog_columns,
-            value_context=effective_value_context,
-            semantic_seeds=_load_semantic_seed_context(store, project_id),
-            engine=catalog.engine,
-            on_guard_rejected=lambda error: _append_tool_guard_rejection(
-                store,
-                project_id,
-                session_id,
-                name="m3_build_plan",
-                error=error,
-                started_at=plan_started,
-            ),
-        )
-    except BudgetExceeded:
-        raise
-    except (RuntimeError, ValidationError, ValueError) as exc:
-        # build_plan raises ValueError (incl. SqlBindingError) once its own retry is
-        # exhausted; RuntimeError is an LLM transport failure; ValidationError is a
-        # malformed structured response. None of these may crash the caller.
-        return _planning_failure(message, intent, exc, store, project_id, session_id, plan_started)
-
-    plan_artifact = _plan_artifact(
-        plan,
-        message=message,
-        project_id=project_id,
-        session_id=session_id,
-        parents=[artifact.id for artifact in artifacts or ()],
-    )
-    if store is not None:
-        store.save_artifact(plan_artifact)
-    _append_trace(
-        store,
-        project_id,
-        session_id,
-        event_type="agent_plan",
-        name="m3_build_plan",
-        started_at=plan_started,
-        summary={
-            "method": plan.method,
-            "dataset_names": plan.dataset_names,
-            "columns": plan.columns,
-            "needs_approval": plan.needs_approval,
-            "estimated_scan": plan.estimated_scan,
-            "sql": plan.sql,
-        },
-    )
-    _append_llm_usage(store, project_id, session_id, "m3_build_plan", llm)
-    if plan.needs_approval:
-        approval = classify_action(analysis_plan_action(plan))
-        return ChatTurnResult(
-            intent=intent,
-            status="awaiting_approval",
-            plan=plan,
-            artifacts=[plan_artifact],
-            sql=plan.sql,
-            pending_action=pending_action_payload(approval),
-            message="This analysis plan requires approval before execution.",
-        )
-
-    return _execute_plan(
-        plan,
-        intent=intent,
-        plan_artifact=plan_artifact,
+    return _run_structured_chat_turn(
+        message,
+        datasets=datasets,
         catalog=catalog,
         project_id=project_id,
         session_id=session_id,
+        llm=llm,
+        value_context=value_context,
+        artifacts=artifacts,
         store=store,
         preview_rows=preview_rows,
         timeout_seconds=timeout_seconds,
+        code_backend=code_backend,
+        code_limits=code_limits,
+        code_budget=code_budget,
+        payload_policy=payload_policy,
+        turn_id=turn_id,
+        cancel_check=cancel_check,
     )
+
+
+def _run_structured_chat_turn(
+    message: str,
+    *,
+    datasets: Sequence[LoadedDataset],
+    catalog: SqlCatalog,
+    project_id: str,
+    session_id: str,
+    llm: StructuredLLM,
+    value_context: dict[str, list[str]] | None,
+    artifacts: Sequence[Artifact] | None,
+    store: ArtifactStore | None,
+    preview_rows: int,
+    timeout_seconds: float,
+    code_backend: ExecutionBackend | None,
+    code_limits: SandboxLimits | None,
+    code_budget: Budget | None,
+    payload_policy: PayloadPolicy,
+    turn_id: str | None,
+    cancel_check: Callable[[], bool] | None,
+) -> ChatTurnResult:
+    actual_turn_id = turn_id or uuid.uuid4().hex
+    execution_id = "chat-structured:" + actual_turn_id
+    semantic_seeds = _load_semantic_seed_context(store, project_id)
+    provider_llm = cast(
+        StructuredLLM, CancellableLLMClient(cast(Any, llm), _ChatCancellation(cancel_check))
+    )
+    initial_artifacts = list(artifacts or ())
+
+    def run(workflow: ModelWorkflow, model_client: WorkflowModelClient) -> ChatTurnResult:
+        llm = model_client
+        artifacts = freeze_chat_artifacts(workflow, initial_artifacts, store)
+        route_started = datetime.now(UTC)
+        intent = route_intent(message, llm=llm)
+        intent.raw_message = message
+
+        def record_route() -> dict[str, Any]:
+            _append_trace(
+                store,
+                project_id,
+                session_id,
+                event_type="agent_intent",
+                name="m3_route_intent",
+                started_at=route_started,
+                summary={
+                    "intent": intent.kind,
+                    "confidence": intent.confidence,
+                    "params": intent.params,
+                },
+            )
+            _append_llm_usage(store, project_id, session_id, "m3_route_intent", llm)
+            return {}
+
+        chat_stage("chat_route_trace", record_route)
+
+        if intent.kind == "meta_help":
+            return ChatTurnResult(
+                intent=intent,
+                status="answer",
+                message=(
+                    "Ask about loaded datasets, existing report artifacts, or request a new "
+                    "read-only SQL analysis."
+                ),
+            )
+        if intent.kind == "out_of_scope":
+            return ChatTurnResult(
+                intent=intent,
+                status="refused",
+                message="This chat is scoped to the loaded EDA datasets and artifacts.",
+            )
+        if intent.kind == "ask_from_artifacts":
+            answer, used = _artifact_answer(message, artifacts or ())
+            return ChatTurnResult(
+                intent=intent,
+                status="answer",
+                message=answer,
+                artifacts=list(used),
+            )
+        if intent.kind == "refine_analysis":
+            # Only non-tool-calling providers reach this branch; tool-capable
+            # models handle refinements inside the agent loop above.
+            return ChatTurnResult(
+                intent=intent,
+                status="answer",
+                message=(
+                    "The model configured for this session cannot revise an earlier "
+                    "analysis mid-conversation. Ask again as a complete, standalone "
+                    "question (including the change you want), or run it as a new "
+                    "analysis from the Questions page."
+                ),
+            )
+        if intent.kind == "open_analysis":
+            return execute_chat_stage(
+                workflow,
+                name="chat_open_analysis",
+                execution_id=execution_id,
+                request={"message": message},
+                run=lambda: _execute_open_analysis(
+                    message,
+                    intent=intent,
+                    datasets=datasets,
+                    parent_artifacts=artifacts or (),
+                    project_id=project_id,
+                    session_id=session_id,
+                    llm=provider_llm,
+                    store=store,
+                    backend=code_backend,
+                    limits=code_limits,
+                    budget=code_budget,
+                    timeout_seconds=timeout_seconds,
+                ),
+            )
+
+        catalog_columns = _catalog_columns(datasets, catalog.relations)
+        effective_value_context: dict[str, list[str]] = {}
+        if payload_policy != "schema_only":
+            effective_value_context = (
+                value_context
+                if value_context is not None
+                else build_value_context(
+                    datasets,
+                    artifacts or (),
+                    catalog.relations,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
+            )
+        plan_started = datetime.now(UTC)
+        plan_usage_start = len(llm.usages)
+
+        def record_guard(error: ToolGuardError) -> None:
+            def emit() -> dict[str, Any]:
+                _append_tool_guard_rejection(
+                    store,
+                    project_id,
+                    session_id,
+                    name="m3_build_plan",
+                    error=error,
+                    started_at=plan_started,
+                )
+                return {}
+
+            chat_stage("chat_plan_guard", emit)
+
+        try:
+            plan = build_plan(
+                message,
+                llm=llm,
+                catalog_columns=catalog_columns,
+                value_context=effective_value_context,
+                semantic_seeds=semantic_seeds,
+                engine=catalog.engine,
+                on_guard_rejected=record_guard,
+            )
+        except (BudgetExceeded, GraphEffectUncertain, GraphIdentityError, CancellationError):
+            raise
+        except (RuntimeError, ValidationError, ValueError) as exc:
+            # build_plan raises ValueError (incl. SqlBindingError) once its own retry is
+            # exhausted; RuntimeError is an LLM transport failure; ValidationError is a
+            # malformed structured response. None of these may crash the caller.
+            return _planning_failure(
+                message, intent, exc, store, project_id, session_id, plan_started
+            )
+
+        def record_plan() -> dict[str, Any]:
+            plan_artifact = _plan_artifact(
+                plan,
+                message=message,
+                project_id=project_id,
+                session_id=session_id,
+                parents=[artifact.id for artifact in artifacts or ()],
+            )
+            if store is not None:
+                store.save_artifact(plan_artifact)
+            _append_trace(
+                store,
+                project_id,
+                session_id,
+                event_type="agent_plan",
+                name="m3_build_plan",
+                started_at=plan_started,
+                summary={
+                    "method": plan.method,
+                    "dataset_names": plan.dataset_names,
+                    "columns": plan.columns,
+                    "needs_approval": plan.needs_approval,
+                    "estimated_scan": plan.estimated_scan,
+                    "sql": plan.sql,
+                },
+            )
+            for usage in llm.usages[plan_usage_start:]:
+                _append_usage_metadata(store, project_id, session_id, "m3_build_plan", usage)
+            return plan_artifact.model_dump(mode="json")
+
+        _check_chat_cancel(cancel_check)
+        plan_artifact = Artifact.model_validate(chat_stage("chat_plan", record_plan))
+        if plan.needs_approval:
+            approval = classify_action(analysis_plan_action(plan))
+            return ChatTurnResult(
+                intent=intent,
+                status="awaiting_approval",
+                plan=plan,
+                artifacts=[plan_artifact],
+                sql=plan.sql,
+                pending_action=pending_action_payload(approval),
+                message="This analysis plan requires approval before execution.",
+            )
+
+        return execute_chat_stage(
+            workflow,
+            name="chat_execute_plan",
+            execution_id=execution_id,
+            request={"plan": plan.model_dump(mode="json")},
+            run=lambda: _execute_plan(
+                plan,
+                intent=intent,
+                plan_artifact=plan_artifact,
+                catalog=catalog,
+                project_id=project_id,
+                session_id=session_id,
+                store=store,
+                preview_rows=preview_rows,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+
+    try:
+        return run_structured_chat_graph(
+            run,
+            llm=provider_llm,
+            store=store,
+            persistence=(
+                GraphPersistence(store.session_dir(project_id, session_id), execution_id)
+                if store is not None
+                else None
+            ),
+            inputs={
+                "message": message,
+                "turn_id": actual_turn_id,
+                "project_id": project_id,
+                "session_id": session_id,
+                "datasets": [
+                    dataset.record.model_dump(mode="json", exclude={"created_at"})
+                    for dataset in datasets
+                ],
+                "model": llm_execution_fingerprint(cast(Any, provider_llm)),
+                "value_context": value_context,
+                "semantic_seeds": semantic_seeds,
+                "payload_policy": payload_policy,
+                "preview_rows": preview_rows,
+                "timeout_seconds": timeout_seconds,
+                "code_limits": asdict(code_limits) if code_limits else None,
+                "code_backend": type(code_backend).__qualname__ if code_backend else None,
+            },
+            message=message,
+            turn_id=actual_turn_id,
+        )
+    except CancellationError:
+        return _cancelled_chat(message)
 
 
 def _run_agentic_chat_turn(
@@ -388,6 +613,7 @@ def _run_agentic_chat_turn(
     payload_policy: PayloadPolicy,
     timeout_seconds: float,
     cancel_check: Callable[[], bool] | None = None,
+    turn_id: str | None = None,
 ) -> ChatTurnResult:
     """Run the second-generation chat agent over typed local capabilities.
 
@@ -441,6 +667,23 @@ def _run_agentic_chat_turn(
         tools=build_data_tools(context),
         trace=emit,
         cancel_check=cancel_check,
+        artifact_store=store,
+        restore_artifacts=context.restore_artifacts,
+        persistence=(
+            GraphPersistence(
+                store.session_dir(project_id, session_id),
+                "chat:" + (turn_id or uuid.uuid4().hex),
+                stable_hash(
+                    {
+                        "data": [d.record.content_hash for d in datasets],
+                        "payload_policy": payload_policy,
+                    },
+                    length=32,
+                ),
+            )
+            if store is not None
+            else None
+        ),
     )
     try:
         result = runtime.run(
@@ -449,8 +692,10 @@ def _run_agentic_chat_turn(
         )
     except ToolCallingUnsupportedError:
         # A capability fact, not a failed turn: the caller degrades to the
-        # legacy planner. The blanket handler below would otherwise convert it
+        # structured workflow. The blanket handler below would otherwise convert it
         # into an error result and the turn would be lost rather than answered.
+        raise
+    except (GraphIdentityError, GraphEffectUncertain):
         raise
     except Exception as exc:
         _append_trace(
@@ -724,6 +969,7 @@ def _execute_open_analysis(
     mounts, evidence_manifest = _code_mounts_and_manifest(datasets)
     actual_limits = limits or SandboxLimits(timeout_seconds=min(max(timeout_seconds, 1.0), 10.0))
     actual_budget = budget or Budget(max_seconds=max(actual_limits.timeout_seconds * 3, 1.0))
+    tool_execution = current_execution_context()
     agent = CodeAgent(
         llm=cast(Any, llm),
         backend=actual_backend,
@@ -731,6 +977,14 @@ def _execute_open_analysis(
         mounts=mounts,
         max_repairs=2,
         require_stdout_json=True,
+        persistence=(
+            GraphPersistence(
+                store.session_dir(project_id, session_id),
+                "code:" + (tool_execution.logical_step_id if tool_execution else uuid.uuid4().hex),
+            )
+            if store is not None
+            else None
+        ),
         on_event=lambda event: _append_code_attempt_trace(
             store,
             project_id,
@@ -1226,9 +1480,6 @@ def build_value_context(
     return context
 
 
-# Backwards-compatible private alias (internal callers/tests may reference it).
-_build_value_context = build_value_context
-
 
 def _semantic_seed_context(
     seeds: SemanticSeeds,
@@ -1440,6 +1691,18 @@ def _append_llm_usage(
         return
     usage = cast(LLMResultMetadata | None, last_usage())
     if usage is None:
+        return
+    _append_usage_metadata(store, project_id, session_id, task, usage)
+
+
+def _append_usage_metadata(
+    store: ArtifactStore | None,
+    project_id: str,
+    session_id: str,
+    task: str,
+    usage: LLMResultMetadata,
+) -> None:
+    if store is None:
         return
     store.append_trace(
         project_id,

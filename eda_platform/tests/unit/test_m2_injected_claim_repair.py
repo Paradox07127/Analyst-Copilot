@@ -24,10 +24,12 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
+from eda_platform.agents.report_graph import ReportWorkflow, run_report_workflow
 from eda_platform.agents.reporting import _generate_with_repair
 from eda_platform.schemas.artifacts import EvidenceRef
 from eda_platform.schemas.questions import QuestionExecutionResult, QuestionFinding
 from eda_platform.schemas.reports import (
+    ReportAudit,
     ReportBundle,
     ReportClaim,
     ReportPlanClaim,
@@ -155,18 +157,27 @@ class _RecordingLLM:
 
 
 def _run(llm: _RecordingLLM, question_results: list[QuestionExecutionResult]):
-    return _generate_with_repair(
-        _pack(),
-        project_id="p",
-        session_id="r",
-        business_context="Freight analysis",
-        llm=llm,
-        question_results=question_results,
-        sql_results={},
-        llm_calls=[],
-        llm_events=[],
-        validation_events=[],
-    )
+    def run(workflow: ReportWorkflow) -> dict[str, Any]:
+        bundle, audit, fallback = _generate_with_repair(
+            _pack(),
+            project_id="p",
+            session_id="r",
+            business_context="Freight analysis",
+            llm=llm,
+            question_results=question_results,
+            sql_results={},
+            llm_calls=[],
+            llm_events=[],
+            validation_events=[],
+            workflow=workflow,
+        )
+        return {"bundle": bundle.model_dump(mode="json"),
+                "audit": audit.model_dump(mode="json"), "fallback": fallback}
+
+    saved = run_report_workflow(run, persistence=None, inputs={})
+    return (ReportBundle.model_validate(saved["bundle"]),
+            ReportAudit.model_validate(saved["audit"]), saved["fallback"])
+
 
 
 def _question_results() -> list[QuestionExecutionResult]:

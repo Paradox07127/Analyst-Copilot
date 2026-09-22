@@ -5,8 +5,8 @@ import threading
 from typing import ClassVar
 
 import pytest
+from langgraph.cache.sqlite import SqliteCache
 
-import eda_platform.core.kernel as kernel_module
 from eda_platform.core.budget import BudgetExceeded, SessionBudgetExceeded, SessionBudgetPolicy
 from eda_platform.core.kernel import SessionContext, StepContractError, run_pipeline
 from eda_platform.core.store import ArtifactStore
@@ -217,10 +217,10 @@ def test_failed_step_marks_run_and_records_trace(tmp_path) -> None:
 @pytest.mark.parametrize(
     "fault_point",
     [
-        "checkpoint_read",
+        "cache_read",
         "step_started_trace",
         "artifact_save",
-        "checkpoint_write",
+        "cache_write",
         "step_completed_trace",
     ],
 )
@@ -233,11 +233,11 @@ def test_complete_step_boundary_records_failure(
     ctx = SessionContext(project_id="project_demo", session_id=f"run_{fault_point}", store=store)
     expected = OSError(f"{fault_point} unavailable")
 
-    if fault_point == "checkpoint_read":
+    if fault_point == "cache_read":
         monkeypatch.setattr(
-            kernel_module,
-            "_read_checkpoint",
-            lambda _path: (_ for _ in ()).throw(expected),
+            SqliteCache,
+            "get",
+            lambda _self, _keys: (_ for _ in ()).throw(expected),
         )
     elif fault_point == "artifact_save":
         monkeypatch.setattr(
@@ -245,17 +245,15 @@ def test_complete_step_boundary_records_failure(
             "save_artifact",
             lambda _artifact: (_ for _ in ()).throw(expected),
         )
-    elif fault_point == "checkpoint_write":
+    elif fault_point == "cache_write":
         monkeypatch.setattr(
-            kernel_module,
-            "_write_checkpoint",
+            SqliteCache,
+            "set",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(expected),
         )
     else:
         original_emit = ctx.emit_trace
-        target_type = (
-            "step_started" if fault_point == "step_started_trace" else "step_completed"
-        )
+        target_type = "step_started" if fault_point == "step_started_trace" else "step_completed"
 
         def fail_selected_trace(event) -> None:
             if event.event_type == target_type:

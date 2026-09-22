@@ -19,7 +19,7 @@ from eda_platform.schemas.exploration_budget import (
     ExplorationBudgetPolicy,
 )
 
-EXPLORATION_JOURNAL_SCHEMA_VERSION = 1
+EXPLORATION_JOURNAL_SCHEMA_VERSION = 2
 
 
 class InsightFamily(StrEnum):
@@ -163,7 +163,7 @@ class ToolCallStartedEvent(ExplorationEventBase):
     event_type: Literal["tool_call_started"] = "tool_call_started"
     logical_step_id: str = Field(min_length=1)
     input_fingerprint: str = Field(min_length=1)
-    tool_kind: str = Field(default="legacy_unknown", min_length=1)
+    tool_kind: str = Field(min_length=1)
     tool_name: str | None = Field(default=None, min_length=1)
     projected_rows_scanned: int = Field(default=0, ge=0)
     projected_result_cells: int = Field(default=0, ge=0)
@@ -214,9 +214,7 @@ class RoundSettledEvent(ExplorationEventBase):
     # round. One such round is a gap; a streak of them is exhaustion.
     frontier_empty: bool = False
     # Adjudicated (new/reinforced/refuted) insight transitions this round.
-    # None on pre-plan-B journals; treated as movement so legacy runs never
-    # soft-stop retroactively.
-    adjudicated_transitions: int | None = Field(default=None, ge=0)
+    adjudicated_transitions: int = Field(default=0, ge=0)
     # Observation only, no rule reads these yet. luna seed 8 kept adjudicating
     # for eight rounds after finding every planted structure, so "did anything
     # adjudicate" is a weak value signal. Raw counts are recorded (not a ratio)
@@ -308,8 +306,8 @@ class PendingToolStep(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    tool_kind: str | None = None
-    input_fingerprint: str | None = None
+    tool_kind: str = Field(min_length=1)
+    input_fingerprint: str = Field(min_length=1)
     projected_rows_scanned: int = Field(ge=0, default=0)
     projected_result_cells: int = Field(ge=0, default=0)
     prepared_receipt_id: str | None = None
@@ -323,7 +321,9 @@ class PendingToolStep(BaseModel):
 
 
 class ExplorationLoopState(BaseModel):
-    """Rebuildable state derived exclusively from a complete journal prefix."""
+    """Rebuildable domain facts derived from the current journal contract."""
+
+    model_config = ConfigDict(extra="forbid")
 
     schema_version: int = EXPLORATION_JOURNAL_SCHEMA_VERSION
     exploration_id: str = Field(min_length=1)
@@ -377,19 +377,6 @@ class ExplorationLoopState(BaseModel):
     # call_id -> bound logical step (only calls that declared a step_id).
     pending_call_steps: dict[str, str] = Field(default_factory=dict)
 
-    # Legacy single-slot fields. They stay in the schema so old snapshots load,
-    # but the reducer keeps them at their defaults forever; a non-default value
-    # is migrated into the multi-slot fields by _migrate_legacy_pending.
-    pending_call_id: str | None = None
-    pending_call_step_id: str | None = None
-    pending_logical_step_id: str | None = None
-    prepared_receipt_id: str | None = None
-    prepared_result_digest: str | None = None
-    pending_tool_kind: str | None = None
-    pending_tool_input_fingerprint: str | None = None
-    pending_projected_rows_scanned: int = Field(ge=0, default=0)
-    pending_projected_result_cells: int = Field(ge=0, default=0)
-
     completed_step_ids: list[str] = Field(default_factory=list)
     completed_probe_fingerprints: list[str] = Field(default_factory=list)
     uncertain_call_ids: list[str] = Field(default_factory=list)
@@ -405,54 +392,10 @@ class ExplorationLoopState(BaseModel):
 
     last_seq: int = Field(ge=0)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_legacy_pending(cls, data: object) -> object:
-        """Map an old single-slot snapshot (scalar pending fields) into one
-        multi-slot entry each; new states always carry the scalars as None."""
-        if not isinstance(data, dict):
-            return data
-        legacy_call = data.get("pending_call_id")
-        legacy_step = data.get("pending_logical_step_id")
-        if legacy_call is None and legacy_step is None:
-            return data
-        data = dict(data)
-        if legacy_call is not None:
-            call_ids = tuple(data.get("pending_call_ids") or ())
-            if legacy_call not in call_ids:
-                data["pending_call_ids"] = (*call_ids, legacy_call)
-                bound_step = data.get("pending_call_step_id")
-                if bound_step is not None:
-                    call_steps = dict(data.get("pending_call_steps") or {})
-                    call_steps[legacy_call] = bound_step
-                    data["pending_call_steps"] = call_steps
-            data["pending_call_id"] = None
-            data["pending_call_step_id"] = None
-        if legacy_step is not None:
-            slots = dict(data.get("pending_tool_steps") or {})
-            if legacy_step not in slots:
-                slots[legacy_step] = {
-                    "tool_kind": data.get("pending_tool_kind"),
-                    "input_fingerprint": data.get("pending_tool_input_fingerprint"),
-                    "projected_rows_scanned": data.get("pending_projected_rows_scanned")
-                    or 0,
-                    "projected_result_cells": data.get("pending_projected_result_cells")
-                    or 0,
-                    "prepared_receipt_id": data.get("prepared_receipt_id"),
-                    "prepared_result_digest": data.get("prepared_result_digest"),
-                }
-                data["pending_tool_steps"] = slots
-            data["pending_logical_step_id"] = None
-            data["pending_tool_kind"] = None
-            data["pending_tool_input_fingerprint"] = None
-            data["pending_projected_rows_scanned"] = 0
-            data["pending_projected_result_cells"] = 0
-            data["prepared_receipt_id"] = None
-            data["prepared_result_digest"] = None
-        return data
-
     @model_validator(mode="after")
     def _derived_values_are_consistent(self) -> ExplorationLoopState:
+        if self.schema_version != EXPLORATION_JOURNAL_SCHEMA_VERSION:
+            raise ValueError("Unsupported exploration snapshot schema version.")
         if len(self.completed_step_ids) != len(set(self.completed_step_ids)):
             raise ValueError("completed_step_ids must be unique.")
         if len(self.pending_call_ids) != len(set(self.pending_call_ids)):
@@ -461,8 +404,6 @@ class ExplorationLoopState(BaseModel):
             raise ValueError("pending_call_steps keys must be pending call ids.")
         if set(self.pending_tool_steps) & set(self.completed_step_ids):
             raise ValueError("a pending tool step cannot already be completed.")
-        if self.pending_call_step_id is not None and self.pending_call_id is None:
-            raise ValueError("a pending call step requires a pending call.")
         if len(self.completed_probe_fingerprints) != len(
             set(self.completed_probe_fingerprints)
         ):

@@ -1,9 +1,8 @@
 """Multi-slot pending state: interleaved tool/LLM sessions, in-flight budget
-admission, crash recovery over every slot, and legacy snapshot compatibility."""
+admission, crash recovery over every slot, and strict snapshot contracts."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -32,6 +31,8 @@ LEGACY_SCALAR_FIELDS = (
     "prepared_result_digest",
     "pending_tool_kind",
     "pending_tool_input_fingerprint",
+    "pending_projected_rows_scanned",
+    "pending_projected_result_cells",
 )
 MULTI_SLOT_FIELDS = ("pending_tool_steps", "pending_call_ids", "pending_call_steps")
 
@@ -322,79 +323,41 @@ def test_abort_stop_marks_all_pending_calls_uncertain_and_charges_all_slots(
     assert state.pending_call_ids == ()
 
 
-# ----------------------------------------------------- legacy compatibility
+# ----------------------------------------------------- current snapshot contract
 
 
-def test_new_reducer_always_keeps_legacy_scalar_fields_none(tmp_path: Path) -> None:
-    journal = _journal(tmp_path)
-    journal.append_new("round_started", round_index=0)
-    journal.append_new("llm_call_started", call_id="call-a")
-    state = _start_tool(journal, "step-a")
-    for name in LEGACY_SCALAR_FIELDS:
-        assert getattr(state, name) is None, name
-    assert state.pending_projected_rows_scanned == 0
-    assert state.pending_projected_result_cells == 0
-
-
-def test_old_root_snapshot_without_multislot_fields_equals_fresh_replay(
-    tmp_path: Path,
-) -> None:
-    """An old (single-slot) reducer's terminal snapshot has legacy scalars at
-    None and no multi-slot keys at all. Reloading it must compare equal to a
-    fresh rebuild by the new reducer."""
-    journal = _journal(tmp_path)
-    journal.append_new("round_started", round_index=0)
-    journal.append_new("llm_call_started", call_id="call-a")
-    journal.append_new(
-        "llm_call_completed", call_id="call-a", step_id="s-a", response_digest="r-a"
-    )
-    _start_tool(journal, "step-a")
-    journal.append_new("receipt_prepared", logical_step_id="step-a", receipt_id="rcpt-a")
-    journal.append_new("receipt_committed", logical_step_id="step-a", receipt_id="rcpt-a")
-    journal.append_new("round_settled", round_index=0, progress=True)
-    journal.append_new(
-        "exploration_stopped", stop_reason="cancelled", final_report_ref=None
-    )
-    journal.write_snapshot()
-
-    raw = json.loads(journal.snapshot_path.read_text(encoding="utf-8"))
-    for key in MULTI_SLOT_FIELDS:
-        raw.pop(key, None)  # an old snapshot never wrote these keys
-    for key in LEGACY_SCALAR_FIELDS:
-        assert key in raw and raw[key] is None  # and always wrote these as null
-    journal.snapshot_path.write_text(json.dumps(raw), encoding="utf-8")
-
-    reloaded = journal.read_snapshot()
-    assert reloaded is not None
-    assert reloaded == journal.rebuild()
-
-
-def test_legacy_mid_run_snapshot_migrates_scalars_into_slots(tmp_path: Path) -> None:
-    """An old snapshot taken with a pending call/tool step maps its scalar
-    fields into one slot each (plan §P2: single value reads as a 1-tuple)."""
+def test_snapshot_contains_only_current_pending_maps(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     journal.append_new("round_started", round_index=0)
     journal.append_new("llm_call_started", call_id="call-a", step_id="step-llm-a")
-    modern = _start_tool(journal, "step-a")
+    state = _start_tool(journal, "step-a")
+    raw = state.model_dump(mode="json")
+    assert not set(LEGACY_SCALAR_FIELDS) & raw.keys()
+    assert set(MULTI_SLOT_FIELDS) <= raw.keys()
+    journal.write_snapshot(state)
+    assert journal.read_snapshot() == state == journal.rebuild()
 
-    raw = modern.model_dump(mode="json")
-    for key in MULTI_SLOT_FIELDS:
-        raw.pop(key, None)
-    raw.update(
-        {
-            "pending_call_id": "call-a",
-            "pending_call_step_id": "step-llm-a",
-            "pending_logical_step_id": "step-a",
-            "pending_tool_kind": "run_open_analysis",
-            "pending_tool_input_fingerprint": "fp-step-a",
-            "pending_projected_rows_scanned": 10,
-            "pending_projected_result_cells": 5,
-            "prepared_receipt_id": None,
-            "prepared_result_digest": None,
-        }
-    )
 
-    migrated = ExplorationLoopState.model_validate(raw)
-    assert migrated == modern
-    for name in LEGACY_SCALAR_FIELDS:
-        assert getattr(migrated, name) is None, name
+@pytest.mark.parametrize("field", LEGACY_SCALAR_FIELDS)
+def test_single_slot_snapshots_are_rejected_instead_of_migrated(tmp_path: Path, field: str) -> None:
+    from pydantic import ValidationError
+
+    journal = _journal(tmp_path)
+    state = journal.rebuild()
+    assert state is not None
+    raw = state.model_dump(mode="json")
+    raw[field] = "old-slot"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ExplorationLoopState.model_validate(raw)
+
+
+def test_old_journal_snapshot_version_is_rejected(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+
+    journal = _journal(tmp_path)
+    state = journal.rebuild()
+    assert state is not None
+    raw = state.model_dump(mode="json")
+    raw["schema_version"] = 1
+    with pytest.raises(ValidationError, match="Unsupported exploration snapshot"):
+        ExplorationLoopState.model_validate(raw)

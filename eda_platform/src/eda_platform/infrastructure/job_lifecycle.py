@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -526,6 +526,7 @@ class JobLifecycleRepository:
         error_message: str | None = None,
         error_detail: str | None = None,
         summary: dict[str, object] | None = None,
+        expected_state_version: int | None = None,
     ) -> bool:
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"Invalid terminal status: {status}")
@@ -533,6 +534,14 @@ class JobLifecycleRepository:
         with self._locked_job(job), closing(self._connect()) as conn:
             conn.execute("begin immediate")
             try:
+                if expected_state_version is not None:
+                    row = conn.execute(
+                        "select state_version from jobs where job_id = ?",
+                        (claim.job_id,),
+                    ).fetchone()
+                    if row is None or int(row[0]) != expected_state_version:
+                        conn.rollback()
+                        return False
                 changed = self._terminal_in_transaction(
                     conn,
                     claim=claim,
@@ -792,6 +801,51 @@ class JobLifecycleRepository:
                     ),
                 )
         return (int(pid), str(identity)) if cursor.rowcount == 1 else None
+
+    def reconcile_dead_workers(self) -> int:
+        """Close dead execution attempts without restarting work or killing live PIDs.
+
+        This is safe during API operation: an unacknowledged launch retains its
+        lease window, and terminal writes use the original generation fence.
+        Lease expiry alone is not proof that a worker has exited.
+        """
+        recovered = 0
+        for job in self.store.list_active_jobs():
+            if str(job["status"]) == "queued":
+                continue
+            expected = deserialize_process_identity(job.get("pid_start_identity"))
+            pid = job.get("pid")
+            if expected is not None:
+                comparison = check_process_identity(expected)
+                if comparison is ProcessIdentityComparison.MATCH:
+                    continue
+                if comparison is ProcessIdentityComparison.UNKNOWN and pid_is_alive(expected.pid):
+                    continue
+            elif pid is not None:
+                if pid_is_alive(int(pid)):
+                    continue
+            else:
+                lease = _parse_time(job.get("lease_expires_at"))
+                if lease is not None and lease > _now():
+                    continue
+            token = job.get("launch_token")
+            # Unclaimed legacy rows belong to startup migration, not the live
+            # reconciler: do not adopt another owner's row from a stale scan.
+            if token is None:
+                continue
+            job_id = str(job["job_id"])
+            changed = self.finish(
+                LaunchClaim(job_id, str(token), int(job["launch_attempt"])),
+                "failed",
+                error_code="orphaned",
+                error_message="Worker exited before persisting a terminal result.",
+                expected_state_version=int(job["state_version"]),
+            )
+            recovered += int(changed)
+            if changed:
+                with suppress(Exception):
+                    self.materialize_trace(job_id)
+        return recovered
 
     def recover_startup(self, *, fail_queued: bool = False) -> int:
         self._clear_stale_critical_sections()

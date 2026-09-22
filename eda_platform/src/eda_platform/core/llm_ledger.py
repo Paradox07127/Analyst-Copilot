@@ -58,11 +58,15 @@ _LOGICAL_CALL_ID: ContextVar[str | None] = ContextVar("logical_llm_call_id", def
 @contextmanager
 def logical_llm_call(call_id: str) -> Iterator[None]:
     """Correlate a durable logical operation with its physical provider attempt."""
+    from eda_platform.core.effect_policy import durable_model_request
+
+    durable_token = durable_model_request.set(True)
     token = _LOGICAL_CALL_ID.set(call_id)
     try:
         yield
     finally:
         _LOGICAL_CALL_ID.reset(token)
+        durable_model_request.reset(durable_token)
 
 
 def _correlated_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -237,9 +241,7 @@ class LedgerLLMClient:
             settlement_error: Exception | None = None
             settled_reservation: BudgetReservation | None = None
             try:
-                settled_reservation = self._settle(
-                    reservation, usage=usage, unserved=unserved
-                )
+                settled_reservation = self._settle(reservation, usage=usage, unserved=unserved)
             except Exception as exc:  # budget terminal state must remain visible
                 settlement_error = exc
                 if self._budget is not None and reservation is not None:
@@ -302,9 +304,7 @@ class LedgerLLMClient:
                 protected=task in _PROTECTED_TASKS,
             )
             summary = _reservation_summary(reservation)
-            summary["policy_fingerprint"] = _budget_policy_fingerprint(
-                self._budget.policy
-            )
+            summary["policy_fingerprint"] = _budget_policy_fingerprint(self._budget.policy)
             self._emit_required(
                 TraceEvent(
                     session_id=self._session_id,
@@ -406,9 +406,7 @@ class LedgerLLMClient:
             return
         summary = _reservation_summary(reservation)
         if self._budget is not None:
-            summary["policy_fingerprint"] = _budget_policy_fingerprint(
-                self._budget.policy
-            )
+            summary["policy_fingerprint"] = _budget_policy_fingerprint(self._budget.policy)
         self._emit_required(
             TraceEvent(
                 session_id=self._session_id,
@@ -441,7 +439,20 @@ class LedgerLLMClient:
             "status": status,
             "usage_known": usage is not None and usage.usage_reported,
         }
-        if usage is not None:
+        if usage is None and is_offline_client(self._inner):
+            # Offline routing can deliberately call a deterministic adapter.
+            # It never reserves provider capacity and must be identifiable on
+            # restart, rather than looking like an unaccounted remote request.
+            summary.update(
+                provider="offline",
+                model="offline",
+                usage_known=True,
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                estimated_cost_usd=0.0,
+            )
+        elif usage is not None:
             estimated_cost = usage.estimated_cost_usd
             # Only worth guessing when the provider actually reported tokens;
             # against a silent provider the inputs are zeros, so a worst case
@@ -604,6 +615,7 @@ def restore_run_budget_state(
             (datetime.now(UTC) - min(started_candidates)).total_seconds(),
         )
     state = SessionBudgetState(policy, started_at=monotonic() - elapsed)
+    events = [event for event in events if not _confirmed_offline_usage(event)]
     if _policy_has_hard_limits(policy) and any(
         event.event_type == LLM_USAGE_EVENT and not event.call_id for event in events
     ):
@@ -617,18 +629,14 @@ def restore_run_budget_state(
         event_type=BUDGET_RESERVED_EVENT,
     )
     terminal_events = [
-        event
-        for event in events
-        if event.event_type == BUDGET_SETTLED_EVENT and event.call_id
+        event for event in events if event.event_type == BUDGET_SETTLED_EVENT and event.call_id
     ]
     terminal_by_call = _unique_call_events(
         terminal_events,
         event_type=BUDGET_SETTLED_EVENT,
     )
     ledger_events = [
-        event
-        for event in events
-        if event.event_type == LLM_USAGE_EVENT and event.call_id
+        event for event in events if event.event_type == LLM_USAGE_EVENT and event.call_id
     ]
     _unique_call_events(ledger_events, event_type=LLM_USAGE_EVENT)
     ledger_call_ids: set[str] = {
@@ -642,9 +650,7 @@ def restore_run_budget_state(
             missing=("budget_reserved",),
         )
     expected_policy_fingerprint = _budget_policy_fingerprint(policy)
-    accepted_fingerprints = accepted_policy_fingerprints or frozenset(
-        {expected_policy_fingerprint}
-    )
+    accepted_fingerprints = accepted_policy_fingerprints or frozenset({expected_policy_fingerprint})
     if expected_policy_fingerprint not in accepted_fingerprints:
         raise ValueError("accepted policy fingerprints must include the effective policy.")
     for call_id, reserved in reserved_events.items():
@@ -663,8 +669,7 @@ def restore_run_budget_state(
         if (
             terminal is not None
             and terminal.summary.get("policy_fingerprint") is not None
-            and terminal.summary.get("policy_fingerprint")
-            not in accepted_fingerprints
+            and terminal.summary.get("policy_fingerprint") not in accepted_fingerprints
         ):
             raise BudgetUsageUncertain(
                 call_id,
@@ -706,6 +711,21 @@ def restore_run_budget_state(
             cost_usd=_summary_cost(terminal.summary),
         )
     return state
+
+
+def _confirmed_offline_usage(event: TraceEvent) -> bool:
+    summary = event.summary
+    return (
+        event.event_type == LLM_USAGE_EVENT
+        and summary.get("provider") == "offline"
+        and summary.get("usage_known") is True
+        and all(
+            isinstance(summary.get(name), (int, float))
+            and not isinstance(summary.get(name), bool)
+            and summary[name] == 0
+            for name in ("prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd")
+        )
+    )
 
 
 def budget_policy_fingerprint(policy: SessionBudgetPolicy) -> str:
@@ -803,9 +823,7 @@ def _budget_policy_fingerprint(policy: SessionBudgetPolicy) -> str:
             "max_input_tokens": policy.max_input_tokens,
             "max_output_tokens": policy.max_output_tokens,
             "max_total_tokens": policy.max_total_tokens,
-            "max_cost_usd": (
-                None if policy.max_cost_usd is None else str(policy.max_cost_usd)
-            ),
+            "max_cost_usd": (None if policy.max_cost_usd is None else str(policy.max_cost_usd)),
             "max_wall_seconds": policy.max_wall_seconds,
             "protected_requests": policy.protected_requests,
             "protected_input_tokens": policy.protected_input_tokens,

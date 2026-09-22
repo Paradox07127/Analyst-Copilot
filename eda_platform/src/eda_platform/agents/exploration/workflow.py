@@ -9,10 +9,13 @@ doubles; the driver supplies only environment-specific LLM/tools/storage.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from operator import add
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from eda_platform.agents.exploration.branching import (
     bundle_hypotheses_from_events,
@@ -108,6 +111,7 @@ class ExplorationProvider(StructuredHypothesisProvider, NativeToolProvider, Prot
 @dataclass(slots=True)
 class ExplorationWorkflowState:
     decisions: tuple[SchedulingDecision, ...] = ()
+    scheduling_commits: dict[int, str] = field(default_factory=dict)
     committed_receipts: dict[str, EvidenceReceipt] = field(default_factory=dict)
     gate_reports: dict[str, GateReport] = field(default_factory=dict)
     admitted_bundles: dict[str, ClaimBundle] = field(default_factory=dict)
@@ -595,11 +599,17 @@ class DeterministicSchedulerPort:
             context=context_value,
             policy=self.policy,
         )
-        # Every round appends its whole batch, duplicates included: the round's
-        # frontier digest covers all of its decisions, so replay reads them back
-        # as one positional slice per round.
-        self.state.decisions = (*self.state.decisions, *result.decisions)
-        self.persist_state(self.state)
+        # Commit decisions and the round key atomically in the domain snapshot.
+        # A worker can exit after this write but before its graph checkpoint;
+        # replay must not append a second positional slice for the same round.
+        digest = scheduling_decision_digest(result.decisions)
+        committed = self.state.scheduling_commits.get(context.round_index)
+        if committed is not None and committed != digest:
+            raise SupervisorInvariantError("scheduler decisions changed during round replay.")
+        if committed is None:
+            self.state.decisions = (*self.state.decisions, *result.decisions)
+            self.state.scheduling_commits[context.round_index] = digest
+            self.persist_state(self.state)
         by_id = {seed.hypothesis_id: seed for seed in seeds}
         decisions = {decision.hypothesis_id: decision for decision in result.decisions}
         items = tuple(
@@ -614,7 +624,6 @@ class DeterministicSchedulerPort:
             )
             for hypothesis_id in result.chosen_hypothesis_ids
         )
-        digest = scheduling_decision_digest(result.decisions)
         return ScoredFrontier(items=items, digest=f"frontier_{digest}")
 
     def select(self, context: PhaseContext, frontier: ScoredFrontier) -> ProbeSelection | None:
@@ -659,6 +668,16 @@ def _probe_outcome_is_usable(execution: ProbeExecutionResult) -> bool:
         execution.status == "failed"
         and execution.error_code in PROBE_LOCAL_ERROR_CODES
     )
+
+
+class ProbeFanoutState(TypedDict):
+    candidates: list[CandidateSeed]
+    results: Annotated[list[tuple[int, ProbeExecutionResult]], add]
+
+
+class ProbeDispatchState(TypedDict):
+    index: int
+    candidate: CandidateSeed
 
 
 @dataclass(slots=True)
@@ -748,15 +767,31 @@ class SupervisorProbeExecutorPort:
         if journal_state is None:
             raise SupervisorInvariantError("probe executor requires an initialized journal.")
         shared_seen = set(journal_state.completed_probe_fingerprints)
-        with ThreadPoolExecutor(max_workers=self.probe_concurrency) as pool:
-            return list(
-                pool.map(
-                    lambda candidate: self._run_probe(
-                        context, candidate, journal_state, shared_seen
-                    ),
-                    candidates,
-                )
-            )
+        def dispatch(state: ProbeFanoutState) -> list[Send]:
+            return [
+                Send("probe", {"index": index, "candidate": candidate})
+                for index, candidate in enumerate(state["candidates"])
+            ]
+
+        def probe(state: ProbeDispatchState) -> dict[str, Any]:
+            result = self._run_probe(context, state["candidate"], journal_state, shared_seen)
+            return {"results": [(state["index"], result)]}
+
+        builder = StateGraph(ProbeFanoutState)
+        builder.add_node("probe", probe)
+        builder.add_conditional_edges(START, dispatch)
+        builder.add_edge("probe", END)
+        # Each probe owns its durable graph and effect ledger. This fan-out only
+        # joins results; replay adopts completed probes through their checkpointers.
+        graph = builder.compile(checkpointer=False)
+        result = graph.invoke(
+            {"candidates": candidates, "results": []},
+            {"max_concurrency": self.probe_concurrency},
+            # This ephemeral join must not inherit the parent's synchronous
+            # checkpoint barrier. Each child probe persists its own execution.
+            durability="exit",
+        )
+        return [execution for _, execution in sorted(result["results"], key=lambda item: item[0])]
 
     def execute(self, context: PhaseContext, selection: ProbeSelection) -> ProbeOutcome:
         candidates = self._candidates(selection)
@@ -816,7 +851,9 @@ class SupervisorProbeExecutorPort:
         return ProbeOutcome(
             ExecutedProbeBatch(
                 selection,
-                tuple(executions),
+                # Receipts are the downstream evidence contract; avoid serializing
+                # a second full copy inside each execution summary checkpoint.
+                tuple(replace(execution, artifacts=[]) for execution in executions),
                 tuple(receipts),
                 tuple(bindings),
             )
@@ -1008,11 +1045,7 @@ def artifact_receipt_decoder(value: object) -> EvidenceReceipt | None:
     if not isinstance(value, Artifact) or value.type is not ArtifactType.EVIDENCE_RECEIPT:
         return None
     receipt = EvidenceReceipt.model_validate(value.payload)
-    valid_artifact_ids = {
-        receipt.receipt_id,  # legacy/test adapters used the receipt id directly
-        make_artifact_id("receipt", value.payload),
-    }
-    if value.id not in valid_artifact_ids:
+    if value.id != make_artifact_id("receipt", value.payload):
         raise ValueError("receipt artifact id does not match its content-addressed payload.")
     return receipt
 

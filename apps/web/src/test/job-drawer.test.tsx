@@ -759,3 +759,50 @@ describe("Activity center with job SSE", () => {
     ).toBeInTheDocument();
   });
 });
+
+it("shows unknown exploration outcome after reload until domain events arrive", async () => {
+  server.use(http.get("/api/v1/jobs/:jobId", ({ params }) => HttpResponse.json(
+    jobStatus(String(params["jobId"]), { kind: "exploration_run", status: "completed", session_id: "r1" }),
+  )));
+  window.localStorage.setItem("eda.activity.jobs", JSON.stringify([{
+    jobId: "job_1", sessionId: "r1", sourceSessionId: "r1", projectId: "p1",
+    eventsUrl: "/api/v1/jobs/job_1/events",
+  }]));
+  window.localStorage.setItem("eda.layout.activity-open", "true");
+  renderAppAt("/projects/p1/sessions/r1/data-map");
+  expect((await screen.findAllByText("Outcome unavailable")).length).toBeGreaterThan(0);
+  expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open exploration" })).toHaveAttribute(
+    "href", "/projects/p1/sessions/r1/explorations",
+  );
+  const source = FakeEventSource.latest();
+  act(() => source.emit("exploration.attempt_finished", {
+    ...frame("exploration.attempt_finished", "job_1"),
+    summary: { exploration_id: "x1", exploration_status: "paused", stop_reason: null, journal_seq: 20 },
+  }));
+  expect((await screen.findAllByText("Exploration paused")).length).toBeGreaterThan(0);
+  expect(screen.queryByRole("button", { name: /Finished/ })).not.toBeInTheDocument();
+  expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+});
+
+it.each([
+  ["paused", null, "Exploration paused"],
+  ["stopped", "failed", "Exploration failed"],
+])("restores the exploration outcome from GET after refresh: %s/%s", async (status, reason, label) => {
+  server.use(http.get("/api/v1/jobs/:jobId", ({ params }) => HttpResponse.json({
+    ...jobStatus(String(params["jobId"]), { kind: "exploration_run", status: "completed", session_id: "r1" }),
+    domain_outcome: { status, stop_reason: reason, exploration_id: "xpl-saved" },
+  })));
+  window.localStorage.setItem("eda.activity.jobs", JSON.stringify([{
+    jobId: "job_1", sessionId: "r1", sourceSessionId: "r1", projectId: "p1",
+    eventsUrl: "/api/v1/jobs/job_1/events",
+  }]));
+  window.localStorage.setItem("eda.layout.activity-open", "true");
+  renderAppAt("/projects/p1/sessions/r1/data-map");
+  expect((await screen.findAllByText(label!)).length).toBeGreaterThan(0);
+  expect(screen.queryByText("Outcome unavailable")).not.toBeInTheDocument();
+  expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open exploration" })).toHaveAttribute(
+    "href", "/projects/p1/sessions/r1/explorations/xpl-saved",
+  );
+});

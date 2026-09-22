@@ -311,3 +311,18 @@ def test_retired_artifact_types_do_not_break_run_reads(tmp_path) -> None:
 
     with pytest.raises(KeyError):
         store.get_artifact("ledger_legacy")
+
+
+def test_reset_session_outputs_discards_graph_execution_and_effect_state(tmp_path) -> None:
+    store = ArtifactStore(tmp_path)
+    store.ensure_project("project_demo", name="Demo")
+    store.start_session("project_demo", "run_demo")
+    session = store.session_dir("project_demo", "run_demo")
+    graphs = session / "graphs"
+    graphs.mkdir()
+    for name in (
+        "execution.sqlite", "execution.sqlite-wal", "execution.lock", "pipeline-cache.sqlite"
+    ):
+        (graphs / name).write_text("stale execution state")
+    store.reset_session_outputs(project_id="project_demo", session_id="run_demo")
+    assert not graphs.exists()

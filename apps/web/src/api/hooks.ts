@@ -98,6 +98,7 @@ export const queryKeys = {
   sessionJobs: (sessionId: string) => ["session-jobs", sessionId] as const,
   chatMessages: (sessionId: string) => ["chat-messages", sessionId] as const,
   chatPendingPlans: (sessionId: string) => ["chat-pending-plans", sessionId] as const,
+  chatRecoverableTurns: (sessionId: string) => ["chat-recoverable-turns", sessionId] as const,
   board: (projectId: string, boardId: string) =>
     ["board", projectId, boardId] as const,
   analysis: (sessionId: string) => ["analysis", sessionId] as const,
@@ -673,6 +674,15 @@ export function useChatPendingPlans(sessionId: string, enabled: boolean) {
     queryFn: ({ signal }) => api.listChatPendingPlans(sessionId, signal),
     enabled: Boolean(sessionId) && enabled,
     staleTime: 30_000,
+  });
+}
+
+export function useChatRecoverableTurns(sessionId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.chatRecoverableTurns(sessionId),
+    queryFn: ({ signal }) => api.listRecoverableChatTurns(sessionId, signal),
+    enabled: Boolean(sessionId) && enabled,
+    staleTime: 5_000,
   });
 }
 

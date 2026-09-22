@@ -266,7 +266,7 @@ def test_jsonl_supervisor_adapter_projects_round_local_receipts_and_terminal_int
     assert state.current_round_receipt_ids == frozenset()
 
     journal.append_new(
-        "tool_call_started",
+        "tool_call_started", tool_kind="run_open_analysis",
         logical_step_id="tool-step-1",
         input_fingerprint="input-1",
     )
@@ -428,7 +428,7 @@ class _Executor:
     def execute(self, context: PhaseContext, selection: ProbeSelection) -> ProbeOutcome:
         self.calls += 1
         self.journal.append_new(
-            "tool_call_started",
+            "tool_call_started", tool_kind="run_open_analysis",
             logical_step_id="probe-step-1",
             input_fingerprint="probe-input-1",
         )

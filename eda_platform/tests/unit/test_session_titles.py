@@ -254,3 +254,23 @@ def test_llm_run_title_empty_response_returns_none(tmp_path: Path) -> None:
         report_artifacts=[],
     )
     assert title is None
+
+
+def test_title_unknown_provider_outcome_is_not_silently_retried(tmp_path: Path) -> None:
+    import pytest
+
+    from eda_platform.core.graph_execution import GraphEffectUncertain
+
+    store = ArtifactStore(tmp_path)
+    ctx = SessionContext(project_id="proj", session_id="title-unknown", store=store)
+    with pytest.raises(GraphEffectUncertain):
+        _llm_session_title(
+            ctx, _FakeTitleLLM(error=TimeoutError("unknown provider response")),
+            dataset_names=["sales.csv"], business_context="Sales", report_artifacts=[],
+        )
+    # A fresh provider cannot turn the same uncertain request into another call.
+    with pytest.raises(GraphEffectUncertain):
+        _llm_session_title(
+            ctx, _FakeTitleLLM(response="Must Not Be Requested"),
+            dataset_names=["sales.csv"], business_context="Sales", report_artifacts=[],
+        )

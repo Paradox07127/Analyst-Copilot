@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from eda_platform.application.dto import (
+    JobDomainOutcome,
     JobEvent,
     JobStatus,
     SessionJobList,
@@ -744,7 +745,39 @@ class JobService:
         )
 
     def get_job(self, job_id: str) -> JobStatus:
-        return _to_status(self._require_job(job_id))
+        job = self._require_job(job_id)
+        return _to_status(job).model_copy(update={"domain_outcome": self._domain_outcome(job)})
+
+    def _domain_outcome(self, job: dict) -> JobDomainOutcome | None:
+        if job["kind"] != "exploration_run":
+            return None
+        generation = int(job["launch_attempt"])
+        raw = self._store.latest_job_trace_payload(
+            job_id=str(job["job_id"]), job_generation=generation,
+            event_type="exploration.attempt_finished",
+        )
+        if raw is None:
+            return None
+        try:
+            event = TraceEvent.model_validate_json(raw)
+            if (
+                event.job_id != job["job_id"]
+                or event.job_generation != generation
+                or event.session_id != job["session_id"]
+                or event.event_type != "exploration.attempt_finished"
+            ):
+                return None
+            outcome = JobDomainOutcome.model_validate({
+                "status": event.summary.get("exploration_status"),
+                "stop_reason": event.summary.get("stop_reason"),
+                "exploration_id": event.summary.get("exploration_id"),
+            })
+            if (outcome.status == "stopped") != (outcome.stop_reason is not None):
+                return None
+            return outcome
+        except (ValueError, TypeError):
+            return None
+
 
     def retry_job(
         self,

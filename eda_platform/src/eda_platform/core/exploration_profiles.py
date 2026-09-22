@@ -10,6 +10,7 @@ from typing import Literal
 
 from eda_platform.core.exploration_journal import sealed_policy
 from eda_platform.core.exploration_tiers import ExplorationTier
+from eda_platform.core.graph_execution import GRAPH_VERSION
 from eda_platform.core.ids import stable_hash
 from eda_platform.schemas.exploration import ExplorationPolicy, InsightFamily
 from eda_platform.schemas.exploration_budget import (
@@ -185,11 +186,12 @@ def exploration_hard_caps() -> ExplorationHardCaps:
 def exploration_code_fingerprint(tool_capability_digest: str) -> str:
     """Journal identity for the exploration implementation this build exposes.
 
-    Not a source-tree hash: it covers the tool contracts and the two policy
-    versions, which is exactly what a resume must find unchanged.
+    Covers runtime, tool contracts and policy versions. Runs created by the
+    previous custom runtime cannot resume against the LangGraph execution model.
     """
     return "xplcode_" + stable_hash(
         {
+            "runtime_version": GRAPH_VERSION,
             "tool_capability_digest": tool_capability_digest,
             "scoring_policy_version": EXPLORATION_PROFILE_VERSION,
             "statistical_policy_version": EXPLORATION_STATISTICAL_POLICY_VERSION,

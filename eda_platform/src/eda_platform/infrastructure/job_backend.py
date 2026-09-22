@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -25,6 +26,8 @@ from eda_platform.infrastructure.launch_gate import (
     START_ACK_TIMEOUT_SECONDS,
     open_parent_gate,
 )
+
+logger = logging.getLogger(__name__)
 
 CANCEL_GRACE_SECONDS = 2.0
 CANCEL_SHIELD_POLL_SECONDS = 0.05
@@ -142,6 +145,41 @@ class LocalProcessJobBackend:
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._cancel_escalations: set[str] = set()
         self._cancel_lock = threading.Lock()
+        self._reconcile_stop = threading.Event()
+        self._reconcile_thread: threading.Thread | None = None
+        self._reconcile_lock = threading.Lock()
+
+    def start_reconciliation(self, *, interval: float = 5.0) -> None:
+        """Monitor owned and adopted workers for the lifetime of the API."""
+        if interval <= 0:
+            raise ValueError("Reconciliation interval must be positive.")
+        with self._reconcile_lock:
+            if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
+                return
+            self._reconcile_stop.clear()
+
+            def monitor() -> None:
+                while not self._reconcile_stop.wait(interval):
+                    try:
+                        self.reconcile()
+                    except Exception:
+                        logger.exception("Worker lifecycle reconciliation failed")
+
+            self._reconcile_thread = threading.Thread(
+                target=monitor, daemon=True, name="job-reconciliation"
+            )
+            self._reconcile_thread.start()
+
+    def close(self) -> None:
+        """Stop monitoring; detached workers retain their own durable ownership."""
+        self._reconcile_stop.set()
+        thread = self._reconcile_thread
+        if thread is not None:
+            thread.join(timeout=5)
+
+    def reconcile(self) -> int:
+        self._prune_processes()
+        return self._lifecycle.reconcile_dead_workers()
 
     def enqueue(self, command: JobCommand) -> JobRef:
         self._prune_processes()
@@ -290,7 +328,7 @@ class LocalProcessJobBackend:
     def _prune_processes(self) -> None:
         for job_id, process in list(self._processes.items()):
             if process.poll() is not None:
-                del self._processes[job_id]
+                self._processes.pop(job_id, None)
 
     @staticmethod
     def _terminate_spawned_process(process: subprocess.Popen[bytes]) -> None:

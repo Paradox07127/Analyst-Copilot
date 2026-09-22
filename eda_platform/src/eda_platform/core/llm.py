@@ -275,7 +275,9 @@ class CancellableLLMClient:
         return result
 
     def last_usage(self) -> LLMResultMetadata | None:
-        return self._client.last_usage()
+        getter = getattr(self._client, "last_usage", None)
+        result = getter() if callable(getter) else None
+        return result if isinstance(result, LLMResultMetadata) else None
 
 
 class OfflineLLMClient:
@@ -528,7 +530,10 @@ class OpenAICompatibleLLMClient(_ThreadLocalCallState):
         # provider already served (and billed) the request, so every retry
         # risks one duplicate generation. HTTP responses are served answers and
         # are never retried here.
-        attempts = len(_TRANSPORT_RETRY_BACKOFF_SECONDS) + 1
+        from eda_platform.core.effect_policy import durable_model_request
+
+        durable = durable_model_request.get()
+        attempts = 1 if durable else len(_TRANSPORT_RETRY_BACKOFF_SECONDS) + 1
         unavailable_attempts = 0
         attempt = 0
         while True:
@@ -546,6 +551,14 @@ class OpenAICompatibleLLMClient(_ThreadLocalCallState):
             except error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
                 if exc.code in _UNAVAILABLE_HTTP_STATUS:
+                    if durable:
+                        if exc.code != 429:
+                            raise TimeoutError(
+                                f"Provider HTTP {exc.code}: execution outcome is unknown."
+                            ) from exc
+                        raise ProviderUnavailableError(
+                            f"LLM provider rejected the request (HTTP {exc.code}): {detail}"
+                        ) from exc
                     # "Not served" is the one HTTP answer a resend cannot
                     # duplicate, so it gets its own longer ladder.
                     if unavailable_attempts < len(_UNAVAILABLE_RETRY_BACKOFF_SECONDS):

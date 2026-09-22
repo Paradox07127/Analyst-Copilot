@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased: local LangGraph architecture migration - 2026-09-22
+
+Retirement cleanup removes report calls outside the Functional workflow, the old
+exploration cursor container and single-slot recovery compatibility, receipt-id
+artifact fallbacks, unused worker adapters, and automatic paid capability probes.
+Exploration journals now require schema v2 and graph definition v2; older formats
+require a fresh exploration. Routing no longer keeps a process-global capability
+verdict cache. Graph identity and uncertain-effect failures propagate without
+question fallback or automatic model resending. Analytical contracts and existing
+workspace data remain intact.
+
+Post-migration review fixes close approval admission, mid-batch evidence recovery,
+cooperative pause/cancel, shared execution budgets, input cache drift, and worker
+failure cleanup. Chat events now persist across restarts with monotonic cursors;
+approval consumption and admission commit atomically, and approved work runs in a
+durable graph. Local traces link turns, parent/child executions, attempts, nodes,
+effects, and provider calls. Activity displays exploration outcomes independently
+of worker completion and restores them from the job API after reload.
+
+Agent and pipeline execution now use LangGraph while the existing FastAPI
+application, process workers, analytical contracts, and local-first deployment
+remain in place. This is a new execution format: custom-runtime checkpoints and
+old exploration workflow snapshots are not migrated.
+
+- Chat and question agents use explicit model, tool-effect, and answer-validation
+  nodes. Saved chat turns support read-only recovery discovery and explicit resume
+  with their original execution identity. Structured-only Chat and question
+  fallbacks, semantic bootstrap, question discovery/drafting, and session titles
+  checkpoint individual model requests, including bounded repair attempts.
+- Exploration uses an explicit phase graph, native pause/resume interrupts, and
+  bounded `Send` fan-out to durable probe graphs. Ordered results and shared budget
+  enforcement are preserved. Atomic per-round scheduling commit markers prevent
+  duplicate decision records when a worker exits after the business write but
+  before its graph checkpoint.
+- Auto EDA uses prepare/compute/ordered-commit graph stages and the official
+  SQLite artifact-reference cache. The per-table memory lifecycle and artifact
+  contract checks remain intact. Code repair uses a bounded draft/sandbox/validate
+  graph; report planning, evidence reads, repair, and narration use individually
+  checkpointed Functional API tasks.
+- A shared adapter provides official SQLite checkpointing, synchronous durability,
+  writer locking, runtime/input identity binding, and pickle-free serialization.
+  Changed execution bindings fail closed. Graph state excludes live DataFrames,
+  clients, connections, locks, and subprocess handles.
+- Durable effect records preserve completed model/tool outcomes across checkpoint
+  gaps. Unknown remote outcomes are not automatically sent again. Exploration
+  receipt adoption, budget reconciliation, worker fencing, cancellation, and
+  approval credentials retain their domain responsibilities.
+- SQL restrictions, sandbox isolation, evidence/statistical gates, artifact
+  provenance, and report publication checks remain independent of the graph
+  runtime. A checkpoint or interrupt does not authorize an action or prove an
+  analytical result. Hosted LangSmith tracing is disabled by the runtime adapter.
+- Added restart and failure-window coverage for SQLite reopen, typed graph state,
+  pause/resume, input and data drift, unknown provider outcomes, domain-commit
+  adoption, concurrency bounds, and evidence-root exclusions.
+
+The tracked architecture and recovery contract is documented in
+[README: LangGraph execution architecture](README.md#langgraph-execution-architecture).
+This migration does not claim a measured latency, cost, or analytical-quality
+improvement.
+
 ## Unreleased: what two real runs exposed — resource limits, the tool loop auto-EDA never entered, and five bugs - 2026-08-26
 
 Two live runs on the Olist nine-table set (gpt-5.6-luna) drove this pass. Plan

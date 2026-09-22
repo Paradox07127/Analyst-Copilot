@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient } from "@tanstack/react-query";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "./msw/server";
 import { FakeEventSource } from "./fake-event-source";
 import { renderAppAt } from "./render";
+import { AppProviders } from "../app/providers";
+import { routes } from "../app/router";
+import { queryKeys } from "../api/hooks";
 
 const RUN = "r1";
 
@@ -580,4 +585,161 @@ describe("Chat answer engine option", () => {
     await waitFor(() => expect(sentBody).not.toBeNull());
     expect(sentBody!["llm"]).toBe("offline");
   });
+});
+
+
+describe("Durable chat recovery", () => {
+  it("discovers saved progress without resuming until the user asks", async () => {
+    const resumed: string[] = [];
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/chat/recoverable-turns", () =>
+        HttpResponse.json({ session_id: RUN, turns: [{
+          message_id: "recover_1", question: "Compare saved regions",
+          updated_at: "2026-09-22T00:00:00Z", status: "interrupted", reason: null,
+        }] }),
+      ),
+      http.post("/api/v1/sessions/:sessionId/chat/turns/:messageId/resume", ({ params }) => {
+        resumed.push(String(params["messageId"]));
+        return HttpResponse.json({
+          session_id: RUN, message_id: "recover_1",
+          stream_url: `/api/v1/sessions/${RUN}/chat/stream?message_id=recover_1`,
+        }, { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderAppAt(`/projects/p1/sessions/${RUN}/chat`);
+    const button = await screen.findByRole("button", { name: "Resume answer" });
+    expect(resumed).toEqual([]);
+    expect(screen.getByText("Compare saved regions")).toBeInTheDocument();
+    await user.click(button);
+    await screen.findByText("Streaming…");
+    expect(resumed).toEqual(["recover_1"]);
+    expect(screen.queryByRole("button", { name: "Resume answer" })).not.toBeInTheDocument();
+    const source = FakeEventSource.latest();
+    act(() => source.emit("message.completed", {
+      seq: 1, session_id: RUN, message_id: "recover_1", type: "message.completed",
+      data: { role: "assistant", content: "Recovered regional comparison", status: "answer",
+        sql: null, artifact_refs: [], validation: null },
+    }));
+    expect(await screen.findByText("Recovered regional comparison")).toBeInTheDocument();
+    // A retry of the same durable execution must open a fresh SSE connection.
+    await user.click(await screen.findByRole("button", { name: "Resume answer" }));
+    await waitFor(() => expect(FakeEventSource.latest()).not.toBe(source));
+    expect(resumed).toEqual(["recover_1", "recover_1"]);
+  });
+
+  it("explains unknown model outcomes without offering an unsafe retry", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:sessionId/chat/recoverable-turns", () =>
+        HttpResponse.json({ session_id: RUN, turns: [{
+          message_id: "blocked_1", question: "An interrupted request",
+          updated_at: "2026-09-22T00:00:00Z", status: "blocked",
+          reason: "The previous model request has an unknown outcome. Send a new question.",
+        }] }),
+      ),
+    );
+    renderAppAt(`/projects/p1/sessions/${RUN}/chat`);
+    expect(await screen.findByText(/previous model request has an unknown outcome/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume answer" })).not.toBeInTheDocument();
+  });
+});
+
+it.each(["cancelled", "error", "refused"])("labels streamed %s answers with their actual outcome", async (status) => {
+  const { source } = await sendMessage();
+  act(() => source.emit("message.completed", frame(1, "message.completed", {
+    content: "The recorded outcome", status,
+  })));
+  expect(await screen.findByLabelText("Answer outcome")).toHaveTextContent(
+    status === "cancelled" ? "Cancelled" : status === "error" ? "Failed" : "Refused",
+  );
+  expect(screen.queryByText("Streaming…")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+});
+
+it("offers editing a blocked question without sending or resuming it", async () => {
+  let requests = 0;
+  server.use(
+    http.get("/api/v1/sessions/:sessionId/chat/recoverable-turns", () =>
+      HttpResponse.json({ session_id: RUN, turns: [{ message_id: "blocked", question: "Compare regions",
+        updated_at: "2026-09-22T00:00:00Z", status: "blocked", reason: null }] })),
+    http.post("/api/v1/sessions/:sessionId/chat/turns/:messageId/resume", () => {
+      requests += 1;
+      return HttpResponse.json({}, { status: 500 });
+    }),
+    http.post("/api/v1/sessions/:sessionId/chat/messages", () => {
+      requests += 1;
+      return HttpResponse.json({}, { status: 500 });
+    }),
+  );
+  renderAppAt(`/projects/p1/sessions/${RUN}/chat`);
+  expect(await screen.findByText("This answer cannot be resumed.")).toBeInTheDocument();
+  expect(screen.getByText(/saved run cannot be continued safely/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Resume answer" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Use question in new message" }));
+  expect(screen.getByLabelText("Message")).toHaveValue("Compare regions");
+  expect(requests).toBe(0);
+});
+
+it("describes graph progress using user-facing analysis stages", async () => {
+  const { source } = await sendMessage();
+  const stages = [
+    ["model", "Thinking through the question…"], ["tool", "Analyzing the data…"],
+    ["validate", "Checking the results…"], ["generate", "Preparing the analysis…"],
+    ["sandbox", "Running the analysis…"], ["m3_route_intent", "Understanding the question…"],
+    ["m3_build_plan", "Planning the analysis…"], ["new_internal_node", "Working…"],
+  ];
+  for (const [index, [stage, label]] of stages.entries()) {
+    act(() => source.emit("progress", frame(index + 1, "progress", { stage })));
+    expect(screen.getByText(label!)).toBeInTheDocument();
+  }
+  expect(screen.queryByText("new_internal_node")).not.toBeInTheDocument();
+});
+
+it.each(["message.completed", "plan.pending"])("refreshes Inspector and result queries once after %s", async (terminal) => {
+  let messageCount = 0;
+  server.use(
+    http.get("/api/v1/sessions/:sessionId", () => HttpResponse.json({
+      session_id: RUN, project_id: "p1", title: "Chat refresh test", status: "complete",
+      dataset_names: ["sample"], artifact_count: 3, report_status: "final",
+      chat_message_count: messageCount, artifact_type_counts: {}, warnings: [],
+    })),
+    http.post("/api/v1/sessions/:sessionId/chat/messages", () => {
+      messageCount = 1;
+      return HttpResponse.json({ session_id: RUN, message_id: "msg_1",
+        stream_url: `/api/v1/sessions/${RUN}/chat/stream?message_id=msg_1` }, { status: 202 });
+    }),
+  );
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const invalidations = vi.spyOn(client, "invalidateQueries");
+  const resultKeys = [
+    queryKeys.traceRoot(RUN), queryKeys.sessionMetrics(RUN), queryKeys.artifactsRoot(RUN),
+    queryKeys.sessionDebug(RUN), queryKeys.llmDebugCalls(RUN), queryKeys.workspaceUsageRoot,
+  ];
+  const countInvalidations = (key: readonly unknown[]) => invalidations.mock.calls.filter(
+    ([options]) => JSON.stringify(options?.queryKey) === JSON.stringify(key),
+  ).length;
+  const router = createMemoryRouter(routes, { initialEntries: [`/projects/p1/sessions/${RUN}/chat`] });
+  render(<AppProviders client={client}><RouterProvider router={router} /></AppProviders>);
+  const inspector = await screen.findByRole("complementary", { name: "Context Inspector" });
+  await within(inspector).findByText("Chat refresh test");
+  const messagesMetric = within(inspector).getByText("Messages").closest("div")!;
+  expect(within(messagesMetric).getByText("0 messages")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Compare regions" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await screen.findByText("Streaming…");
+  await waitFor(() => expect(within(messagesMetric).getByText("1 messages")).toBeInTheDocument());
+  for (const key of resultKeys) expect(countInvalidations(key)).toBe(0);
+  messageCount = 2;
+  const source = FakeEventSource.latest();
+  const completed = terminal === "plan.pending" ? pendingPlanFrame(1)
+    : frame(1, terminal, { content: "Analysis complete", status: "answer" });
+  act(() => source.emit(terminal, completed));
+  await waitFor(() => expect(within(messagesMetric).getByText("2 messages")).toBeInTheDocument());
+  for (const key of resultKeys) expect(countInvalidations(key)).toBe(1);
+  expect(countInvalidations(queryKeys.session(RUN))).toBe(2);
+  // Neither duplicate delivery nor query-driven/component rerenders repeat the refresh.
+  act(() => source.emit(terminal, completed));
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Next question" } });
+  for (const key of resultKeys) expect(countInvalidations(key)).toBe(1);
+  expect(countInvalidations(queryKeys.session(RUN))).toBe(2);
 });

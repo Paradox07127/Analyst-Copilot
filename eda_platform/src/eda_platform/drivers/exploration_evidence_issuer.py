@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -2167,6 +2168,15 @@ def _artifact_digests(root: Path) -> dict[str, str]:
     for path in root.rglob("*"):
         if path.is_symlink():
             raise ValueError("evidence roots cannot contain symlinks")
+        relative = path.relative_to(root)
+        if (
+            len(relative.parts) == 2
+            and relative.parts[0] == "graphs"
+            and re.fullmatch(r"[0-9a-f]{32}\.sqlite(?:-wal|-shm)?", path.name)
+        ):
+            # Execution cursors are not analytical evidence. The independently
+            # verified journals, receipts and result bodies remain the proof.
+            continue
         if (
             path.is_file()
             and not path.name.endswith(".lock")

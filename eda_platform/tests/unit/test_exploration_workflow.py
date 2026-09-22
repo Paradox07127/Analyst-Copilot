@@ -116,6 +116,7 @@ from eda_platform.schemas.artifacts import Artifact, ArtifactType
 from eda_platform.schemas.claims import Claim, ClaimBundle
 from eda_platform.schemas.datasets import DatasetRecord
 from eda_platform.schemas.exploration import (
+    EXPLORATION_JOURNAL_SCHEMA_VERSION,
     BranchAbandonedEvent,
     InsightFamily,
     LlmCallStartedEvent,
@@ -377,7 +378,7 @@ def _tool() -> AgentTool:
             ),
         )
         artifact = Artifact(
-            id=receipt.receipt_id,
+            id=make_artifact_id("receipt", receipt.model_dump(mode="json")),
             type=ArtifactType.EVIDENCE_RECEIPT,
             project_id="shadow-project",
             session_id="shadow-session",
@@ -1175,7 +1176,7 @@ def _inject_trailing_unsettled_round(root: Path) -> str:
     def _event(kind: str, index: int, **fields: object) -> str:
         return json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": EXPLORATION_JOURNAL_SCHEMA_VERSION,
                 "seq": seq + index,
                 "exploration_id": exploration_id,
                 "attempt_epoch": epoch,
@@ -2635,7 +2636,8 @@ def test_the_issuer_mirrors_the_reducers_new_side_classification(
             step = receipt.execution.logical_step_id  # type: ignore[union-attr]
             workflow.committed_receipts[receipt.receipt_id] = receipt
             journal.append_new(
-                "tool_call_started", logical_step_id=step, input_fingerprint=f"fp-{step}"
+                "tool_call_started", tool_kind="run_open_analysis",
+                logical_step_id=step, input_fingerprint=f"fp-{step}"
             )
             journal.append_new(
                 "receipt_prepared", logical_step_id=step, receipt_id=receipt.receipt_id
@@ -3196,7 +3198,7 @@ def test_concurrent_probe_sessions_overlap_and_keep_result_order(
         journal=journal,
         state=ExplorationWorkflowState(),
         receipt_decoder=artifact_receipt_decoder,
-        probe_concurrency=3,
+        probe_concurrency=2,
     )
     seeds = [
         candidate_seed(
@@ -3223,7 +3225,7 @@ def test_concurrent_probe_sessions_overlap_and_keep_result_order(
 
     batch = outcome.payload
     assert isinstance(batch, ExecutedProbeBatch)
-    assert slow.max_active >= 2, "probe sessions never overlapped"
+    assert slow.max_active == 2, "fan-out must overlap and respect max_concurrency"
     assert elapsed < 0.3, f"sessions ran serially: {elapsed:.3f}s"
     answers = [execution.answer for execution in batch.executions]
     assert answers == sorted(answers, key=lambda a: str(a))  # selection order
@@ -3411,3 +3413,318 @@ def test_cancellation_inside_a_probe_reaches_the_supervisor_as_cancellation(
 
     with pytest.raises(SupervisorCancelled):
         port.execute(context, ProbeSelection((FrontierItem("h", 1.0, payload=seed),)))
+
+
+@pytest.mark.parametrize("unexpected", ["rogue.json", "nested/" + "a" * 32 + ".sqlite"])
+def test_checkpoint_exclusion_does_not_hide_unknown_evidence_artifacts(
+    tmp_path: Path, unexpected: str
+) -> None:
+    from eda_platform.drivers import exploration_evidence_issuer as issuer
+
+    for name in issuer._REQUIRED_ROOT_FILES:
+        (tmp_path / name).write_text("{}")
+    for name in issuer._ARTIFACT_DIRECTORIES:
+        (tmp_path / name).mkdir()
+    graphs = tmp_path / "graphs"
+    graphs.mkdir()
+    checkpoint = graphs / ("a" * 32 + ".sqlite")
+    checkpoint.write_bytes(b"runtime cursor, not evidence")
+    assert not any(name.startswith("graphs/") for name in issuer._artifact_digests(tmp_path))
+    rogue = graphs / unexpected
+    rogue.parent.mkdir(parents=True, exist_ok=True)
+    rogue.write_text("unverified")
+    with pytest.raises(ValueError, match="unexpected evidence artifact"):
+        issuer._artifact_digests(tmp_path)
+
+
+def test_scheduler_restart_adopts_atomic_decision_commit(tmp_path: Path) -> None:
+    store = JsonExplorationWorkflowStateStore(tmp_path / "workflow-state.json")
+    seed = candidate_seed(_proposal(), sequence_index=1, mandatory=True)
+    state = ExplorationWorkflowState()
+
+    class WorkerExit(BaseException):
+        pass
+
+    def persist_then_crash(value: ExplorationWorkflowState) -> None:
+        store.remember(value)
+        raise WorkerExit
+
+    def scheduler(value: ExplorationWorkflowState, persist: Any) -> DeterministicSchedulerPort:
+        return DeterministicSchedulerPort(
+            policy=_scheduler_policy(),
+            admission_context=lambda _: _repeat_admission_context(seed.coverage_key),
+            signals=lambda _, seeds: {
+                item.hypothesis_id: CandidateSignals(business_value=1.0) for item in seeds
+            },
+            state=value, persist_state=persist,
+        )
+
+    with pytest.raises(WorkerExit):
+        scheduler(state, persist_then_crash).admit_and_score(
+            _round_context(0), CandidateBatch((seed,))
+        )
+    reopened = store.load()
+    frontier = scheduler(reopened, store.remember).admit_and_score(
+        _round_context(0), CandidateBatch((seed,))
+    )
+    assert len(reopened.decisions) == 1
+    assert frontier.digest == "frontier_" + reopened.scheduling_commits[0]
+    # A new round remains a separate business decision, even for the same seed.
+    scheduler(reopened, store.remember).admit_and_score(_round_context(1), CandidateBatch((seed,)))
+    assert len(store.load().decisions) == 2
+
+
+@pytest.mark.parametrize("crash_node", ["_execute", "_validate"])
+def test_composed_graph_restarts_with_typed_candidates_and_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_node: str
+) -> None:
+    from eda_platform.agents.exploration import graph as exploration_graph
+
+    class WorkerExit(BaseException):
+        pass
+
+    original = getattr(exploration_graph, crash_node)
+
+    def crash(*_: Any) -> None:
+        raise WorkerExit
+
+    monkeypatch.setattr(exploration_graph, crash_node, crash)
+    tool = _tool()
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    policy = build_exploration_policy(
+        tier="quick", dataset_scope=("ds-1",),
+        tool_capability_digest=exploration_tool_capability_digest((tool,)),
+    )
+
+    def run(provider: Any) -> Any:
+        return run_composed_shadow_exploration(
+            workspace=tmp_path, exploration_id="xpl-sqlite-restart", policy=policy,
+            code_fingerprint="langgraph-test", data_state_witness=WITNESS,
+            provider=provider, tools=(tool,), dataset_profiles=(),
+            scheduler_policy=_scheduler_policy(),
+            admission_context=lambda _: _repeat_admission_context(seed.coverage_key),
+            signals=lambda _, seeds: {
+                item.hypothesis_id: CandidateSignals(business_value=1) for item in seeds
+            },
+            witness=CallableWitnessPort(lambda expected: expected == WITNESS),
+            usage_meter=_UsageMeter(), stat_attempt_counts=lambda: {seed.hypothesis_id: 1},
+            goal_satisfied=lambda state: bool(state.insights),
+        )
+
+    first = _Provider()
+    with pytest.raises(WorkerExit):
+        run(first)
+    monkeypatch.setattr(exploration_graph, crash_node, original)
+    resumed = _Provider()
+    result = run(resumed)
+    assert result.result.stop_reason == "completed", result.result.error
+    assert first.structured_calls == 1
+    assert resumed.structured_calls == 0
+    assert first.tool_calls + resumed.tool_calls == 2
+    state = JsonExplorationWorkflowStateStore(
+        result.journal_path.parent / "workflow-state.json"
+    ).load()
+    assert len(state.decisions) == len(state.scheduling_commits) == 1
+
+
+@pytest.mark.parametrize("control", ["pause", "cancel"])
+@pytest.mark.parametrize("boundary", ["provider", "tool"])
+def test_composed_control_during_probe_settles_and_pause_resumes(
+    tmp_path: Path, control: str, boundary: str,
+) -> None:
+    """Control arriving within a phase must survive its journal admission race."""
+    exploration_id = "xpl-control"
+    journal = JsonlExplorationJournal(
+        tmp_path / "exploration-eval" / exploration_id / "journal.jsonl"
+    )
+
+    def request_control() -> None:
+        if control == "pause":
+            journal.append_new("pause_requested", reason="test in-flight pause")
+        else:
+            journal.append_new(
+                "exploration_stopped", stop_reason="cancelled", final_report_ref=None,
+            )
+
+    class ControlledProvider(_Provider):
+        def tool_call(self, **kwargs: Any) -> LLMToolResponse:
+            response = super().tool_call(**kwargs)
+            if boundary == "provider" and self.tool_calls == 1:
+                request_control()
+            return response
+
+    base_tool = _tool()
+    tool_calls: list[str] = []
+
+    def execute(arguments: BaseModel) -> AgentToolResult:
+        tool_calls.append("execute")
+        result = base_tool.execute(arguments)
+        if boundary == "tool" and len(tool_calls) == 1:
+            request_control()
+        return result
+
+    tool = replace(base_tool, execute=execute)
+    seed = candidate_seed(_proposal(), sequence_index=1)
+    policy = build_exploration_policy(
+        tier="quick", dataset_scope=("ds-1",),
+        tool_capability_digest=exploration_tool_capability_digest((tool,)),
+    )
+
+    def run(provider: Any) -> Any:
+        return run_composed_shadow_exploration(
+            workspace=tmp_path, exploration_id=exploration_id, policy=policy,
+            code_fingerprint="control-test", data_state_witness=WITNESS,
+            provider=provider, tools=(tool,), dataset_profiles=(),
+            scheduler_policy=_scheduler_policy(),
+            admission_context=lambda _: _repeat_admission_context(seed.coverage_key),
+            signals=lambda _, seeds: {
+                item.hypothesis_id: CandidateSignals(business_value=1) for item in seeds
+            },
+            witness=CallableWitnessPort(lambda expected: expected == WITNESS),
+            usage_meter=_UsageMeter(), stat_attempt_counts=lambda: {seed.hypothesis_id: 1},
+            goal_satisfied=lambda state: bool(state.insights),
+        )
+
+    initial = ControlledProvider()
+    result = run(initial)
+    state = journal.rebuild()
+    assert state is not None and not state.pending_call_ids and not state.pending_tool_steps
+    assert initial.structured_calls == initial.tool_calls == 1
+    if control == "cancel":
+        assert result.result.stop_reason == state.stop_reason == "cancelled"
+        assert result.result.status == state.status == "stopped"
+        assert run(_Provider(enabled=False)).result.stop_reason == "cancelled"
+        return
+    assert result.result.status == state.status == "paused"
+    assert state.stop_reason is None
+    committed_before_resume = set(state.step_receipt_refs.values())
+    journal.append_new("resumed")
+    resumed = _Provider()
+    # The first probe response was already committed before pause. Only its
+    # final model response remains; no paid response or committed tool is repeated.
+    resumed.tool_calls = 1
+    completed = run(resumed)
+    assert completed.result.stop_reason == "completed", completed.result.error
+    assert resumed.structured_calls == 0 and resumed.tool_calls == 2
+    assert tool_calls == ["execute"]
+    workflow = JsonExplorationWorkflowStateStore(
+        completed.journal_path.parent / "workflow-state.json"
+    ).load()
+    final = journal.rebuild()
+    assert final is not None
+    assert set(workflow.committed_receipts) == set(final.step_receipt_refs.values())
+    assert committed_before_resume.issubset(workflow.committed_receipts)
+    assert len(workflow.committed_receipts) == 1
+
+
+@pytest.mark.parametrize("control", ["pause", "cancel"])
+def test_concurrent_probe_control_waits_for_other_inflight_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, control: str,
+) -> None:
+    import threading
+
+    from eda_platform.agents.exploration.executor import JsonlProbeJournalHooks
+
+    journal = JsonlExplorationJournal(
+        tmp_path / "exploration-eval" / "xpl-concurrent-control" / "journal.jsonl"
+    )
+    both_started = threading.Barrier(2)
+    first_blocked = threading.Event()
+    second_returned = threading.Event()
+    counter_lock = threading.Lock()
+    original_start = JsonlProbeJournalHooks.tool_started
+    original_terminal = JsonlProbeJournalHooks.llm_terminal
+
+    def tool_started(self: Any, **kwargs: Any) -> None:
+        try:
+            original_start(self, **kwargs)
+        finally:
+            first_blocked.set()
+
+    monkeypatch.setattr(JsonlProbeJournalHooks, "tool_started", tool_started)
+
+    def llm_terminal(self: Any, **kwargs: Any) -> None:
+        try:
+            original_terminal(self, **kwargs)
+        finally:
+            if control == "cancel":
+                first_blocked.set()
+
+    monkeypatch.setattr(JsonlProbeJournalHooks, "llm_terminal", llm_terminal)
+    proposals = tuple(
+        _proposal().model_copy(update={"probe_kind": f"region-{index}"}) for index in range(2)
+    )
+
+    class ConcurrentProvider(_Provider):
+        def structured(self, *, schema: type[T], **_: Any) -> T:
+            self.structured_calls += 1
+            self._record_usage()
+            return schema.model_validate(HypothesisProposalBatch(proposals=proposals).model_dump())
+
+        def tool_call(self, **_: Any) -> LLMToolResponse:
+            with counter_lock:
+                self.tool_calls += 1
+                index = self.tool_calls
+            both_started.wait(timeout=5)
+            if index == 1:
+                if control == "pause":
+                    journal.append_new("pause_requested", reason="concurrent request")
+                else:
+                    journal.append_new(
+                        "exploration_stopped", stop_reason="cancelled", final_report_ref=None,
+                    )
+                self._record_usage()
+                return LLMToolResponse(tool_calls=[LLMToolCall(
+                    call_id="c1", name="profile_slice", arguments={},
+                )])
+            assert first_blocked.wait(timeout=5)
+            self._record_usage()
+            second_returned.set()
+            return LLMToolResponse(content="Done.")
+
+    seeds = tuple(candidate_seed(p, sequence_index=i + 1) for i, p in enumerate(proposals))
+    tool = _tool()
+    provider = ConcurrentProvider()
+    policy = build_exploration_policy(
+        tier="standard", dataset_scope=("ds-1",),
+        tool_capability_digest=exploration_tool_capability_digest((tool,)),
+    )
+    admission = replace(
+        _repeat_admission_context(seeds[0].coverage_key),
+        family_quota_remaining={InsightFamily.DIAGNOSTIC: 2},
+        unexplored_coverage_keys=frozenset(s.coverage_key for s in seeds),
+    )
+    result = run_composed_shadow_exploration(
+        workspace=tmp_path, exploration_id="xpl-concurrent-control", policy=policy,
+        code_fingerprint="concurrent-control", data_state_witness=WITNESS,
+        provider=provider, tools=(tool,), dataset_profiles=(),
+        scheduler_policy=_scheduler_policy().model_copy(update={"max_batch_size": 2}),
+        admission_context=lambda _: admission,
+        signals=lambda _, items: {
+            item.hypothesis_id: CandidateSignals(business_value=1) for item in items
+        },
+        witness=CallableWitnessPort(lambda _: True), usage_meter=_UsageMeter(),
+        probe_concurrency=2,
+    )
+    state = journal.rebuild()
+    assert second_returned.is_set(), (result.result, provider.tool_calls)
+    assert provider.structured_calls == 1 and provider.tool_calls == 2
+    assert state is not None and not state.pending_call_ids and not state.pending_tool_steps
+    if control == "pause":
+        assert result.result.status == state.status == "paused"
+        assert state.llm_calls_settled == 3
+    else:
+        assert result.result.stop_reason == state.stop_reason == "cancelled"
+    assert state.tool_calls_committed == 0
+
+
+def test_receipt_artifact_decoder_requires_the_current_content_addressed_envelope() -> None:
+    receipt = _reducer_receipt("call")
+    payload = receipt.model_dump(mode="json")
+    artifact = Artifact(
+        id=make_artifact_id("receipt", payload), type=ArtifactType.EVIDENCE_RECEIPT,
+        project_id="p", session_id="s", payload=payload,
+    )
+    assert artifact_receipt_decoder(artifact) == receipt
+    with pytest.raises(ValueError, match="content-addressed"):
+        artifact_receipt_decoder(artifact.model_copy(update={"id": receipt.receipt_id}))

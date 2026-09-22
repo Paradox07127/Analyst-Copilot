@@ -33,7 +33,6 @@ from eda_platform.schemas.questions import (
 )
 from eda_platform.schemas.relations import (
     RelationshipCandidate,
-    RelationshipCandidateSet,
     RelationshipColumnPair,
     RelationshipSignals,
 )
@@ -444,7 +443,6 @@ def test_auto_execution_gates_reject_medium_join_and_cap_top_three() -> None:
 
     selected = select_auto_execution_candidates(
         candidates,
-        relationship_candidates=RelationshipCandidateSet(candidates=[medium_relation]),
         limit=3,
     )
 
@@ -499,7 +497,6 @@ def test_auto_execution_never_selects_a_question_that_requires_a_join() -> None:
 
     selected = select_auto_execution_candidates(
         candidates,
-        relationship_candidates=RelationshipCandidateSet(candidates=[relation]),
         limit=3,
     )
 

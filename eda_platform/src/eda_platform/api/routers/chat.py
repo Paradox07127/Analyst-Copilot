@@ -28,6 +28,7 @@ from eda_platform.application.dto import (
     ChatMessagePage,
     ChatPendingPlanList,
     ChatPlanRejected,
+    ChatRecoverableTurnList,
     ChatStreamEvent,
     ChatTurnCancelled,
 )
@@ -81,9 +82,7 @@ def send_chat_message(
     request: Request,
     x_eda_session: str | None = Header(None, alias=SESSION_HEADER),
 ) -> ChatMessageAccepted:
-    effective = request.app.state.settings_service.resolve(
-        session_id_from_header(x_eda_session)
-    )
+    effective = request.app.state.settings_service.resolve(session_id_from_header(x_eda_session))
     return _service(request).send_message(
         session_id,
         text=body.text,
@@ -96,6 +95,31 @@ def send_chat_message(
 def cancel_chat_turn(session_id: str, request: Request) -> ChatTurnCancelled:
     """Stop the in-flight turn at its next checkpoint; the stream reports the end."""
     return _service(request).cancel_turn(session_id)
+
+
+@router.get("/sessions/{session_id}/chat/recoverable-turns", response_model=ChatRecoverableTurnList)
+def list_recoverable_chat_turns(session_id: str, request: Request) -> ChatRecoverableTurnList:
+    """Discover interrupted or undelivered answers without executing them."""
+    return _service(request).list_recoverable_turns(session_id)
+
+
+@router.post(
+    "/sessions/{session_id}/chat/turns/{message_id}/resume",
+    status_code=202,
+    response_model=ChatMessageAccepted,
+)
+def resume_chat_turn(
+    session_id: str,
+    message_id: str,
+    request: Request,
+    x_eda_session: str | None = Header(None, alias=SESSION_HEADER),
+) -> ChatMessageAccepted:
+    effective = request.app.state.settings_service.resolve(session_id_from_header(x_eda_session))
+    return _service(request).resume_turn(
+        session_id,
+        message_id,
+        effective_settings=effective,
+    )
 
 
 @router.get("/sessions/{session_id}/chat/pending-plans", response_model=ChatPendingPlanList)
@@ -120,9 +144,7 @@ def approve_chat_plan(
     )
 
 
-@router.post(
-    "/sessions/{session_id}/chat/plans/{plan_id}/reject", response_model=ChatPlanRejected
-)
+@router.post("/sessions/{session_id}/chat/plans/{plan_id}/reject", response_model=ChatPlanRejected)
 def reject_chat_plan(
     session_id: str, plan_id: str, body: ChatPlanDecisionRequest, request: Request
 ) -> ChatPlanRejected:

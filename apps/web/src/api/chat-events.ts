@@ -65,6 +65,8 @@ export type ChatPhase =
   | "connecting"
   | "running"
   | "completed"
+  | "cancelled"
+  | "refused"
   | "awaiting_approval"
   | "failed"
   | "disconnected";
@@ -121,6 +123,8 @@ function reduce(state: ChatTurnState, action: Action): ChatTurnState {
   }
   if (action.kind === "disconnected") {
     return state.phase === "completed" ||
+      state.phase === "cancelled" ||
+      state.phase === "refused" ||
       state.phase === "failed" ||
       state.phase === "awaiting_approval"
       ? state
@@ -166,19 +170,25 @@ function reduce(state: ChatTurnState, action: Action): ChatTurnState {
           estimatedScan: str(data["estimated_scan"], "unknown"),
         },
       };
-    case "message.completed":
+    case "message.completed": {
+      const status = str(data["status"], "answer");
       return {
         ...state,
-        phase: "completed",
+        phase: status === "error" ? "failed"
+          : status === "cancelled" ? "cancelled"
+          : status === "refused" ? "refused"
+          : "completed",
         stage: null,
+        error: status === "error" ? str(data["content"], "The chat turn failed.") : null,
         completed: {
           content: str(data["content"]),
-          status: str(data["status"], "answer"),
+          status,
           sql: typeof data["sql"] === "string" ? data["sql"] : null,
           artifactRefs: strList(data["artifact_refs"]),
           validation: validation(data["validation"]),
         },
       };
+    }
     case "turn.failed":
       return {
         ...state,
@@ -194,9 +204,10 @@ function reduce(state: ChatTurnState, action: Action): ChatTurnState {
 function parseEvent(raw: string): ChatStreamEvent | null {
   try {
     const data = JSON.parse(raw) as Partial<ChatStreamEvent>;
-    if (typeof data !== "object" || data === null) return null;
+    if (typeof data !== "object" || data === null ||
+      typeof data.seq !== "number" || !Number.isSafeInteger(data.seq) || data.seq < 0) return null;
     return {
-      seq: typeof data.seq === "number" ? data.seq : 0,
+      seq: data.seq,
       session_id: String(data.session_id ?? ""),
       message_id: String(data.message_id ?? ""),
       type: String(data.type ?? "unknown"),
@@ -215,6 +226,7 @@ function parseEvent(raw: string): ChatStreamEvent | null {
 export function useChatStream(
   messageId: string | null,
   streamUrl: string | null,
+  resumeAttempt = 0,
 ): ChatTurnState {
   const [state, dispatch] = useReducer(reduce, initialChatTurnState);
 
@@ -227,10 +239,14 @@ export function useChatStream(
 
     const source = new EventSource(streamUrl);
     let terminal = false;
+    // Native reconnects retain this cursor. Explicit recovery opens a fresh
+    // stream and rebuilds the view from its durable event history.
+    let lastSeq = -1;
 
     const onEvent = (message: MessageEvent) => {
       const event = parseEvent(String(message.data));
-      if (!event) return;
+      if (terminal || !event || event.message_id !== messageId || event.seq <= lastSeq) return;
+      lastSeq = event.seq;
       dispatch({ kind: "event", event });
       if (TERMINAL_TYPES.has(event.type)) {
         terminal = true;
@@ -247,8 +263,11 @@ export function useChatStream(
       }
     };
 
-    return () => source.close();
-  }, [messageId, streamUrl]);
+    return () => {
+      terminal = true;
+      source.close();
+    };
+  }, [messageId, streamUrl, resumeAttempt]);
 
   return state;
 }
