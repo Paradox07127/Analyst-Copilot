@@ -18,7 +18,7 @@ from eda_platform.schemas.exploration_budget import (
     SessionBudgetPolicyModel,
 )
 
-EXPLORATION_PROFILE_VERSION = "e4a-experimental-v1"
+EXPLORATION_PROFILE_VERSION = "e4a-experimental-v2"
 EXPLORATION_STATISTICAL_POLICY_VERSION = "claim-gates-v1"
 EXPLORATION_TIERS: tuple[ExplorationTier, ...] = ("quick", "standard", "deep")
 

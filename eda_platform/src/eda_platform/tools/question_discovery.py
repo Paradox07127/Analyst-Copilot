@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -371,12 +372,37 @@ def _candidate_dedup_key(candidate: QuestionCandidate) -> str:
             dataset, default_dataset_display_name(dataset)
         )
         text = text.replace(dataset, display_name)
-    return normalized_question_key(text)
+    # Matching prose is insufficient when entities, columns or joins differ.
+    # Identifiers stay case-sensitive: case folding is for natural language only.
+    return stable_hash({
+        "question": normalized_question_key(text),
+        "datasets": sorted(set(candidate.target_datasets)),
+        "columns": {
+            dataset: sorted(set(columns))
+            for dataset, columns in sorted(candidate.referenced_columns.items())
+        },
+        "relations": sorted(set(candidate.required_relations)),
+        "analysis_mode": candidate.analysis_mode,
+        "metric_id": candidate.metric_id,
+        "units": candidate.produced_units,
+    }, length=64)
 
 
 def normalized_question_key(text: str) -> str:
-    tokens = [token for token in re.findall(r"[0-9a-z]+", text.lower()) if token not in _STOPWORDS]
-    return " ".join(tokens)
+    """Normalize prose without dropping non-Latin letters or combining marks.
+
+    This is lexical deduplication, not proof that two analytical requests are
+    equivalent. Preserve mathematical/currency symbols and percent signs so
+    opposite comparisons do not accidentally become the same question.
+    """
+    normalized = unicodedata.normalize("NFC", text.casefold())
+    separated = "".join(
+        char if unicodedata.category(char)[0] in {"L", "M", "N", "S"} or char == "%" else " "
+        for char in normalized
+    )
+    tokens = [token for token in separated.split() if token not in _STOPWORDS]
+    return " ".join(tokens) or normalized.strip()
+
 
 
 # DI10-W2 auto-execution funnel.

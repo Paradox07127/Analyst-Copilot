@@ -43,6 +43,7 @@ from eda_platform.agents.exploration.supervisor import (
     reduction_outcome_digest,
 )
 from eda_platform.agents.exploration.workflow import (
+    _MAX_PENDING_CANDIDATES,
     _MAX_SETTLED_FINDINGS,
     ColumnFact,
     DatasetFacts,
@@ -55,13 +56,14 @@ from eda_platform.agents.exploration.workflow import (
     artifact_receipt_decoder,
     candidate_batch_digest,
     final_reduction_state_digest,
+    pending_candidates,
     scheduling_decision_digest,
     settled_findings,
 )
 from eda_platform.agents.receipts import build_receipt
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
 from eda_platform.agents.tool_context import current_execution_context
-from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.budget import BudgetExceeded, BudgetUsageUncertain
 from eda_platform.core.claim_gates import run_claim_gates
 from eda_platform.core.exploration_budget import ToolCallProjection
 from eda_platform.core.exploration_journal import (
@@ -484,7 +486,8 @@ def test_composed_shadow_workflow_runs_and_recovers_without_reissuing(
     report = (tmp_path / first.result.report_ref).read_text(encoding="utf-8")
     assert amended_state.effective_policy_fingerprint in report
     assert f"- policy_fingerprint: {policy.policy_fingerprint}" not in report
-    assert "**Does revenue differ by region?**" in report
+    assert "**regional difference: 42**" in report
+    assert "Does revenue differ by region?" not in report
     assert "## Supported insights" in report
     assert "## Refuted hypotheses" in report
     assert "## Inconclusive questions" in report
@@ -2947,6 +2950,146 @@ def test_settled_findings_are_bounded_and_carry_the_insight_status() -> None:
     assert {finding.verdict for finding in findings} == {"supported"}
 
 
+def test_settled_findings_use_latest_update_not_hash_order() -> None:
+    state = ExplorationWorkflowState()
+    for index in range(_MAX_SETTLED_FINDINGS + 3):
+        # The most recent finding deliberately has the smallest opaque id.
+        insight_id = f"insight-{100 - index:03d}"
+        bundle_id = f"bundle-{index:03d}"
+        state.admitted_bundles[bundle_id] = _bundle_with_text(bundle_id, f"finding {index}")
+        state.insights[insight_id] = _insight_for(insight_id, bundle_id).model_copy(
+            update={"created_round": index, "last_updated_round": index}
+        )
+    # An old insight reinforced now is newer than all newly created ones.
+    state.insights["insight-100"] = state.insights["insight-100"].model_copy(
+        update={"last_updated_round": 100}
+    )
+    findings = settled_findings(state)
+    assert findings[0].statement == "finding 0"
+    assert findings[1].statement == f"finding {_MAX_SETTLED_FINDINGS + 2}"
+    assert len(findings) == _MAX_SETTLED_FINDINGS
+    assert "finding 1" not in {finding.statement for finding in findings}
+
+
+def test_pending_questions_survive_restart_and_are_selected_without_reproposal(
+    tmp_path: Path,
+) -> None:
+    from eda_platform.worker.exploration import _durable_admission_state
+
+    provider, generator = _generator_with_context(tmp_path)
+    second_proposal = _proposal().model_copy(update={"probe_kind": "regional_followup"})
+    first = candidate_seed(_proposal(), sequence_index=1)
+    second = candidate_seed(second_proposal, sequence_index=2)
+    recovery = generator.recovery
+    original_batch = CandidateBatch((first, second))
+    recovery.remember("xpl-generate:round:0:generate", original_batch)
+    response_digests = {"xpl-generate:round:0:generate": candidate_batch_digest(original_batch)}
+    store = JsonExplorationWorkflowStateStore(tmp_path / "workflow-state.json")
+    state = ExplorationWorkflowState()
+    policy = build_exploration_policy(
+        tier="quick", dataset_scope=("ds-1",), tool_capability_digest="tools-v1"
+    )
+
+    def scheduler_for(current: ExplorationWorkflowState) -> DeterministicSchedulerPort:
+        def admission(_context: PhaseContext) -> AdmissionContext:
+            historical, answered, executed, quotas = _durable_admission_state(current, policy)
+            return replace(
+                _repeat_admission_context(first.coverage_key),
+                historical_hypothesis_fingerprints=historical,
+                answered_hypothesis_fingerprints=answered,
+                executed_query_fingerprints=executed,
+                family_quota_remaining=quotas,
+            )
+
+        return DeterministicSchedulerPort(
+            policy=_scheduler_policy(), admission_context=admission,
+            signals=lambda _context, seeds: {
+                seed.hypothesis_id: CandidateSignals(
+                    business_value=1.0 if seed.hypothesis_id == first.hypothesis_id else 0.8,
+                    query_fingerprint=seed.hypothesis_fingerprint[:16],
+                ) for seed in seeds
+            },
+            state=current, persist_state=store.remember,
+        )
+
+    frontier = scheduler_for(state).admit_and_score(
+        _round_context(0), CandidateBatch((first, second))
+    )
+    assert [item.hypothesis_id for item in frontier.items] == [first.hypothesis_id]
+    restored = store.load()
+    generator.pending_candidates = lambda context: pending_candidates(
+        context, state=restored,
+        recovery=JsonSupervisorRecoveryStore(tmp_path / "responses"),
+        response_digests=response_digests,
+    )
+
+    def conclude(**kwargs: Any) -> HypothesisProposalBatch:
+        provider.payloads.append(kwargs["payload"])
+        return HypothesisProposalBatch(concluded=True, conclusion_reason="No new questions.")
+
+    provider.structured = conclude  # type: ignore[method-assign]
+    batch = generator.generate(
+        replace(_generate_context(), round_index=1),
+        logical_step_id="xpl-generate:round:1:generate",
+    )
+    assert batch.candidates == (second,)
+    assert provider.payloads[-1]["pending_questions"][0]["hypothesis_id"] == second.hypothesis_id
+    assert "does not cancel" in provider.payloads[-1]["instruction"]
+    frontier = scheduler_for(restored).admit_and_score(_round_context(1), batch)
+    assert [item.hypothesis_id for item in frontier.items] == [second.hypothesis_id]
+    assert not pending_candidates(
+        _round_context(2), state=store.load(), recovery=recovery, response_digests=response_digests
+    )
+    assert len(store.load().decisions) == 3
+
+
+def test_pending_window_is_bounded_and_missing_body_fails_closed(tmp_path: Path) -> None:
+    provider, generator = _generator_with_context(tmp_path)
+    del provider
+    state = ExplorationWorkflowState()
+    seeds = tuple(
+        candidate_seed(_proposal().model_copy(update={"probe_kind": f"probe_{index}"}),
+                       sequence_index=index + 1)
+        for index in range(_MAX_PENDING_CANDIDATES + 5)
+    )
+    port = DeterministicSchedulerPort(
+        policy=_scheduler_policy(),
+        admission_context=lambda _context: _repeat_admission_context("coverage"),
+        signals=lambda _context, items: {
+            seed.hypothesis_id: CandidateSignals(business_value=1.0) for seed in items
+        },
+        state=state,
+    )
+    port.admit_and_score(_round_context(0), CandidateBatch(seeds))
+    with pytest.raises(KeyError):
+        pending_candidates(
+            _round_context(1), state=state, recovery=generator.recovery, response_digests={}
+        )
+    generator.recovery.remember("xpl-generate:round:0:generate", CandidateBatch(seeds))
+    with pytest.raises(SupervisorInvariantError, match="journal digest"):
+        pending_candidates(
+            _round_context(1), state=state, recovery=generator.recovery, response_digests={}
+        )
+    pending = pending_candidates(
+        _round_context(1), state=state, recovery=generator.recovery,
+        response_digests={
+            "xpl-generate:round:0:generate": candidate_batch_digest(CandidateBatch(seeds))
+        },
+    )
+    assert len(pending) == _MAX_PENDING_CANDIDATES
+    selected_ids = {item.hypothesis_id for item in state.decisions if item.chosen}
+    assert not selected_ids & {seed.hypothesis_id for seed in pending}
+
+
+def test_generate_merges_reproposed_pending_candidate_once(tmp_path: Path) -> None:
+    provider, generator = _generator_with_context(tmp_path)
+    del provider
+    pending = candidate_seed(_proposal(), sequence_index=1)
+    generator.pending_candidates = lambda _context: (pending,)
+    batch = generator.generate(_generate_context(), logical_step_id="xpl-generate:round:0:generate")
+    assert batch.candidates == (pending,)
+
+
 def test_the_issuer_reads_a_replayed_mandatory_probe_as_one_candidate() -> None:
     first = candidate_seed(_proposal(), sequence_index=1, mandatory=True)
     replayed = replace(
@@ -3728,3 +3871,185 @@ def test_receipt_artifact_decoder_requires_the_current_content_addressed_envelop
     assert artifact_receipt_decoder(artifact) == receipt
     with pytest.raises(ValueError, match="content-addressed"):
         artifact_receipt_decoder(artifact.model_copy(update={"id": receipt.receipt_id}))
+
+
+def _budget_delivery_run(
+    tmp_path: Path, *, provider: _Provider, tool: AgentTool, request_limit: int = 2,
+) -> Any:
+    base = build_exploration_policy(
+        tier="quick", dataset_scope=("ds-1",),
+        tool_capability_digest=exploration_tool_capability_digest((tool,)),
+    )
+    policy = sealed_policy(base.model_copy(update={
+        "budget": base.budget.model_copy(update={"llm": base.budget.llm.model_copy(update={
+            "max_requests": request_limit, "protected_requests": 0,
+        })}),
+        "policy_fingerprint": "",
+    }))
+    return run_composed_shadow_exploration(
+        workspace=tmp_path, exploration_id="budget-delivery", policy=policy,
+        code_fingerprint="budget-delivery-v1", data_state_witness=WITNESS,
+        provider=provider, tools=(tool,), dataset_profiles=(),
+        scheduler_policy=_scheduler_policy(),
+        admission_context=lambda _context: _repeat_admission_context("coverage"),
+        signals=lambda _context, seeds: {
+            seed.hypothesis_id: CandidateSignals(business_value=1.0) for seed in seeds
+        },
+        witness=CallableWitnessPort(lambda expected: expected == WITNESS),
+        usage_meter=_UsageMeter(),
+        stat_attempt_counts=lambda: {
+            candidate_seed(_proposal(), sequence_index=1).hypothesis_id: 1
+        },
+        # Even an answered goal must not overwrite the actual budget stop.
+        goal_satisfied=lambda state: bool(state.insights),
+    )
+
+
+@pytest.mark.parametrize("receipt_kind", ["valid", "ungrounded_causal", "unadjudicated", "none"])
+def test_budget_stop_runs_existing_gates_before_delivering_partial_findings(
+    tmp_path: Path, receipt_kind: str,
+) -> None:
+    original_tool = _tool()
+    def execute(args: BaseModel) -> AgentToolResult:
+        result = original_tool.execute(args)
+        receipt = EvidenceReceipt.model_validate(result.receipt_artifact.payload)  # type: ignore[union-attr]
+        if receipt_kind == "ungrounded_causal":
+            receipt = receipt.model_copy(update={"facts": (
+                receipt.facts[0].model_copy(update={"name": "region causes revenue"}),
+            )})
+        elif receipt_kind == "unadjudicated":
+            receipt = receipt.model_copy(update={"statistics": None})
+        receipt = receipt.model_copy(update={
+            "content_digest": receipt_content_digest(receipt.model_dump(mode="json"))
+        })
+        artifact = Artifact(
+            id=make_artifact_id("receipt", receipt.model_dump(mode="json")),
+            type=ArtifactType.EVIDENCE_RECEIPT,
+            project_id="shadow-project", session_id="budget-delivery",
+            payload=receipt.model_dump(mode="json"),
+        )
+        return AgentToolResult(content=result.content, receipt_artifact=artifact)
+
+    tool = replace(original_tool, execute=execute)
+    provider = _Provider()
+    result = _budget_delivery_run(
+        tmp_path, provider=provider, tool=tool,
+        request_limit=1 if receipt_kind == "none" else 2,
+    )
+    assert result.result.stop_reason == "budget_exhausted", result.result.error
+    assert result.result.rounds_settled == 1
+    assert provider.structured_calls == 1
+    assert provider.tool_calls == (0 if receipt_kind == "none" else 1)
+    root = result.journal_path.parent
+    state = JsonExplorationWorkflowStateStore(root / "workflow-state.json").load()
+    assert len(state.insights) == (1 if receipt_kind == "valid" else 0)
+    assert len(state.committed_receipts) == (0 if receipt_kind == "none" else 1)
+    if receipt_kind == "ungrounded_causal":
+        assert not state.admitted_bundles
+        assert any(
+            violation.code == "causal_language"
+            for gate in state.gate_reports.values()
+            for verdict in gate.verdicts for violation in verdict.violations
+        )
+    if receipt_kind == "unadjudicated":
+        assert len(state.admitted_bundles) == 1
+    events = JsonlExplorationJournal(result.journal_path).events()
+    assert sum(event.event_type == "reduction_committed" for event in events) == 1
+    assert result.result.report_ref is not None
+    report = (tmp_path / result.result.report_ref).read_text()
+    assert "stop_reason: budget_exhausted" in report
+    assert ("**regional difference: 42**" in report) is (receipt_kind == "valid")
+    before = (root / "llm-budget.jsonl").read_bytes()
+    disabled = _Provider(enabled=False)
+    replayed = _budget_delivery_run(
+        tmp_path, provider=disabled, tool=tool,
+        request_limit=1 if receipt_kind == "none" else 2,
+    )
+    assert replayed.result.stop_reason == "budget_exhausted"
+    assert (root / "llm-budget.jsonl").read_bytes() == before
+    assert disabled.structured_calls == disabled.tool_calls == 0
+
+
+def test_budget_partial_reduction_recovers_after_commit_gap_without_reissuing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from eda_platform.agents.exploration.workflow import ClaimGateReducerPort
+
+    original = ClaimGateReducerPort.reduce
+    crashed = False
+    def crash_after_persist(self: Any, *args: Any, **kwargs: Any) -> ReductionOutcome:
+        nonlocal crashed
+        result = original(self, *args, **kwargs)
+        if not crashed:
+            crashed = True
+            raise SystemExit("crash after domain persistence before reduction journal commit")
+        return result
+
+    monkeypatch.setattr(ClaimGateReducerPort, "reduce", crash_after_persist)
+    provider = _Provider()
+    tool = _tool()
+    with pytest.raises(SystemExit, match="domain persistence"):
+        _budget_delivery_run(tmp_path, provider=provider, tool=tool)
+    root = tmp_path / "exploration-eval" / "budget-delivery"
+    before = (root / "llm-budget.jsonl").read_bytes()
+    disabled = _Provider(enabled=False)
+    result = _budget_delivery_run(tmp_path, provider=disabled, tool=tool)
+    assert result.result.stop_reason == "budget_exhausted", result.result.error
+    assert disabled.structured_calls == disabled.tool_calls == 0
+    assert (root / "llm-budget.jsonl").read_bytes() == before
+    events = JsonlExplorationJournal(result.journal_path).events()
+    assert sum(event.event_type == "gate_verdict" for event in events) == 1
+    assert sum(event.event_type == "reduction_committed" for event in events) == 1
+    assert sum(event.event_type == "round_settled" for event in events) == 1
+    assert sum(event.event_type == "receipt_committed" for event in events) == 1
+    state = JsonExplorationWorkflowStateStore(root / "workflow-state.json").load()
+    assert len(state.insights) == 1
+
+
+@pytest.mark.parametrize("stage", ["preflight", "request"])
+def test_candidate_generation_does_not_flatten_unknown_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    provider, generator = _generator_with_context(tmp_path)
+    error = BudgetUsageUncertain("unknown-call", stage="settlement", missing=("usage",))
+    def fail(**_kwargs: Any) -> Any:
+        raise error
+    monkeypatch.setattr(
+        provider, "preflight_structured" if stage == "preflight" else "structured",
+        fail, raising=False,
+    )
+    with pytest.raises(BudgetUsageUncertain) as caught:
+        generator.generate(_generate_context(), logical_step_id="xpl-generate:round:0:generate")
+    assert caught.value is error
+    events = generator.journal.events()
+    assert not any(event.event_type == "llm_call_rejected" for event in events)
+    if stage == "preflight":
+        assert not any(event.event_type == "llm_call_started" for event in events)
+    else:
+        assert any(event.event_type == "llm_call_uncertain" for event in events)
+        with pytest.raises(SupervisorInvariantError, match="refusing to resend"):
+            generator.generate(_generate_context(), logical_step_id="xpl-generate:round:0:generate")
+
+
+def test_unknown_probe_usage_cannot_take_partial_budget_publication_path(tmp_path: Path) -> None:
+    class UnknownProvider(_Provider):
+        def tool_call(self, **kwargs: Any) -> LLMToolResponse:
+            if self.tool_calls:
+                raise BudgetUsageUncertain("unknown-call", stage="settlement", missing=("usage",))
+            return super().tool_call(**kwargs)
+
+    provider = UnknownProvider()
+    result = _budget_delivery_run(tmp_path, provider=provider, tool=_tool(), request_limit=4)
+    assert result.result.stop_reason == "failed"
+    assert "BudgetUsageUncertain" in (result.result.error or "")
+    assert result.result.report_ref is None
+    journal = JsonlExplorationJournal(result.journal_path)
+    state = journal.rebuild()
+    assert state is not None
+    assert state.tool_calls_committed == 1
+    assert state.llm_calls_uncertain == 1
+    assert state.rounds_settled == 0
+    workflow = JsonExplorationWorkflowStateStore(
+        result.journal_path.parent / "workflow-state.json"
+    ).load()
+    assert not workflow.insights and not workflow.admitted_bundles

@@ -18,7 +18,7 @@ from eda_platform.agents.exploration.executor import (
 )
 from eda_platform.agents.runtime import AgentTool, AgentToolResult
 from eda_platform.agents.tool_context import current_execution_context
-from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.budget import BudgetExceeded, BudgetUsageUncertain
 from eda_platform.core.cancellation import (
     CancellationCause,
     CancellationError,
@@ -27,7 +27,6 @@ from eda_platform.core.cancellation import (
 )
 from eda_platform.core.event_journal import EventTransitionError
 from eda_platform.core.exploration_budget import (
-    ToolBudgetExceeded,
     ToolCallLedger,
     ToolCallProjection,
 )
@@ -548,8 +547,9 @@ def test_whole_batch_projection_rejects_before_any_tool_started() -> None:
         journal=hooks,
     )
 
-    with pytest.raises(ToolBudgetExceeded):
-        executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    result = executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    assert result.status == "budget_exhausted"
+    assert result.artifacts == []
 
     assert executions == 0
     assert not any(event == "tool_started" for event, _fields in hooks.events)
@@ -577,8 +577,9 @@ def test_failed_execution_settles_resources_without_success_and_budget_stops_ret
         journal=hooks,
     )
 
-    with pytest.raises(ToolBudgetExceeded):
-        executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    result = executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    assert result.status == "budget_exhausted"
+    assert result.artifacts == []
 
     assert len(provider.calls) == 1
     assert ledger.snapshot()["successful_tool_calls"] == 0
@@ -609,8 +610,9 @@ def test_actual_success_over_cap_is_failed_before_receipt_commit() -> None:
         journal=hooks,
     )
 
-    with pytest.raises(ToolBudgetExceeded):
-        executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    result = executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    assert result.status == "budget_exhausted"
+    assert result.artifacts == []
 
     terminal = [fields for event, fields in hooks.events if event == "tool_terminal"]
     assert terminal[-1]["outcome"] == "failed"
@@ -762,10 +764,14 @@ def test_budget_and_cancellation_errors_penetrate_even_if_failure_settlement_lat
         usage_meter=_Meter(projected_rows=2, failed_rows=6),
     )
 
-    with pytest.raises(type(terminal_error)) as captured:
-        executor.run(phase="execute_probes", system_prompt="x", user_message="y")
-
-    assert captured.value is terminal_error
+    if isinstance(terminal_error, BudgetExceeded):
+        result = executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+        assert result.status == "budget_exhausted"
+        assert result.artifacts == []
+    else:
+        with pytest.raises(type(terminal_error)) as captured:
+            executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+        assert captured.value is terminal_error
     assert ledger.snapshot()["successful_tool_calls"] == 0
     assert ledger.snapshot()["rows_scanned"] == 6
 
@@ -860,10 +866,10 @@ def test_usage_meter_success_budget_error_still_terminates_the_run() -> None:
         usage_meter=_RaisingMeter(raise_on_success=budget_error),
     )
 
-    with pytest.raises(BudgetExceeded) as captured:
-        executor.run(phase="execute_probes", system_prompt="x", user_message="y")
-
-    assert captured.value is budget_error
+    result = executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    assert result.status == "budget_exhausted"
+    assert result.error == "BudgetExceeded: meter enforced its own cap"
+    assert result.artifacts == []
     terminal = [fields for event, fields in hooks.events if event == "tool_terminal"]
     assert terminal[-1]["outcome"] == "failed"
 
@@ -1301,3 +1307,97 @@ def test_sqlite_batch_recovery_adopts_every_receipt_without_budget_readmission(
     assert final is not None
     assert set(final.step_receipt_refs.values()) == {"receipt-one", "receipt-two"}
     assert final.tool_calls_committed == 2
+
+
+def test_budget_interrupt_inside_tool_batch_keeps_only_committed_receipts() -> None:
+    calls: list[str] = []
+    def first(_args: BaseModel) -> AgentToolResult:
+        calls.append("first")
+        return AgentToolResult(content={"ok": True}, receipt_artifact=_Receipt("receipt-first"))
+    def second(_args: BaseModel) -> AgentToolResult:
+        calls.append("second")
+        raise BudgetExceeded("execution budget stopped")
+    def third(_args: BaseModel) -> AgentToolResult:
+        calls.append("third")
+        raise AssertionError("must not run after the budget latch")
+    provider = _Provider([LLMToolResponse(tool_calls=[_call("one"), _call("two"), _call("three")])])
+    ledger = ToolCallLedger(_policy("one", "two", "three"))
+    hooks = _Hooks()
+    result = ProbeExecutor(
+        provider, [_tool("one", first), _tool("two", second), _tool("three", third)],
+        ledger, journal=hooks,
+    ).run(phase="execute_probes", system_prompt="x", user_message="y")
+    assert result.status == "budget_exhausted"
+    assert [item.id for item in result.artifacts] == ["receipt-first"]
+    assert calls == ["first", "second"]
+    assert ledger.snapshot()["successful_tool_calls"] == 1
+    assert [fields["outcome"] for kind, fields in hooks.events if kind == "tool_terminal"] == [
+        "completed", "failed",
+    ]
+
+
+def test_unknown_budget_usage_still_raises_after_a_committed_tool() -> None:
+    uncertain = BudgetUsageUncertain("unknown-call", stage="settlement", missing=("usage",))
+    provider = _Provider([LLMToolResponse(tool_calls=[_call("one")]), uncertain])
+    executor = ProbeExecutor(
+        provider,
+        [_tool("one", lambda _args: AgentToolResult(
+            content={"ok": True}, receipt_artifact=_Receipt("receipt-first")))],
+        ToolCallLedger(_policy("one")),
+    )
+    with pytest.raises(BudgetUsageUncertain) as caught:
+        executor.run(phase="execute_probes", system_prompt="x", user_message="y")
+    assert caught.value is uncertain
+    assert len(provider.calls) == 2
+
+
+def test_sqlite_budget_midbatch_result_replays_without_tool_or_provider_resend(
+    tmp_path: Any,
+) -> None:
+    from eda_platform.drivers.exploration import JsonLlmResponseStore, JsonToolResultStore
+
+    budget = _policy("one", "two")
+    policy = sealed_policy(ExplorationPolicy(
+        mode="open", dataset_scope=("dataset-1",), thinking_level="quick",
+        coverage_targets=(), budget=budget, scoring_policy_version="score-v1",
+        statistical_policy_version="stats-v1", tool_capability_digest="tools-v1",
+    ))
+    journal = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    journal.initialize(
+        exploration_id="budget-midbatch", policy=policy,
+        code_fingerprint="code-v1", data_state_witness="witness-v1",
+    )
+    journal.claim_attempt()
+    journal.append_new("round_started", round_index=0)
+    calls = {"one": 0, "two": 0}
+    def first(_args: BaseModel) -> AgentToolResult:
+        calls["one"] += 1
+        return AgentToolResult(content={"ok": True}, receipt_artifact=_Receipt("receipt-one"))
+    def second(_args: BaseModel) -> AgentToolResult:
+        calls["two"] += 1
+        raise BudgetExceeded("tool service budget exhausted")
+    tools = [_tool("one", first), _tool("two", second)]
+    provider = _Provider([LLMToolResponse(tool_calls=[_call("one"), _call("two")])])
+    first_result = ProbeExecutor(
+        provider, tools, ToolCallLedger(budget), journal=JsonlProbeJournalHooks(journal),
+        response_store=JsonLlmResponseStore(tmp_path / "llm-responses"),
+        tool_result_store=JsonToolResultStore(tmp_path / "tool-results"),
+    ).run(phase="execute_probes", system_prompt="x", user_message="y", run_id="midbatch")
+    assert first_result.status == "budget_exhausted"
+    reopened = JsonlExplorationJournal(tmp_path / "journal.jsonl")
+    state = reopened.rebuild()
+    assert state is not None and not state.pending_tool_steps
+    before = reopened.path.read_bytes()
+    disabled = _Provider([])
+    resumed = ProbeExecutor(
+        disabled, tools, ToolCallLedger.restore_from_journal_state(budget, state),
+        journal=JsonlProbeJournalHooks(reopened),
+        response_store=JsonLlmResponseStore(tmp_path / "llm-responses"),
+        tool_result_store=JsonToolResultStore(tmp_path / "tool-results"),
+    ).run(phase="execute_probes", system_prompt="x", user_message="y", run_id="midbatch")
+    assert resumed.status == "budget_exhausted"
+    assert [item.id for item in resumed.artifacts] == ["receipt-one"]
+    assert calls == {"one": 1, "two": 1}
+    assert not disabled.calls
+    assert reopened.path.read_bytes() == before
+    assert state.tool_calls_committed == 1

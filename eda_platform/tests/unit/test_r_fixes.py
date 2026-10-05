@@ -360,12 +360,13 @@ def test_r3_transport_error_falls_back_without_crashing(tmp_path: Path) -> None:
     ]
     assert len(plan_events) == 3
     assert [event.attempt for event in plan_events] == [1, 2, 3]
-    assert len(narration_events) == 1
-    assert llm.calls == ["m2_report_claim_plan"] * 3 + ["report_section_narrative"]
+    assert narration_events == []
+    # Profile inventory is not promoted into a summary worth narrating.
+    assert llm.calls == ["m2_report_claim_plan"] * 3
     assert [event.task for event in result.llm_events] == llm.calls
     assert all(event.status == "error" for event in result.llm_events)
     assert all(event.error_type == "RuntimeError" for event in result.llm_events)
-    assert result.narration_discards == [{"section": "Executive Summary", "reason": "llm_error"}]
+    assert result.narration_discards == []
 
 
 def test_r3_invalid_json_falls_back_without_crashing(tmp_path: Path) -> None:
@@ -393,19 +394,20 @@ def test_r3_invalid_json_still_records_provider_usage(tmp_path: Path) -> None:
         event for event in result.llm_events if event.task == "report_section_narrative"
     ]
     assert len(plan_events) == 3
-    assert len(narration_events) == 1
-    assert llm.calls == ["m2_report_claim_plan"] * 3 + ["report_section_narrative"]
+    assert narration_events == []
+    # Profile inventory is not promoted into a summary worth narrating.
+    assert llm.calls == ["m2_report_claim_plan"] * 3
     assert [event.task for event in result.llm_events] == llm.calls
     assert sum(event.usage.usage.total_tokens for event in plan_events if event.usage) == 900
-    assert sum(event.usage.usage.total_tokens for event in narration_events if event.usage) == 300
-    assert len(result.llm_calls) == 4
-    assert sum(call.usage.total_tokens for call in result.llm_calls) == 1200
+    assert sum(event.usage.usage.total_tokens for event in narration_events if event.usage) == 0
+    assert len(result.llm_calls) == 3
+    assert sum(call.usage.total_tokens for call in result.llm_calls) == 900
     assert [call.request_id for call in result.llm_calls] == [
-        "request-1", "request-2", "request-3", "request-4",
+        "request-1", "request-2", "request-3",
     ]
     assert [event.usage for event in result.llm_events] == result.llm_calls
     assert all(event.status == "error" for event in result.llm_events)
-    assert result.narration_discards == [{"section": "Executive Summary", "reason": "llm_error"}]
+    assert result.narration_discards == []
 
 
 def test_r7_llm_usage_is_recorded(tmp_path: Path) -> None:

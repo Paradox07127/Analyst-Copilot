@@ -48,6 +48,12 @@ class _FakeLLM:
             {"text": self._text, "cited_claim_ids": self._cited}
         )
 
+    def text(self, *, task: str, payload: dict) -> str:
+        raise AssertionError("Narration must use its structured contract.")
+
+    def last_usage(self) -> None:
+        return None
+
 
 def _bundle() -> ReportBundle:
     bundle = ReportBundle.empty(project_id="p", session_id="s")
@@ -98,7 +104,7 @@ def test_a_figure_inside_a_quoted_column_name_is_not_a_new_number() -> None:
 def test_a_clean_narrative_is_stored_with_its_citations() -> None:
     bundle = _bundle()
     llm = _FakeLLM(
-        "Late deliveries reached 8.2% of orders and delivery took 12.5 days.",
+        "Late deliveries reached 8.2% of orders in Q4. Average delivery time was 12.5 days.",
         ["c1", "c2"],
     )
     narrated = narrate_report(bundle, llm=llm).written
@@ -228,8 +234,8 @@ def test_model_prose_cannot_fabricate_report_structure() -> None:
     assert not section.narrative.startswith("#")
     assert "[the ledger]" not in section.narrative
     assert "`sql_forged`" not in section.narrative
-    # Our own citation is still a real code span the app can turn into a button.
-    assert "(evidence: `sql_c1`, `sql_c2`)" in section.narrative
+    # Unsupported model prose is discarded before markdown rendering.
+    assert section.narrative == ""
 
 
 def test_a_narrative_renders_its_numbers_like_the_bullets_below_it() -> None:
@@ -272,3 +278,55 @@ def test_html_and_markdown_narratives_agree() -> None:
     html = export_report_html(bundle)
     assert "0.5000008438758905" not in html
     assert "0.5" in html
+
+
+@pytest.mark.parametrize(
+    ("text", "cited", "reason"),
+    [
+        ("East revenue was 20 dollars. West revenue was 80 dollars.", ["east", "west"],
+         "unsupported_rewrite"),
+        ("West revenue was 20 dollars.", ["east"], "unverifiable_figure"),
+        ("The campaign caused revenue to increase.", ["east"], "unsupported_rewrite"),
+        ("East revenue was 80 percent.", ["east"], "unsupported_rewrite"),
+        ("East revenue was 80 dollars.", ["east", "west"], "unsupported_rewrite"),
+    ],
+)
+def test_narrative_cannot_change_bindings_or_launder_a_citation(
+    text: str, cited: list[str], reason: str,
+) -> None:
+    bundle = _bundle()
+    section = next(s for s in bundle.sections if s.title == "Business Findings")
+    section.claims = [
+        _claim("east", "East revenue was 80 dollars."),
+        _claim("west", "West revenue was 20 dollars."),
+    ]
+    outcome = narrate_report(bundle, llm=_FakeLLM(text, cited))
+    assert outcome.written == 0
+    assert outcome.discards == [{"section": "Business Findings", "reason": reason}]
+    assert section.narrative == ""
+    assert len(section.claims) == 2
+
+
+def test_extractive_narration_preserves_qualifiers_and_cited_order() -> None:
+    bundle = _bundle()
+    section = next(s for s in bundle.sections if s.title == "Business Findings")
+    section.claims = [
+        _claim("east", "East revenue was 80 dollars. This only covers complete records."),
+        _claim("west", "West revenue was 20 dollars."),
+    ]
+    # Whole claims keep their limitations; the model may reorder the sources.
+    text = "West revenue was 20 dollars. East revenue was 80 dollars. "
+    text += "This only covers complete records."
+    outcome = narrate_report(bundle, llm=_FakeLLM(text, ["west", "east"]))
+    assert outcome.written == 1
+    assert section.narrative == text + " (evidence: `sql_west`, `sql_east`)"
+
+
+def test_extractive_guard_rejects_even_valid_paraphrases_until_semantic_binding_exists() -> None:
+    bundle = _bundle()
+    outcome = narrate_report(bundle, llm=_FakeLLM(
+        "Average delivery took 12.5 days.", ["c2"],
+    ))
+    assert outcome.discards == [
+        {"section": "Business Findings", "reason": "unsupported_rewrite"},
+    ]

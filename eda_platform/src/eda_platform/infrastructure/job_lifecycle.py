@@ -1039,7 +1039,8 @@ class JobLifecycleRepository:
         summary: dict[str, object] = {"session_status": session_status}
         if session_status == "limited":
             summary["detail"] = (
-                "Resource preflight stopped this run before data ingestion."
+                "Run reached a configured limit. Review the run details "
+                "for available results and next steps."
             )
         if error_code is not None:
             summary.update(

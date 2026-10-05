@@ -1,6 +1,6 @@
 # Question Quality 评审 Rubric(M4 eval 周 / M6.1 T3)
 
-> 状态:底座就绪(rubric + judge 校准集);**人工评分与 LLM-judge 跑分待用户执行**(需 live LLM key 或人工时间)。
+> 状态:已有 rubric、校准锚点、盲评请求导出和评分导入校验；**人工评分待用户执行**。锚点评分一致不等于真实模型质量或人工校准通过。
 > 适用对象:问题发现引擎(`tools/question_discovery.py` 模板路 + `agents/question_agent.py` LLM 路)产出的 `QuestionCandidate`。
 > 配套文件:`judge_calibration.json`(≥10 条校准题,含期望分与理由)、`test_question_quality_assets.py`(结构守卫)。
 
@@ -76,10 +76,25 @@
 
 ## 4. 人工评分流程(**待用户执行**)
 
-1. 取一次 live run 的 top-10 `QuestionCandidate`(auto-executed 3 条 + 榜单前 7 条)。
+1. 取一次 live run 的候选与实际自动执行集合，并采样前 10 条；按 run 中记录的选择结果区分执行/未执行，不能假设固定三个自动席位。
 2. 单人过一遍四维打分(每条 ≤ 1 分钟,先 D1/D4 后 D2/D3),记录在 eval report 的评分表模板里(见 `docs/archive/2026-07/base/eda-agent-platform-m4-eval-report.md` §deferred)。
 3. 与 judge 分对照:|Δoverall| > 1.0 的条目写一句分歧原因。
-4. 验收参考线(M4 计划 §7 eval 周):top-10 人工均分 ≥ 3.5,且无 reject 项进入 auto-executed 三席。
+4. 验收参考线:top-10 人工均分 ≥ 3.5,且无 reject 项进入实际自动执行集合；真实阈值需用留出样本校准。
+
+## 6. 本地盲评与导入评分
+
+`scripts/evaluate_question_quality.py --output /tmp/question-review-request.json`
+导出不包含期望分、来源类别或标准答案理由的请求；模型输入使用单独的
+`judge_rubric.md`。该命令不会调用模型。
+
+评分保存为 `ReviewSubmission`（包含数据及 prompt digest、reviewer、reviewer_kind 和 reviews），
+然后运行 `scripts/evaluate_question_quality.py --scores /path/reviews.json --output /tmp/question-review-result.json`。
+每条评分必须给出四维分、reject 与理由，或明确 insufficient_context。
+缺项、重复、指纹不匹配会报错；漏掉硬否决、锚点不一致、上下文不足会使评分检查失败。
+
+期望分目前仍是开发锚点，不能充当专家确认。评分工具只报告锚点一致性，永不自行批准生产发布。
+人工评分完成时可填写 human_scores/human_notes，并将 meta 状态更新为 completed_human_review；
+测试不再要求这些字段永久为空。
 
 ## 5. 维度与既有信号的映射(评审时可参考)
 

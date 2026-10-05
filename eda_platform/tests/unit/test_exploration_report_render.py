@@ -103,7 +103,7 @@ def _state(
             Claim(
                 claim_id=f"clm_{index}",
                 claim_type="observation",
-                claim_text=f"legacy claim dump text {index}: 1",
+                claim_text="The recorded p-value is 1.",
                 support_type="direct",
                 evidence_fact_ids=(f"{receipt.receipt_id}:p_value",),
             )
@@ -140,7 +140,7 @@ def _render(state: ExplorationWorkflowState) -> str:
     ).markdown
 
 
-def test_insight_renders_a_statement_led_block_not_a_claim_dump() -> None:
+def test_insight_leads_with_admitted_observation_not_unverified_hypothesis() -> None:
     receipt = _receipt("call-1")
     insight = InsightRecord.model_validate(
         {
@@ -150,7 +150,8 @@ def test_insight_renders_a_statement_led_block_not_a_claim_dump() -> None:
         }
     )
     markdown = _render(_state(insight, (receipt,)))
-    assert "- **Revenue differs by region.** — new/supported" in markdown
+    assert "- **The recorded p-value is 1.** — new/supported" in markdown
+    assert "Revenue differs by region." not in markdown
     assert (
         f"  - evidence: 1 supporting, 0 contradicting receipt(s); "
         f"{receipt.receipt_id} (supports)" in markdown
@@ -158,17 +159,17 @@ def test_insight_renders_a_statement_led_block_not_a_claim_dump() -> None:
     assert "p_value=0.01" in markdown
     assert "effect_size=0.5" in markdown
     assert "sample_size=20" in markdown
-    assert "  - why: Planted regional structure." in markdown
+    assert "Planted regional structure." not in markdown
     assert "legacy claim dump text" not in markdown
     assert "p_value/" not in markdown  # no fact-id list dump
 
 
-def test_legacy_record_without_statement_renders_the_fallback() -> None:
+def test_record_without_hypothesis_still_renders_admitted_observation() -> None:
     receipt = _receipt("call-1")
     insight = InsightRecord.model_validate(_insight_fields((receipt,)))
     assert insight.statement is None and insight.rationale is None
     markdown = _render(_state(insight, (receipt,)))
-    assert "- **(no statement recorded)** — new/supported" in markdown
+    assert "- **The recorded p-value is 1.** — new/supported" in markdown
     assert "why:" not in markdown
 
 
@@ -201,3 +202,30 @@ def test_seed6_projection_insight_records_still_validate() -> None:
     for raw in records:
         record = InsightRecord.model_validate(raw)
         assert record.statement is None and record.rationale is None
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    ["Revenue increased by 999 percent.", "Revenue increased by 1 percent.",
+     "Does revenue differ by region?"],
+)
+def test_unverified_proposal_cannot_supply_its_own_report_fact(proposal: str) -> None:
+    receipt = _receipt("call-1")
+    insight = InsightRecord.model_validate({
+        **_insight_fields((receipt,)), "statement": proposal,
+        "rationale": "This proves the campaign caused growth.",
+    })
+    markdown = _render(_state(insight, (receipt,)))
+    assert "**The recorded p-value is 1.**" in markdown
+    assert proposal not in markdown
+    assert "campaign caused" not in markdown
+    assert "999" not in markdown
+
+
+def test_proposal_limitation_cannot_self_verify_a_new_number() -> None:
+    receipt = _receipt("call-1")
+    insight = InsightRecord.model_validate({
+        **_insight_fields((receipt,)), "limitations": ["Only 999 records were observed."],
+    })
+    with pytest.raises(ValueError, match="outside the evidence"):
+        _render(_state(insight, (receipt,)))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import subprocess
@@ -100,6 +101,7 @@ def build_workflow_eval_environment(llm: LLMClient | None = None) -> WorkflowEva
         prompt_versions={"question_agent_system": QUESTION_AGENT_PROMPT_DIGEST},
         code_revision=_code_revision(),
         policy_versions={
+            "harness_source": _harness_source_digest(),
             "question_agent": QUESTION_AGENT_POLICY_VERSION,
             "exploration_profile": EXPLORATION_PROFILE_VERSION,
             "exploration_statistical": EXPLORATION_STATISTICAL_POLICY_VERSION,
@@ -108,6 +110,20 @@ def build_workflow_eval_environment(llm: LLMClient | None = None) -> WorkflowEva
         tool_registry_digest=data_tool_registry_digest(),
         sandbox_policy_digest=default_policy_digest(),
     )
+
+
+def _harness_source_digest(root: Path | None = None) -> str:
+    source_root = root if root is not None else Path(__file__).resolve().parents[1]
+    files = sorted(source_root.rglob("*.py"))
+    if not files:
+        raise ValueError("Cannot fingerprint an evaluation harness without source files.")
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(source_root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 def compile_workflow_eval_case(

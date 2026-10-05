@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import math
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
@@ -28,10 +28,7 @@ from eda_platform.agents.exploration.scheduler import (
     family_quotas_for_level,
 )
 from eda_platform.agents.exploration.supervisor import (
-    CandidateBatch,
     PhaseContext,
-    SupervisorPhase,
-    phase_step_id,
 )
 from eda_platform.agents.exploration.workflow import (
     ColumnFact,
@@ -66,7 +63,6 @@ from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.exploration import (
     CallableWitnessPort,
     JsonExplorationWorkflowStateStore,
-    JsonSupervisorRecoveryStore,
     run_composed_shadow_exploration,
 )
 from eda_platform.schemas.artifacts import (
@@ -302,8 +298,6 @@ def run_exploration_worker(
     workflow_store = JsonExplorationWorkflowStateStore(
         run_root / "workflow-state.json"
     )
-    recovery_store = JsonSupervisorRecoveryStore(run_root / "phase-responses")
-    journal = JsonlExplorationJournal(run_root / "journal.jsonl")
 
     def admission(phase_context: PhaseContext) -> AdmissionContext:
         workflow_state = workflow_store.load()
@@ -363,17 +357,14 @@ def run_exploration_worker(
         ),
         usage_meter=DatasetToolUsageMeter(selected),
         stat_attempt_counts=lambda: _stat_attempt_counts(stat_registry),
-        goal_satisfied=lambda state: (
-            params.policy.mode == "goal_directed"
-            and _goal_satisfied(
-                state,
-                goal=params.policy.goal,
-                recovery=recovery_store,
-                journal=journal,
-            )
-        ),
+        # The current request carries free text, not verifiable goal obligations.
+        # Related words or one supported probe cannot establish full completion.
+        # Until a goal contract exists, budget/stagnation determine the stop;
+        # those reasons preserve the distinction from a completed user goal.
+        goal_satisfied=lambda _state: False,
         coverage_target_met=lambda state: (
-            bool(coverage_targets)
+            params.policy.mode == "open"
+            and bool(coverage_targets)
             and coverage_targets.issubset(state.coverage_completed)
         ),
         dataset_columns=dataset_columns,
@@ -581,7 +572,9 @@ def _durable_admission_state(
         decision.hypothesis_id: decision for decision in state.decisions
     }
     historical = frozenset(
-        decision.hypothesis_fingerprint for decision in state.decisions
+        decision.hypothesis_fingerprint
+        for decision in state.decisions
+        if decision.chosen or decision.status != "admitted"
     )
     answered = frozenset(
         decision.hypothesis_fingerprint
@@ -700,11 +693,27 @@ _GOAL_STOP_WORDS = frozenset(
 
 
 def _goal_tokens(value: str) -> frozenset[str]:
-    return frozenset(
-        token
-        for token in re.findall(r"[a-z0-9]+", value.casefold())
-        if token not in _GOAL_STOP_WORDS and len(token) > 1
+    """Unicode lexical relevance features, never evidence of goal completion.
+
+    Unspaced CJK runs use adjacent character pairs so a Chinese question and
+    a longer candidate sentence can share terms without a tokenizer dependency.
+    Other scripts keep Unicode words; NFKC handles full-width Latin/numbers.
+    This remains a bounded, surface-level ranking heuristic, not translation
+    or semantic understanding.
+    """
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    unspaced = (
+        r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+        r"\u3040-\u30ff\uac00-\ud7af\U00020000-\U0003134f]+"
     )
+    tokens = {
+        token
+        for token in re.findall(r"[^\W_]+", re.sub(unspaced, " ", normalized))
+        if token not in _GOAL_STOP_WORDS and len(token) > 1
+    }
+    for run in re.findall(unspaced, normalized):
+        tokens.update(run[index:index + 2] for index in range(max(1, len(run) - 1)))
+    return frozenset(tokens)
 
 
 def _business_value(seed: CandidateSeed, goal: str | None) -> float:
@@ -732,56 +741,6 @@ def _candidate_goal_tokens(seed: CandidateSeed) -> frozenset[str]:
             )
         )
     )
-
-
-def _goal_satisfied(
-    state: ExplorationWorkflowState,
-    *,
-    goal: str | None,
-    recovery: JsonSupervisorRecoveryStore,
-    journal: JsonlExplorationJournal,
-) -> bool:
-    if goal is None:
-        return False
-    goal_tokens = _goal_tokens(goal)
-    if not goal_tokens:
-        return False
-    journal_state = journal.rebuild()
-    if journal_state is None:
-        return False
-    candidates: dict[str, CandidateSeed] = {}
-    for round_index in range(journal_state.rounds_started):
-        step_id = phase_step_id(
-            journal_state.exploration_id,
-            round_index,
-            SupervisorPhase.GENERATE,
-        )
-        try:
-            batch = recovery.load_required(step_id)
-        except KeyError:
-            continue
-        if not isinstance(batch, CandidateBatch):
-            raise ValueError("goal binding requires a durable candidate batch")
-        candidates.update(
-            {
-                candidate.hypothesis_id: candidate
-                for candidate in batch.candidates
-                if isinstance(candidate, CandidateSeed)
-            }
-        )
-    required_overlap = max(1, math.ceil(len(goal_tokens) / 2))
-    for insight in state.insights.values():
-        if insight.status == "inconclusive" or insight.trust_level not in {
-            "supported",
-            "refuted",
-        }:
-            continue
-        candidate = candidates.get(insight.hypothesis_id)
-        if candidate is None:
-            continue
-        if len(goal_tokens & _candidate_goal_tokens(candidate)) >= required_overlap:
-            return True
-    return False
 
 
 def _journal_events(workspace: Path, exploration_id: str) -> tuple[object, ...]:

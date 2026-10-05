@@ -403,7 +403,7 @@ def test_executive_summary_bans_shape_claims_and_orders_by_score() -> None:
     assert "20.5" in summary_texts[1]
 
 
-def test_executive_summary_falls_back_when_no_qualified_claim_exists() -> None:
+def test_executive_summary_stays_empty_when_only_inventory_exists() -> None:
     bundle = _empty_bundle()
     _section(bundle, "Dataset Overview").claims.append(
         ReportClaim(
@@ -415,9 +415,8 @@ def test_executive_summary_falls_back_when_no_qualified_claim_exists() -> None:
 
     injected = _apply_executive_summary_fallback(bundle, [])
 
-    # Legacy behavior: with nothing qualified, the summary mirrors what exists.
-    assert injected == 1
-    assert "71 rows" in _section(bundle, "Executive Summary").claims[0].text
+    assert injected == 0
+    assert _section(bundle, "Executive Summary").claims == []
 
 
 def test_executive_summary_guarantees_a_numeric_business_finding() -> None:

@@ -338,6 +338,7 @@ def test_build_data_summary_compresses_roles_samples_and_cardinality(
         [profile],
         role_sets={profile.name: role_set},
         confirmed_joins=["order_items.csv.order_id -> orders.csv.order_id"],
+        payload_policy="schema+aggregates+sample",
     )
 
     assert "order_items.csv" in summary
@@ -352,6 +353,7 @@ def test_build_data_summary_compresses_roles_samples_and_cardinality(
         [profile],
         role_sets={profile.name: role_set},
         confirmed_joins=["order_items.csv.order_id -> orders.csv.order_id"],
+        payload_policy="schema+aggregates+sample",
     )
 
 

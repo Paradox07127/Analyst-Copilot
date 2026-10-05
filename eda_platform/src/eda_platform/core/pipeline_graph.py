@@ -19,6 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Send
 
+from eda_platform.core.artifact_identity import artifact_content_digest, unique_artifacts
 from eda_platform.core.graph_execution import GraphPersistence, graph_execution
 from eda_platform.core.ids import stable_hash
 from eda_platform.core.kernel import (
@@ -178,7 +179,7 @@ def _compute(state: StepWork, runtime: Runtime[PipelineServices]) -> dict[str, A
     try:
         services.check_run()
         _check_required_types(services.steps[index], services.ctx)
-        artifacts = services.steps[index].run(services.ctx)
+        artifacts = unique_artifacts(services.steps[index].run(services.ctx))
         _check_produced_types(services.steps[index], artifacts, services.ctx)
         return {"outputs": {index: [a.model_dump(mode="json") for a in artifacts]}}
     except Exception as exc:
@@ -197,14 +198,44 @@ def _commit(state: PipelineState, runtime: Runtime[PipelineServices]) -> dict[st
         except Exception as exc:
             services.failure(state["batch"][0], datetime.now(UTC), exc)
             raise
+    # Validate the entire batch before any overwrite or successful cache entry.
+    # Distinct steps may share evidence, but a shared ID must mean identical
+    # content, including warnings, parents and evidence references.
+    prepared: dict[int, list[Artifact]] = {}
+    seen = {ref["id"]: ref["digest"] for items in refs.values() for ref in items}
+    for index in state["pending"]:
+        try:
+            prepared[index] = unique_artifacts(
+                Artifact.model_validate(a) for a in state["outputs"][index] or []
+            )
+            for artifact in prepared[index]:
+                digest = artifact_content_digest(artifact)
+                if artifact.id in seen and seen[artifact.id] != digest:
+                    raise ValueError(f"Conflicting content for artifact {artifact.id!r}.")
+                seen[artifact.id] = digest
+        except Exception as exc:
+            services.failure(index, datetime.fromisoformat(state["started"][index]), exc)
+            raise
+    if state["pending"]:
+        index = state["pending"][0]
+        try:
+            services.check_run()
+            for pending_index, artifacts in prepared.items():
+                _check_produced_types(services.steps[pending_index], artifacts, services.ctx)
+            services.ctx.store.save_artifacts(
+                [artifact for artifacts in prepared.values() for artifact in artifacts],
+                expected_existing={
+                    ref["id"]: ref["digest"] for items in refs.values() for ref in items
+                },
+            )
+        except Exception as exc:
+            services.failure(index, datetime.fromisoformat(state["started"][index]), exc)
+            raise
     for index in state["pending"]:
         begin = datetime.fromisoformat(state["started"][index])
         try:
             services.check_run()
-            artifacts = [Artifact.model_validate(a) for a in state["outputs"][index] or []]
-            _check_produced_types(services.steps[index], artifacts, services.ctx)
-            for artifact in artifacts:
-                services.ctx.store.save_artifact(artifact)
+            artifacts = prepared[index]
             references: list[ArtifactReference] = [
                 {
                     "id": a.id,

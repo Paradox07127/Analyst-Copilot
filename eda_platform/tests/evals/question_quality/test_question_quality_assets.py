@@ -83,10 +83,18 @@ def test_calibration_includes_real_template_route_outputs() -> None:
     assert origins.count("template_route") >= 4
 
 
-def test_human_review_is_explicitly_deferred() -> None:
+def test_human_review_state_matches_available_scores() -> None:
     data = _calibration()
-    assert "pending_human_review" in data["_meta"]["human_review_status"]
+    completed = 0
     for item in data["items"]:
-        assert item["human_scores"] is None, (
-            f"{item['id']}: human_scores pre-filled; human pass is supposed to be deferred"
-        )
+        if item["human_scores"] is not None:
+            scores = item["human_scores"]
+            assert set(scores) == set(DIMENSIONS)
+            assert all(type(value) is int and 1 <= value <= 5 for value in scores.values())
+            assert item["human_notes"], "A completed review needs a review note."
+            completed += 1
+    status = data["_meta"]["human_review_status"]
+    if completed < len(data["items"]):
+        assert "pending_human_review" in status
+    else:
+        assert "completed_human_review" in status

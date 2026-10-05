@@ -126,6 +126,22 @@ def test_changed_inputs_cannot_adopt_old_execution(tmp_path: Path) -> None:
         pass
 
 
+def test_policy_epoch_cannot_replay_old_admitted_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import eda_platform.core.graph_execution as runtime
+
+    persistence = GraphPersistence(tmp_path, "report")
+    with monkeypatch.context() as previous:
+        previous.setattr(runtime, "GRAPH_VERSION", "previous-policy")
+        with graph_execution(persistence, definition="report", inputs={}) as execution:
+            execution.model_effect("draft", {}, lambda: {"old_narrative": "unverified"})
+    with pytest.raises(GraphIdentityError), graph_execution(
+        persistence, definition="report", inputs={},
+    ):
+        pytest.fail("Old policy results must not be adopted or automatically recomputed.")
+
+
 def test_repeated_content_addressed_tool_output_stays_one_verified_reference(
     tmp_path: Path,
 ) -> None:

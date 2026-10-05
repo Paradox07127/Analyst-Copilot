@@ -38,7 +38,7 @@ from eda_platform.agents.tool_context import (
     make_logical_step_id,
     tool_execution_scope,
 )
-from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.budget import BudgetExceeded, BudgetUsageUncertain
 from eda_platform.core.cancellation import CancellationError
 from eda_platform.core.exploration_budget import (
     ToolCallLedger,
@@ -808,7 +808,7 @@ class ProbeExecutor:
             )
         with graph_execution(
             persistence,
-            definition=self._task,
+            definition=self._task + ":v2",
             inputs={
                 "phase": phase,
                 "system_prompt": system_prompt,
@@ -833,11 +833,38 @@ class ProbeExecutor:
                 restored.response_digests = response_digests
                 return {**state, "memory": restored}
 
+            def run_node(state: ProbeGraphState, action: Any) -> dict[str, Any]:
+                restored = recover(state)
+                try:
+                    return action(restored)
+                except BudgetUsageUncertain:
+                    # Unknown provider settlement is not permission to finish
+                    # the probe on a guessed outcome. Keep its fail-closed path.
+                    raise
+                except BudgetExceeded as exc:
+                    current = restored["memory"]
+                    # Observations only enter memory after durable journal
+                    # commit. Failed/prepared-only tool results remain excluded.
+                    return {
+                        "memory": current,
+                        "route": "end",
+                        "result": self._result(
+                            status="budget_exhausted",
+                            artifacts=current.artifacts,
+                            tool_calls=current.tool_calls,
+                            tool_names=current.tool_names,
+                            failures=current.failures,
+                            seen=current.seen,
+                            error=_safe_error(exc),
+                            error_code="budget_exhausted",
+                        ),
+                    }
+
             def model_node(state: ProbeGraphState) -> dict[str, Any]:
-                return self._model_node(recover(state))
+                return run_node(state, self._model_node)
 
             def tools_node(state: ProbeGraphState) -> dict[str, Any]:
-                return self._tools_node(recover(state))
+                return run_node(state, self._tools_node)
 
             builder.add_node("model", model_node)
             builder.add_node("tools", tools_node)
@@ -981,6 +1008,12 @@ class ProbeExecutor:
                             phase_registry[name].provider_schema() for name in memory.offered_names
                         ],
                     )
+            except BudgetUsageUncertain as exc:
+                self._journal.llm_terminal(
+                    call_id=call_id, step_id=llm_step_id,
+                    outcome="uncertain", error=_safe_error(exc),
+                )
+                raise
             except BudgetExceeded as exc:
                 self._journal.llm_terminal(
                     call_id=call_id, step_id=llm_step_id, outcome="rejected", error=_safe_error(exc)
@@ -1263,6 +1296,8 @@ class ProbeExecutor:
             except _TERMINAL_TOOL_ERRORS as exc:
                 try:
                     self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
+                except BudgetUsageUncertain:
+                    raise
                 except BudgetExceeded:
                     pass
                 raise
@@ -1287,6 +1322,8 @@ class ProbeExecutor:
             except _TERMINAL_TOOL_ERRORS as exc:
                 try:
                     self._settle_failed_tool(item, logical_step_id=logical_step_id, error=exc)
+                except BudgetUsageUncertain:
+                    raise
                 except BudgetExceeded:
                     pass
                 raise

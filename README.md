@@ -705,6 +705,34 @@ uv run python scripts/evaluate_workflow.py \
   --repeat 3
 ```
 
+The workflow evaluator distinguishes output checks from production readiness. A
+deliberately offline run can pass its report audit while remaining degraded because
+model-based discovery was unavailable; that is not a successful live release trial.
+
+For question-quality reviews, export a blind request without making network calls:
+
+```bash
+uv run python scripts/evaluate_question_quality.py --output /tmp/question-review.json
+```
+
+Import completed `ReviewSubmission` JSON with `--scores /path/to/reviews.json` and
+an `--output` path. Scores are bound to the calibration and prompt digests. This
+checks development-anchor agreement, not human calibration or release approval.
+Report narration currently permits complete cited-claim composition; unsupported
+rewrites fall back to the original claims. Goal-directed exploration stops on its
+budget/progress conditions and does not infer goal completion from keyword overlap.
+
+Known request/token/cost exhaustion preserves completed question results and
+produces a deterministic report with a `limited` session outcome. Exploration
+validates committed partial receipts before stopping at its budget. Unknown model
+outcomes, cancellation, and hard time limits retain their blocking behavior.
+Under `schema+aggregates`, SQL observations permit only the documented scalar
+aggregate subset; grouped/CTE queries remain withheld. The tool advertises this
+constraint, and restricted SQL errors do not expose raw data values.
+Analytical artifact identity includes method context. Batch publication checks
+conflicts and existing reference digests under the session write fence; equivalent
+duplicates retain their canonical timestamps and provenance.
+
 ## Project structure
 
 ```text

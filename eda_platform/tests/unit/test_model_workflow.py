@@ -149,3 +149,38 @@ def test_task_failure_without_error_record_preserves_original_exception(
 
     with pytest.raises(TypeError, match="not serializable"):
         run_model_workflow(workflow, persistence=None, inputs={}, definition="test-model-workflow")
+
+
+@pytest.mark.parametrize("kind", ["session", "unknown", "base"])
+def test_budget_exception_identity_survives_durable_replay(tmp_path: Path, kind: str) -> None:
+    from eda_platform.core.budget import (
+        BudgetExceeded,
+        BudgetUsageUncertain,
+        SessionBudgetExceeded,
+    )
+
+    error = (
+        SessionBudgetExceeded("requests", limit=37, attempted=38,
+                              call_id="call-38", stage="reservation")
+        if kind == "session" else
+        BudgetUsageUncertain("call-38", stage="settlement", missing=("total_tokens",))
+        if kind == "unknown" else BudgetExceeded("local token budget")
+    )
+    calls = []
+
+    def invoke() -> dict:
+        calls.append("model")
+        raise error
+
+    def workflow(active: ModelWorkflow) -> dict:
+        return active.model("call", "test", {}, invoke)
+
+    for _ in range(2):
+        with pytest.raises(type(error)) as caught:
+            run_model_workflow(
+                workflow, persistence=GraphPersistence(tmp_path, "budget-replay"),
+                inputs={}, definition="budget-test",
+            )
+        assert str(caught.value) == str(error)
+        assert {k: v for k, v in vars(caught.value).items() if k != "__notes__"} == vars(error)
+    assert calls == ["model"]

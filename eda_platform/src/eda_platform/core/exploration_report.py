@@ -101,13 +101,16 @@ def render_exploration_report(
                 insight.insight_id,
                 insight.hypothesis_id,
                 insight.claim_bundle_id,
-                *insight.limitations,
             )
         )
-        if insight.statement:
-            evidence_texts.append(insight.statement)
-        if insight.rationale:
-            evidence_texts.append(insight.rationale)
+        # Proposal text is not evidence for its own numeric assertions. Only
+        # receipt provenance and admitted claims may ground rendered prose.
+        for receipt_id in (*insight.supporting_receipt_ids, *insight.contradicting_receipt_ids):
+            receipt = state.committed_receipts[receipt_id]
+            evidence_texts.extend(receipt.method.warnings)
+            evidence_texts.extend(
+                json.dumps(fact.value, ensure_ascii=False) for fact in receipt.facts
+            )
         evidence_texts.append(str(len(insight.supporting_receipt_ids)))
         evidence_texts.append(str(len(insight.contradicting_receipt_ids)))
         stats_line = _key_statistics_line(state, insight)
@@ -144,7 +147,15 @@ def _insight_lines(
     for insight in insights:
         if insight.status not in statuses:
             continue
-        statement = insight.statement or "(no statement recorded)"
+        claims = state.admitted_bundles[insight.claim_bundle_id].claims
+        source_texts = [claim.claim_text.strip() for claim in claims if claim.claim_text.strip()]
+        # A hypothesis and its motivating rationale are pre-analysis inputs,
+        # not conclusions. Reuse a proposed heading only when it is itself an
+        # admitted claim; otherwise lead with the first verified observation.
+        statement = (
+            insight.statement if insight.statement in source_texts
+            else source_texts[0] if source_texts else "No validated conclusion is available."
+        )
         lines.append(f"- **{statement}** — {insight.status}/{insight.trust_level}")
         summary = (
             f"{len(insight.supporting_receipt_ids)} supporting, "
@@ -157,8 +168,8 @@ def _insight_lines(
         stats = _key_statistics_line(state, insight)
         if stats is not None:
             lines.append(f"  - {stats}")
-        if insight.rationale and insight.rationale.strip():
-            lines.append(f"  - why: {insight.rationale}")
+        if insight.rationale in source_texts and insight.rationale != statement:
+            lines.append(f"  - interpretation: {insight.rationale}")
     return lines or [_EMPTY]
 
 

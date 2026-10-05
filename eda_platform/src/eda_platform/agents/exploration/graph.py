@@ -89,6 +89,7 @@ def _orient(state: ExplorationState, runtime: Runtime[ExplorationServices]) -> d
         "probes": None,
         "validated": None,
         "result": None,
+        "reason": None,
     }
 
 
@@ -137,7 +138,8 @@ def _execute(state: ExplorationState, runtime: Runtime[ExplorationServices]) -> 
     )
     owner._require_type(probes, ProbeOutcome, "probe outcome")
     return {
-        "probes": probes, "selection": None, **_run_channels(run_state), "next_node": "validate"
+        "probes": probes, "selection": None, **_run_channels(run_state), "next_node": "validate",
+        "reason": "budget_exhausted" if probes.budget_exhausted else None,
     }
 
 
@@ -194,13 +196,16 @@ def _settle(state: ExplorationState, runtime: Runtime[ExplorationServices]) -> d
         before.current_round_receipt_ids
         and (adjudicated > 0 or reduction.admitted_bundle_count > 0)
     )
-    reason, branch = owner._settle_decision(
-        before,
-        progress=progress,
-        adjudicated_transitions=adjudicated,
-        frontier=reduction.frontier,
-        goal_satisfied=reduction.goal_satisfied or reduction.coverage_target_met,
-    )
+    if state.get("reason") == "budget_exhausted":
+        reason, branch = "budget_exhausted", False
+    else:
+        reason, branch = owner._settle_decision(
+            before,
+            progress=progress,
+            adjudicated_transitions=adjudicated,
+            frontier=reduction.frontier,
+            goal_satisfied=reduction.goal_satisfied or reduction.coverage_target_met,
+        )
     current = owner._journal.snapshot()
     if current.rounds_settled <= context.round_index:
         owner._journal.settle_round(
@@ -225,7 +230,8 @@ def _settle(state: ExplorationState, runtime: Runtime[ExplorationServices]) -> d
 def _synthesize(state: ExplorationState, runtime: Runtime[ExplorationServices]) -> dict[str, Any]:
     owner, run_state = _owner(runtime), state
     result = owner._graceful_terminal(
-        run_state, cast(Any, state["reason"]), cast(ReductionOutcome, run_state["reduction"])
+        run_state, cast(Any, state["reason"]), cast(ReductionOutcome, run_state["reduction"]),
+        deterministic_only=state["reason"] == "budget_exhausted",
     )
     return {"result": result, **_run_channels(run_state), "next_node": END}
 
@@ -295,6 +301,7 @@ def _checkpoint_types() -> tuple[type, ...]:
     from eda_platform.agents.exploration.executor import ProbeExecutionResult
     from eda_platform.agents.exploration.workflow import ExecutedProbeBatch
     from eda_platform.schemas.artifacts import Artifact, ArtifactType
+    from eda_platform.schemas.exploration import InsightFamily
     from eda_platform.schemas.hypotheses import HypothesisProposal
     from eda_platform.schemas.receipts import EvidenceReceipt
 
@@ -316,6 +323,7 @@ def _checkpoint_types() -> tuple[type, ...]:
         ExecutedProbeBatch,
         Artifact,
         ArtifactType,
+        InsightFamily,
         HypothesisProposal,
         EvidenceReceipt,
     )
@@ -325,7 +333,7 @@ def run_exploration_graph(owner: ExplorationSupervisor) -> SupervisorRunResult:
     journal = owner._journal.snapshot()
     with graph_execution(
         owner._persistence,
-        definition="exploration-v2",
+        definition="exploration-v4",
         checkpoint_types=_checkpoint_types(),
         inputs={"config": asdict(owner._config), "witness": journal.data_state_witness},
         recursion_limit=max(

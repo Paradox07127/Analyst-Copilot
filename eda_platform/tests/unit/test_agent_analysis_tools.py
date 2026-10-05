@@ -29,12 +29,18 @@ from eda_platform.agents.data_tools import (
     ScreenAnomaliesArguments,
     build_data_tools,
 )
+from eda_platform.agents.runtime import AgentRuntime
+from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.cancellation import CancellationContext, CancellationError
 from eda_platform.core.column_roles import ColumnRole, ColumnRoleName, ColumnRoleSet
+from eda_platform.core.graph_execution import GraphEffectUncertain
 from eda_platform.core.ids import make_artifact_id
+from eda_platform.core.llm import LLMToolCall, LLMToolResponse
 from eda_platform.core.store import ArtifactStore
 from eda_platform.schemas.artifacts import (
     Artifact,
     ArtifactType,
+    EvidenceRef,
     QualityIssue,
     QualityIssueSet,
 )
@@ -1465,6 +1471,117 @@ def test_default_policy_allows_only_strict_scalar_aggregate_sql() -> None:
     assert "rows_preview" not in str(mixed_secret.content)
     assert "rows_preview" not in str(windowed.content)
     assert "rows_preview" not in str(windowed_order.content)
+
+
+def test_withheld_sql_explains_supported_shape_and_artifact_read_cannot_leak_values() -> None:
+    secret = "private-customer-marker"
+    dataset = _dataset("people.csv", pd.DataFrame({"customer": [secret]}), "ds_people")
+    context = _context([dataset])
+    tool = _tool(context, "run_sql")
+    result = tool.execute(
+        RunSqlArguments(
+            sql="WITH counts AS (SELECT customer, COUNT(*) n FROM people GROUP BY customer) "
+            "SELECT * FROM counts",
+            purpose="grouped counts",
+        )
+    )
+    artifact = result.artifacts[0]
+    artifact.evidence.append(
+        EvidenceRef(
+            kind="sql", artifact_id=artifact.id, locator="rows_preview[0].customer", value=secret
+        )
+    )
+    reread = _tool(context, "read_artifact").execute(ReadArtifactArguments(artifact_id=artifact.id))
+
+    assert secret not in str(result.content)
+    assert secret not in str(reread.content)
+    assert artifact.payload["rows_preview"][0]["customer"] == secret
+    for observation in (result.content, reread.content["payload"]):
+        assert observation["disclosure_status"] == "withheld_by_policy"
+        assert "CTEs" in observation["notice"]
+        assert "Do not retry equivalent query shapes" in observation["notice"]
+        assert "profile_slice" in observation["notice"]
+    assert "GROUP BY" in tool.description
+    assert "scalar aggregate" in tool.description
+
+
+@pytest.mark.parametrize("policy", ["schema_only", "schema+aggregates", "schema+aggregates+sample"])
+def test_sql_conversion_error_observation_and_trace_follow_disclosure_policy(
+    policy: PayloadPolicy,
+) -> None:
+    secret = "private-customer-marker"
+    dataset = _dataset("people.csv", pd.DataFrame({"customer": [secret]}), "ds_people")
+    context = _context([dataset], payload_policy=policy)
+    calls: list[list[dict[str, Any]]] = []
+    traces: list[tuple[str, str, dict[str, Any]]] = []
+
+    class ScriptedLLM:
+        def tool_call(
+            self,
+            *,
+            task: str,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+        ) -> LLMToolResponse:
+            calls.append(list(messages))
+            if len(calls) == 1:
+                return LLMToolResponse(
+                    tool_calls=[
+                        LLMToolCall(
+                            call_id="conversion_1",
+                            name="run_sql",
+                            arguments={
+                                "sql": "select cast(customer as integer) from people",
+                                "purpose": "check numeric conversion",
+                            },
+                        )
+                    ]
+                )
+            return LLMToolResponse(content="The query failed; check column types.")
+
+    result = AgentRuntime(
+        llm=ScriptedLLM(),  # type: ignore[arg-type]
+        tools=[_tool(context, "run_sql")],
+        trace=lambda kind, name, summary: traces.append((kind, name, summary)),
+    ).run(system_prompt="Use SQL to check column types.", user_message="Check conversions.")
+
+    assert result.status == "completed"
+    observation = next(message for message in calls[1] if message["role"] == "tool")
+    failure = next(event for event in traces if event[0] == "tool_failed")
+    assert '"ok": false' in observation["content"]
+    if policy == "schema+aggregates+sample":
+        assert secret in observation["content"]
+        assert secret in str(failure)
+    else:
+        assert secret not in str(calls)
+        assert secret not in str(traces)
+        assert "ConversionException" in observation["content"]
+        assert "TRY_CAST" in observation["content"]
+        assert "withheld by the payload policy" in failure[2]["error"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BudgetExceeded("budget exhausted"),
+        CancellationError(CancellationContext().snapshot()),
+        GraphEffectUncertain("provider outcome unknown"),
+    ],
+)
+def test_sql_error_filter_preserves_control_exceptions(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    context = _context([_dataset("people.csv", pd.DataFrame({"amount": [1]}), "ds_people")])
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr("eda_platform.agents.data_tools.run_sql", fail)
+    with pytest.raises(type(error)) as caught:
+        _tool(context, "run_sql").execute(
+            RunSqlArguments(sql="select sum(amount) from people", purpose="sum")
+        )
+    assert caught.value is error
 
 
 def test_schema_only_catalog_and_artifact_read_expose_structure_not_values() -> None:

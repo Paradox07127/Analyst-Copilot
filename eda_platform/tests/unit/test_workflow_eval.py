@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile, EvidenceRef
 from eda_platform.schemas.questions import QuestionExecutionResult, QuestionFinding
 from eda_platform.schemas.reports import ReportAudit, ReportBundle, ReportClaim, ReportStatus
@@ -14,6 +18,7 @@ from eda_platform.schemas.workflow_eval import (
     WorkflowQualityResult,
 )
 from eda_platform.tools.workflow_eval import (
+    _harness_source_digest,
     aggregate_workflow_eval_trials,
     build_workflow_eval_environment,
     build_workflow_eval_trial,
@@ -23,6 +28,24 @@ from eda_platform.tools.workflow_eval import (
     grade_workflow_quality,
     verify_workflow_eval_trial_sources,
 )
+
+
+def test_harness_fingerprint_tracks_uncommitted_prompt_and_tool_changes(tmp_path: Path) -> None:
+    source = tmp_path / "prompt.py"
+    source.write_text('PROMPT = "original"\n')
+    first = _harness_source_digest(tmp_path)
+    source.write_text('PROMPT = "changed"\n')
+    second = _harness_source_digest(tmp_path)
+    assert first != second
+    (tmp_path / "cache.json").write_text('{"transient": true}')
+    assert _harness_source_digest(tmp_path) == second
+    source.rename(tmp_path / "different_tool.py")
+    assert _harness_source_digest(tmp_path) != second
+
+
+def test_harness_fingerprint_requires_actual_source(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="without source"):
+        _harness_source_digest(tmp_path)
 
 
 def _canonical_suite(

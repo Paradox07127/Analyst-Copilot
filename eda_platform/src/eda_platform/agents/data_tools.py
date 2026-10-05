@@ -7,8 +7,9 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
+import duckdb
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eda_platform.agents.data_tool_result_contracts import (
@@ -28,6 +29,7 @@ from eda_platform.agents.tool_context import (
     current_execution_context,
     mint_local_execution_context,
 )
+from eda_platform.core.artifact_identity import unique_artifacts
 from eda_platform.core.column_roles import ColumnRoleSet
 from eda_platform.core.ids import make_artifact_id, stable_hash
 from eda_platform.core.permissions import PermissionTier, require_permission
@@ -366,6 +368,12 @@ def data_tool_registry_digest() -> str:
     )
 
 
+class _MethodTableContext(TypedDict):
+    dataset_id: str
+    arguments: dict[str, Any]
+    warnings: list[str]
+
+
 OpenAnalysisExecutor = Callable[[OpenAnalysisArguments], AgentToolResult]
 
 
@@ -404,11 +412,21 @@ class DataToolContext:
             self.stat_registry = StatTestRegistry(registry_path)
 
     def add_artifact(self, artifact: Artifact, *, persist: bool = True) -> None:
-        self._artifacts_by_id[artifact.id] = artifact
-        if not any(existing.id == artifact.id for existing in self.artifacts):
-            self.artifacts.append(artifact)
+        existing = self._artifacts_by_id.get(artifact.id)
+        if existing is not None:
+            unique_artifacts([existing, artifact])
         if persist and self.store is not None:
-            self.store.save_artifact(artifact)
+            self.store.save_artifacts([artifact], immutable=True)
+        elif existing is not None:
+            artifact.created_at = existing.created_at
+            artifact.env_digest = existing.env_digest
+        self._artifacts_by_id[artifact.id] = artifact
+        if existing is None:
+            self.artifacts.append(artifact)
+        else:
+            self.artifacts[:] = [
+                artifact if item.id == artifact.id else item for item in self.artifacts
+            ]
 
     def restore_artifacts(self, artifacts: list[Artifact]) -> None:
         for artifact in artifacts:
@@ -734,9 +752,18 @@ def _bind_payload_policy(context: DataToolContext, tool: AgentTool) -> AgentTool
         )
         return result
 
+    description = tool.description
+    if tool.name == "run_sql":
+        if context.payload_policy == "schema+aggregates":
+            description += " " + _SQL_AGGREGATE_POLICY_GUIDANCE
+        elif context.payload_policy == "schema_only":
+            description += (
+                " This session returns SQL structure only; all result values are withheld."
+            )
+
     return AgentTool(
         name=tool.name,
-        description=tool.description,
+        description=description,
         args_schema=tool.args_schema,
         execute=policy_bound_execute,
         # Local analytical calls use stable logical-step IDs and receipt outboxes;
@@ -819,10 +846,8 @@ def _policy_safe_content(
                 "purpose": arguments.purpose,
                 "artifact_id": getattr(artifact, "id", None),
                 "result": _sql_result_without_rows(artifact.payload if artifact else {}),
-                "notice": (
-                    "Row values are withheld by the schema+aggregates payload policy. "
-                    "Use an aggregate query or explicitly enable sample payloads."
-                ),
+                "disclosure_status": "withheld_by_policy",
+                "notice": _SQL_AGGREGATE_POLICY_GUIDANCE,
             }
     if tool_name == "run_open_analysis":
         return {
@@ -889,7 +914,10 @@ def _aggregate_safe_artifact_content(artifact: Artifact) -> dict[str, Any]:
     elif artifact.type is ArtifactType.SQL_RESULT and not _is_aggregate_sql(
         str(artifact.payload.get("sql", ""))
     ):
+        include_evidence = False
         payload = _sql_result_without_rows(artifact.payload)
+        payload["disclosure_status"] = "withheld_by_policy"
+        payload["notice"] = _SQL_AGGREGATE_POLICY_GUIDANCE
     else:
         payload = _clip_json(artifact.payload)
     return {
@@ -928,6 +956,17 @@ def _sql_result_without_rows(payload: dict[str, Any]) -> dict[str, Any]:
         "row_count": payload.get("row_count"),
         "truncated": payload.get("truncated", False),
     }
+
+
+_SQL_AGGREGATE_POLICY_GUIDANCE = (
+    "Under schema+aggregates, SQL values are returned only for one plain SELECT whose "
+    "projections are approved scalar aggregate calls such as COUNT(*), SUM(amount), or "
+    "AVG(amount), optionally aliased. CTEs, subqueries, GROUP BY, windows, set operations, "
+    "raw columns, and expressions wrapping aggregate calls are withheld even if they "
+    "compute aggregates. Do not retry equivalent query shapes or read_artifact to bypass "
+    "this policy. Prefer applicable built-in analysis tools such as profile_slice, "
+    "analyze_time_series, or run_stat_test; otherwise state the evidence limitation."
+)
 
 
 _SAFE_SCALAR_AGGREGATE_NAMES = frozenset(
@@ -1150,12 +1189,25 @@ def _run_sql(context: DataToolContext, args: RunSqlArguments) -> AgentToolResult
     decision = require_permission({"type": "duckdb_select", "sql": args.sql})
     if decision.tier is PermissionTier.DENY:
         raise ValueError(decision.feedback)
-    artifact = run_sql(
-        context.catalog,
-        args.sql,
-        project_id=context.project_id,
-        session_id=context.session_id,
-    )
+    try:
+        artifact = run_sql(
+            context.catalog,
+            args.sql,
+            project_id=context.project_id,
+            session_id=context.session_id,
+        )
+    except duckdb.Error as exc:
+        if context.payload_policy == "schema+aggregates+sample":
+            raise
+        # Engine diagnostics can quote the cell that failed a conversion. Keep
+        # them out of both provider observations and runtime failure traces;
+        # only the engine's exception type and fixed repair guidance are safe.
+        raise ValueError(
+            f"SQL execution failed ({type(exc).__name__}). "
+            "Check column types and SQL operations against the schema; "
+            "use TRY_CAST for conversions that may encounter invalid values. "
+            "Data-dependent error details are withheld by the payload policy."
+        ) from None
     context.add_artifact(artifact)
     payload = _clip_json(artifact.payload)
     return AgentToolResult(
@@ -1239,7 +1291,7 @@ def _run_saved_skill(
     )
 
 
-_ANALYSIS_TOOL_VERSION = "1"
+_ANALYSIS_TOOL_VERSION = "2"
 _MAX_FACT_PROPOSALS = 20
 _MAX_FACT_PAIRS = 5
 _MAX_SKIP_WARNINGS = 10
@@ -2311,6 +2363,11 @@ def _analyze_time_series(
         raise
     assert result.table is not None  # analyze_series always builds it
     payload = result.table.model_dump(mode="json")
+    payload["method_context"] = _MethodTableContext(
+        dataset_id=args.dataset_id,
+        arguments=args.model_dump(mode="json"),
+        warnings=list(result.warnings),
+    )
     primary = Artifact(
         id=make_artifact_id("table", payload),
         type=ArtifactType.TABLE,
@@ -2424,6 +2481,11 @@ def _run_forecast(
     )
     assert result.table is not None  # run_forecast_baselines always builds it
     payload = result.table.model_dump(mode="json")
+    payload["method_context"] = _MethodTableContext(
+        dataset_id=args.dataset_id,
+        arguments=args.model_dump(mode="json"),
+        warnings=list(result.warnings),
+    )
     primary = Artifact(
         id=make_artifact_id("table", payload),
         type=ArtifactType.TABLE,

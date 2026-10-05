@@ -80,10 +80,10 @@ def test_restored_nodes_enforce_current_cancellation_and_budget(
     with monkeypatch.context() as patch:
         if boundary == "commit":
 
-            def fail_save(_artifact: Artifact) -> None:
+            def fail_save(_artifacts: list[Artifact], **_kwargs) -> None:
                 raise RuntimeError("commit failed")
 
-            patch.setattr(first.store, "save_artifact", fail_save)
+            patch.setattr(first.store, "save_artifacts", fail_save)
         with pytest.raises(RuntimeError, match="failed"):
             run_pipeline([RecoverableStep("first", calls, fail=boundary == "compute")], first)
 
@@ -168,11 +168,11 @@ class Step:
 store = ArtifactStore(root)
 ctx = SessionContext(project_id="p", session_id="run", store=store)
 if boundary == "artifact":
-    original = store.save_artifact
-    def save(artifact):
-        original(artifact)
+    original = store.save_artifacts
+    def save(artifacts, **kwargs):
+        original(artifacts, **kwargs)
         os._exit(77)
-    store.save_artifact = save
+    store.save_artifacts = save
 elif boundary == "cache":
     original = SqliteCache.set
     def save(self, pairs):

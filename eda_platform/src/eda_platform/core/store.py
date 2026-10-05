@@ -6,11 +6,12 @@ import shutil
 import sqlite3
 import time
 import unicodedata
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, closing, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from eda_platform.core.artifact_identity import artifact_content_digest, unique_artifacts
 from eda_platform.core.config import require_absolute_workspace
 from eda_platform.core.debug_log import mirror_event_to_debug_log
 from eda_platform.core.ids import AUDIT_SESSION_ID, stable_hash, validate_session_id
@@ -274,57 +275,90 @@ class ArtifactStore:
             ).fetchone()
         return None if row is None else row[0]
 
-    def save_artifact(self, artifact: Artifact) -> Path:
-        # Stamp provenance centrally while preserving an explicitly supplied digest.
-        if artifact.env_digest is None:
-            artifact.env_digest = env_digest()
-        artifact_path = self.artifact_path(artifact.project_id, artifact.session_id, artifact.id)
-        with self._session_write_transaction(artifact.project_id, artifact.session_id) as conn:
-            artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = artifact_path.with_suffix(".json.tmp")
-            temporary.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
-            os.replace(temporary, artifact_path)
+    def save_artifact(self, artifact: Artifact, *, immutable: bool = False) -> Path:
+        self.save_artifacts([artifact], immutable=immutable)
+        return self.artifact_path(artifact.project_id, artifact.session_id, artifact.id)
+
+    def save_artifacts(
+        self, artifacts: Sequence[Artifact], *, immutable: bool = False,
+        expected_existing: Mapping[str, str] | None = None,
+    ) -> list[Artifact]:
+        """Check a batch under the existing run fence before publishing any member."""
+        if not artifacts:
+            return []
+        project_id, session_id = artifacts[0].project_id, artifacts[0].session_id
+        if any((a.project_id, a.session_id) != (project_id, session_id) for a in artifacts):
+            raise ValueError("Artifact batches must belong to one project and session.")
+        with self._session_write_transaction(project_id, session_id) as conn:
+            canonical = unique_artifacts(artifacts)
+            for artifact_id, expected in (expected_existing or {}).items():
+                path = self.artifact_path(project_id, session_id, artifact_id)
+                if not path.exists():
+                    raise ValueError(f"Expected artifact {artifact_id!r} is unavailable.")
+                stored = Artifact.model_validate_json(path.read_text(encoding="utf-8"))
+                if artifact_content_digest(stored) != expected:
+                    raise ValueError(f"Expected artifact {artifact_id!r} changed before commit.")
+            pending: list[Artifact] = []
+            for artifact in canonical:
+                if artifact.env_digest is None:
+                    artifact.env_digest = env_digest()
+                path = self.artifact_path(project_id, session_id, artifact.id)
+                expected = (expected_existing or {}).get(artifact.id)
+                if expected is not None and artifact_content_digest(artifact) != expected:
+                    raise ValueError(f"Conflicting content for artifact {artifact.id!r}.")
+                if path.exists():
+                    try:
+                        stored = Artifact.model_validate_json(path.read_text(encoding="utf-8"))
+                    except ValueError:
+                        if immutable:
+                            raise
+                        pending.append(artifact)
+                        continue
+                    equivalent = (
+                        artifact_content_digest(stored) == artifact_content_digest(artifact)
+                    )
+                    if immutable and not equivalent:
+                        raise ValueError(f"Conflicting content for artifact {artifact.id!r}.")
+                    if equivalent:
+                        artifact.created_at = stored.created_at
+                        artifact.env_digest = stored.env_digest or env_digest()
+                pending.append(artifact)
+            for artifact in pending:
+                self._write_artifact_locked(conn, artifact)
+            by_id = {artifact.id: artifact for artifact in canonical}
+            for artifact in artifacts:
+                artifact.created_at = by_id[artifact.id].created_at
+                artifact.env_digest = by_id[artifact.id].env_digest
             conn.execute(
                 """
-                insert into artifacts(artifact_id, artifact_type, project_id, session_id, path)
-                values(?, ?, ?, ?, ?)
-                on conflict(artifact_id, project_id, session_id) do update set
-                    artifact_type=excluded.artifact_type,
-                    path=excluded.path
-                """,
-                (
-                    artifact.id,
-                    artifact.type.value,
-                    artifact.project_id,
-                    artifact.session_id,
-                    self._rel(artifact_path),
-                ),
-            )
-            # Keep the session index live: artifacts saved after a terminal
-            # status (SessionMetrics, on-demand reports) must still show up in
-            # list counts. Update-only — never fabricates a runs row.
-            conn.execute(
-                """
-                update sessions set
-                    artifact_count = (
-                        select count(*) from artifacts
-                        where project_id = ? and session_id = ?
-                    ),
-                    updated_at = ?
+                update sessions set artifact_count = (
+                    select count(*) from artifacts where project_id = ? and session_id = ?
+                ), updated_at = ?
                 where session_id = ? and project_id = ? and storage_state = 'live'
                 """,
-                (
-                    artifact.project_id,
-                    artifact.session_id,
-                    datetime.now(UTC).isoformat(),
-                    artifact.session_id,
-                    artifact.project_id,
-                ),
+                (project_id, session_id, datetime.now(UTC).isoformat(), session_id, project_id),
             )
-        if artifact.type in (ArtifactType.SESSION_SUMMARY, ArtifactType.REPORT_BUNDLE):
-            # These carry report_status; refresh the derived column too.
-            self.refresh_session_index(artifact.project_id, artifact.session_id)
-        return artifact_path
+        if any(a.type in (ArtifactType.SESSION_SUMMARY, ArtifactType.REPORT_BUNDLE)
+               for a in canonical):
+            self.refresh_session_index(project_id, session_id)
+        return canonical
+
+    def _write_artifact_locked(self, conn: sqlite3.Connection, artifact: Artifact) -> None:
+        artifact_path = self.artifact_path(artifact.project_id, artifact.session_id, artifact.id)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = artifact_path.with_suffix(".json.tmp")
+        temporary.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(temporary, artifact_path)
+        conn.execute(
+            """
+            insert into artifacts(artifact_id, artifact_type, project_id, session_id, path)
+            values(?, ?, ?, ?, ?)
+            on conflict(artifact_id, project_id, session_id) do update set
+                artifact_type=excluded.artifact_type, path=excluded.path
+            """,
+            (artifact.id, artifact.type.value, artifact.project_id, artifact.session_id,
+             self._rel(artifact_path)),
+        )
 
     def mutate_artifact(
         self,

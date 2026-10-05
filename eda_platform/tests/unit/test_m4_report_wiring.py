@@ -790,7 +790,7 @@ def test_dataset_overview_gets_deterministic_claim_when_profiles_exist(
     assert result.bundle.status is ReportStatus.VALIDATED
 
 
-def test_executive_summary_gets_deterministic_claim_from_surviving_claims(
+def test_executive_summary_does_not_promote_only_structural_inventory(
     tmp_path: Path,
 ) -> None:
     base = _base_artifacts(tmp_path)
@@ -805,9 +805,8 @@ def test_executive_summary_gets_deterministic_claim_from_surviving_claims(
     )
 
     summary = _section(result, "Executive Summary")
-    assert summary.claims
-    assert summary.claims[0].evidence
-    assert summary.body != "No validated conclusion is available for this section."
+    assert summary.claims == []
+    assert summary.body == "No validated conclusion is available for this section."
     assert result.bundle.status is ReportStatus.VALIDATED
 
 

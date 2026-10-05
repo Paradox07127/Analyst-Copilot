@@ -28,7 +28,8 @@ from eda_platform.core.trace_correlation import (
     trace_execution_scope,
 )
 
-GRAPH_VERSION = "langgraph-v1"
+# Earlier cached results were admitted under different context/publication policies.
+GRAPH_VERSION = "langgraph-v2"
 _RUNTIME_VERSION = version("langgraph")
 _SQLITE_VERSION = version("langgraph-checkpoint-sqlite")
 

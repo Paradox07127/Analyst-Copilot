@@ -11,15 +11,10 @@ import pandas as pd
 import pytest
 from pydantic import BaseModel
 
-from eda_platform.agents.exploration.candidates import candidate_seed
+from eda_platform.agents.exploration.candidates import candidate_seed, mandatory_probe_seeds
 from eda_platform.agents.exploration.scheduler import (
     PriorityFeatures,
     SchedulingDecision,
-)
-from eda_platform.agents.exploration.supervisor import (
-    CandidateBatch,
-    SupervisorPhase,
-    phase_step_id,
 )
 from eda_platform.agents.exploration.workflow import ExplorationWorkflowState
 from eda_platform.agents.receipts import build_receipt
@@ -44,7 +39,6 @@ from eda_platform.core.stat_registry import StatTestRegistry
 from eda_platform.core.store import ArtifactStore
 from eda_platform.drivers.exploration import (
     JsonExplorationWorkflowStateStore,
-    JsonSupervisorRecoveryStore,
     exploration_tool_capability_digest,
 )
 from eda_platform.schemas.artifacts import (
@@ -268,8 +262,9 @@ def test_dataset_usage_meter_never_projects_unknown_data_as_free(
         )
 
 
+@pytest.mark.parametrize("goal", [None, "为什么收入下降？", "Why does revenue decline?"])
 def test_worker_invokes_official_composition_with_certified_tools_and_meter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, goal: str | None
 ) -> None:
     store = ArtifactStore(tmp_path)
     store.ensure_project("demo", name="Demo")
@@ -280,6 +275,8 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
         tier="quick",
         dataset_scope=("ds_orders",),
         tool_capability_digest=tool_digest,
+        mode="open" if goal is None else "goal_directed",
+        goal=goal,
     )
     exploration_id = "expl_worker"
     witness = "dsw1_" + "a" * 32
@@ -377,6 +374,13 @@ def test_worker_invokes_official_composition_with_certified_tools_and_meter(
     by_name = {column.name: column for column in facts.columns}
     assert by_name["region"].role == "categorical"
     assert by_name["region"].example_values == ("North", "South")
+    complete_coverage = ExplorationWorkflowState(
+        coverage_completed={seed.coverage_key for seed in mandatory_probe_seeds(
+            captured["dataset_profiles"]
+        )},
+    )
+    assert not captured["goal_satisfied"](complete_coverage)
+    assert captured["coverage_target_met"](complete_coverage) is (goal is None)
     # A numeric measure never carries example values into the prompt.
     assert by_name["amount"].example_values == ()
 
@@ -424,7 +428,7 @@ def test_worker_refuses_to_run_when_the_implementation_changed(
     assert entered is False
 
 
-def test_restart_rebuilds_multi_round_scheduler_and_goal_state_from_disk(
+def test_restart_rebuilds_multi_round_scheduler_state_from_disk(
     tmp_path: Path,
 ) -> None:
     first = _candidate(
@@ -488,50 +492,54 @@ def test_restart_rebuilds_multi_round_scheduler_and_goal_state_from_disk(
     assert quotas[InsightFamily.DIAGNOSTIC] == 0
     assert quotas[InsightFamily.DESCRIPTIVE] == 0
 
-    exploration_id = "expl_restart"
-    journal = JsonlExplorationJournal(
-        shadow_run_root(tmp_path, exploration_id) / "journal.jsonl"
+
+@pytest.mark.parametrize(
+    ("goal", "expected"),
+    [("为什么收入下降", "收入"), ("ＲＥＶＥＮＵＥ", "revenue"),
+     ("chiffre d’affaires", "affaires"), ("收入 revenue", "revenue")],
+)
+def test_goal_ranking_preserves_unicode_terms(goal: str, expected: str) -> None:
+    assert expected in worker._goal_tokens(goal)
+
+
+def test_chinese_goal_relevance_ranks_shared_terms_above_unrelated_questions() -> None:
+    relevant = _candidate(
+        statement="各地区收入是否存在差异？",
+        family=InsightFamily.DIAGNOSTIC,
+        columns=("region", "amount"), sequence_index=1,
     )
-    journal.initialize(
-        exploration_id=exploration_id,
-        policy=policy,
-        code_fingerprint="code-v1",
-        data_state_witness="dsw1_" + "a" * 32,
+    unrelated = _candidate(
+        statement="客户年龄是否缺失？",
+        family=InsightFamily.DIAGNOSTIC,
+        columns=("age",), sequence_index=2,
     )
-    journal.append_new("round_started", round_index=0)
-    recovery = JsonSupervisorRecoveryStore(
-        shadow_run_root(tmp_path, exploration_id) / "phase-responses"
-    )
-    recovery.remember(
-        phase_step_id(exploration_id, 0, SupervisorPhase.GENERATE),
-        CandidateBatch((first,)),
+    assert worker._business_value(relevant, "为什么收入下降") > worker._business_value(
+        unrelated, "为什么收入下降"
     )
 
-    assert worker._goal_satisfied(
-        restored,
-        goal=policy.goal,
-        recovery=recovery,
-        journal=journal,
+
+def test_admission_history_keeps_unexecuted_questions_eligible() -> None:
+    from dataclasses import replace
+
+    seed = _candidate(
+        statement="Which regions differ?", family=InsightFamily.DIAGNOSTIC,
+        columns=("region", "amount"), sequence_index=1,
     )
-    assert not worker._goal_satisfied(
-        restored,
-        goal="customer churn retention",
-        recovery=recovery,
-        journal=journal,
+    policy = build_exploration_policy(
+        tier="quick", dataset_scope=("ds_orders",), tool_capability_digest="tools-v1",
     )
-    assert not worker._goal_satisfied(
-        ExplorationWorkflowState(
-            decisions=restored.decisions,
-            insights={
-                insight.insight_id: insight.model_copy(
-                    update={"status": "inconclusive", "trust_level": "unsupported"}
-                )
-            },
-        ),
-        goal=policy.goal,
-        recovery=recovery,
-        journal=journal,
+    deferred = replace(_decision(seed), chosen=False)
+    historical, answered, executed, _quotas = worker._durable_admission_state(
+        ExplorationWorkflowState(decisions=(deferred,)), policy,
     )
+    assert seed.hypothesis_fingerprint not in historical
+    assert not answered and not executed
+    rejected = replace(deferred, status="rejected_policy")
+    historical, *_ = worker._durable_admission_state(
+        ExplorationWorkflowState(decisions=(rejected,)), policy,
+    )
+    assert seed.hypothesis_fingerprint in historical
+
 
 
 def test_no_cost_cap_means_no_budget_pressure_not_zero_budget() -> None:

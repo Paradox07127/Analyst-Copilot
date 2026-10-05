@@ -448,3 +448,18 @@ def test_legacy_prose_number_stays_unverified() -> None:
         claim, evidence_pack=pack, numeric_tolerance=0.01, sql_results={}
     )
     assert [(s.number, s.status) for s in statuses] == [(88.34, "unverified")]
+
+
+def test_actionable_count_uses_severity_even_without_metric_fields() -> None:
+    pack = _probe_pack()
+    for issue in pack.quality_issues:
+        issue.metric_value = None
+        issue.affected_count = None
+    pack.quality_issues[0].severity = "info"
+    pack.quality_issues[1].severity = "warn"
+    ref = EvidenceRef(
+        kind="artifact", artifact_id="qual_probe", locator="actionable_issue_count", value=999,
+    )
+    assert rv._resolve_evidence_numbers(ref, pack, {}) == [(1.0, "raw", "exact", None)]
+    pack.quality_issues[1].severity = "info"
+    assert rv._resolve_evidence_numbers(ref, pack, {}) == [(0.0, "raw", "exact", None)]

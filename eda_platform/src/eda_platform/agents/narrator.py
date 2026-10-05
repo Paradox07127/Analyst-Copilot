@@ -1,10 +1,9 @@
-"""Connective prose over claims that already passed the report's gates.
+"""Conservative extractive composition over report claims that passed the gates.
 
-The report was a bullet list because every sentence in it has to be defensible,
-and only typed claims are. This layer buys readability without giving that up:
-it may reorder and join the claims it is shown, and a paragraph carrying any
-figure those claims do not already state is thrown away. Citations are appended
-from the claims' own evidence, so the model never authors an artifact id.
+The model selects and orders whole claims. Exact source binding preserves each
+claim's entity, quantity, scope and qualifiers without pretending a numeric
+regex can establish arbitrary paraphrase entailment. Invalid passages leave the
+original claims visible; richer synthesis requires a typed conclusion contract.
 """
 
 from __future__ import annotations
@@ -42,17 +41,15 @@ _MAX_NARRATIVE_CHARS = 900
 _MAX_CITATIONS = 6
 
 _INSTRUCTIONS = (
-    "Write two or three sentences that connect the findings below into a "
-    "single passage a business reader can follow. "
-    "Do NOT introduce any number, percentage, date, or magnitude that is not "
-    "already written in one of the findings -- do not average them, round "
-    "them, total them, or infer a rate from them. Reusing a figure verbatim is "
-    "expected; producing a new one is not. "
-    "Do not write artifact ids, column ids, or citations; they are attached "
-    "afterwards. "
-    "Say what the findings mean together and where they disagree. If they say "
-    "nothing in common, say that plainly rather than manufacturing a theme. "
-    "List in cited_claim_ids the ids of the findings the passage draws on."
+    "Compose a short evidence-preserving passage by selecting and ordering complete "
+    "claim texts supplied below. Copy each selected claim verbatim, including its "
+    "qualifiers, units, scope and limitations; separate claims with a space. "
+    "Do not paraphrase, split a claim, add transitions, change numbers, or introduce "
+    "an explanation, comparison, recommendation or causal relationship. "
+    "Use only claims relevant to this section and include every selected claim id "
+    "in cited_claim_ids, in the same order. Do not cite claims you did not copy. "
+    "Return empty text and no ids if no concise passage fits these constraints. "
+    "This is a conservative extractive composition, not a new analysis."
 )
 
 
@@ -220,8 +217,15 @@ def _narrate_section(
     # given, which disqualifies the prose as well as the citation.
     if not cited or any(claim_id not in by_id for claim_id in cited):
         return None, "uncited_or_unknown_claim"
-    if not borrowed_numbers_only(text, shown):
+    cited_claims = [by_id[claim_id] for claim_id in cited]
+    if not borrowed_numbers_only(text, cited_claims):
         return None, "unverifiable_figure"
+    # Exact whole-claim composition binds entities, predicates, values, units,
+    # scope and caveats to their cited source. This deliberately rejects valid
+    # paraphrases too: number/token heuristics cannot prove arbitrary entailment.
+    expected = " ".join(" ".join(claim.text.split()) for claim in cited_claims)
+    if text != expected:
+        return None, "unsupported_rewrite"
     # The prose is model output going into a markdown document whose headings
     # drive the table of contents and whose code spans become evidence buttons.
     # Only the citation we build ourselves is allowed to carry either.

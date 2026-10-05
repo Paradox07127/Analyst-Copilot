@@ -242,8 +242,8 @@ def test_complete_step_boundary_records_failure(
     elif fault_point == "artifact_save":
         monkeypatch.setattr(
             store,
-            "save_artifact",
-            lambda _artifact: (_ for _ in ()).throw(expected),
+            "save_artifacts",
+            lambda _artifact, **_kwargs: (_ for _ in ()).throw(expected),
         )
     elif fault_point == "cache_write":
         monkeypatch.setattr(

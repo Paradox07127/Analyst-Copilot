@@ -2,10 +2,54 @@
 
 ## Unreleased: local LangGraph architecture migration - 2026-09-22
 
+Analysis-quality review fixes prevent sample values bypassing question payload
+policy and preserve Unicode questions with different dataset/column/method scopes.
+Exploration now retains deferred candidates across rounds and recovery, verifies
+their original journal-bound batches, and selects recent findings by update round.
+Goal relevance no longer certifies goal completion: goal-directed runs retain
+budget/stagnation stops until explicit goal obligations can be verified. Exploration
+uses graph definition v4 and policy profile v2; new runs are required for this policy.
+The shared graph policy epoch is v2, preventing completed pipeline/report checkpoints
+from replaying output admitted by the earlier context and publication rules.
+
+Live gpt-5.6-luna evaluation exposed budget delivery gaps. Auto EDA now persists
+each completed question, marks unfinished questions explicitly, and delivers a
+deterministic report with a limited session status after known request/token/cost
+exhaustion. Early discovery and report exhaustion also retain deterministic
+delivery. Exploration sends committed partial receipts through the existing
+validation and claim gates before budget termination. Unknown usage keeps its
+typed blocking outcome across checkpoints; it never becomes ordinary exhaustion.
+Worker status details no longer mislabel every limited run as pre-ingestion failure.
+
+SQL tools now describe the actual scalar-only disclosure contract and provide
+actionable feedback for withheld query shapes. Restricted SQL artifact reads do
+not return attached value evidence. DuckDB errors under restricted policies return
+safe error categories instead of leaking raw cells through model feedback and
+trace. These changes retain the existing disclosure boundary.
+
+Live confirmation also exposed same-ID time-series tables with different method
+warnings. Time-series and forecast payload identities now include their actual
+dataset, arguments, and warnings. Equivalent artifacts preserve their durable
+envelopes; conflicting batch members fail before publication. Immutable tool
+evidence and pipeline reference checks share the existing session write fence,
+while the default mutable path still supports cache repair.
+
+Report narration now preserves whole cited claims instead of accepting arbitrary
+rewrites that merely reuse known numbers. Exploration headings come from admitted
+claims, not unverified proposals. Quality fallback counts warnings/critical issues
+with a verifiable locator and excludes health notices and artifact inventories from
+executive conclusions. Extractive narration is a conservative transition; full
+semantic synthesis and cross-question analysis reuse remain future work.
+
+A local blind question-review export/import tool checks calibration anchors without
+exposing reference grades to the reviewer. Anchor agreement is explicitly separate
+from human calibration and production readiness. Workflow eval environments include
+the actual harness source digest so uncommitted prompt/tool edits change identity.
+
 Retirement cleanup removes report calls outside the Functional workflow, the old
 exploration cursor container and single-slot recovery compatibility, receipt-id
 artifact fallbacks, unused worker adapters, and automatic paid capability probes.
-Exploration journals now require schema v2 and graph definition v2; older formats
+Exploration journals now require schema v2 and graph definition v4; older formats
 require a fresh exploration. Routing no longer keeps a process-global capability
 verdict cache. Graph identity and uncertain-effect failures propagate without
 question fallback or automatic model resending. Analytical contracts and existing

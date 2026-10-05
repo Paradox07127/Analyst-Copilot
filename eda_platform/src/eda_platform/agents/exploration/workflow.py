@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from operator import add
+from threading import Event
 from types import MappingProxyType
 from typing import Annotated, Any, Protocol, TypedDict
 
@@ -64,7 +65,7 @@ from eda_platform.agents.exploration.supervisor import (
 )
 from eda_platform.agents.runtime import AgentTool
 from eda_platform.agents.tool_context import HypothesisExecutionBinding
-from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.budget import BudgetExceeded, BudgetUsageUncertain
 from eda_platform.core.cancellation import CancellationError
 from eda_platform.core.claim_gates import GateReport, run_claim_gates
 from eda_platform.core.exploration_budget import ToolCallLedger
@@ -92,6 +93,9 @@ _MAX_PROPOSALS_PER_BATCH = next(
 # One repair attempt. A model that breaks the contract twice in a row is not
 # going to be talked into it by a third copy of the same error.
 _PROPOSAL_SCHEMA_ATTEMPTS = 2
+# Only this many pending questions enter one scheduling window. The complete
+# proposal history remains in the existing, round-bounded recovery records.
+_MAX_PENDING_CANDIDATES = 24
 
 
 class StructuredHypothesisProvider(Protocol):
@@ -174,6 +178,7 @@ class JournaledCandidateGenerator:
     coverage_completed: Callable[[], frozenset[str]] = lambda: frozenset()
     dataset_facts: Mapping[str, DatasetFacts] = field(default_factory=dict)
     prior_findings: Callable[[], tuple[PriorFinding, ...]] = lambda: ()
+    pending_candidates: Callable[[PhaseContext], tuple[CandidateSeed, ...]] = lambda _context: ()
 
     def generate(self, context: PhaseContext, *, logical_step_id: str) -> CandidateBatch:
         call_id = "llm_" + stable_hash(
@@ -189,17 +194,22 @@ class JournaledCandidateGenerator:
                 "candidate generation outcome is uncertain after recovery; "
                 "refusing to resend the logical provider request."
             )
+        pending = self.pending_candidates(context)
         preflight = getattr(self.provider, "preflight_structured", None)
         if callable(preflight):
             try:
                 preflight(
                     task=self.task,
                     schema=HypothesisProposalBatch,
-                    payload=self._payload(context),
+                    payload=self._payload(context, pending=pending),
                 )
+            except BudgetUsageUncertain:
+                raise
             except BudgetExceeded as exc:
                 raise SupervisorBudgetExhausted(str(exc)) from exc
-        batch = self._propose(context, call_id=call_id, logical_step_id=logical_step_id)
+        batch = self._propose(
+            context, call_id=call_id, logical_step_id=logical_step_id, pending=pending
+        )
         first_index = context.round_index * 10_000 + 1
         generated = materialize_proposal_batch(
             batch,
@@ -217,7 +227,13 @@ class JournaledCandidateGenerator:
             )
             if seed.coverage_key not in explored
         )
-        result = CandidateBatch((*mandatory, *generated))
+        # A reworded proposal must not duplicate a pending/system-owned item or
+        # overwrite its provenance. The exact merged batch is journal-bound so
+        # both scheduler replay and independent evidence verification see it.
+        by_id: dict[str, CandidateSeed] = {}
+        for candidate in (*mandatory, *pending, *generated):
+            by_id.setdefault(candidate.hypothesis_id, candidate)
+        result = CandidateBatch(tuple(by_id.values()))
         self.recovery.remember(logical_step_id, result)
         self.journal.append_new(
             "llm_call_completed",
@@ -233,6 +249,7 @@ class JournaledCandidateGenerator:
         *,
         call_id: str,
         logical_step_id: str,
+        pending: tuple[CandidateSeed, ...] = (),
     ) -> HypothesisProposalBatch:
         """One proposal call, retried once when the answer breaks the schema.
 
@@ -250,7 +267,7 @@ class JournaledCandidateGenerator:
         rejections: list[str] = []
         last = _PROPOSAL_SCHEMA_ATTEMPTS - 1
         for attempt in range(_PROPOSAL_SCHEMA_ATTEMPTS):
-            payload = self._payload(context, rejections=rejections)
+            payload = self._payload(context, rejections=rejections, pending=pending)
             self.journal.append_new(
                 "llm_call_started", call_id=call_id, step_id=logical_step_id
             )
@@ -261,6 +278,11 @@ class JournaledCandidateGenerator:
                         schema=HypothesisProposalBatch,
                         payload=payload,
                     )
+            except BudgetUsageUncertain as exc:
+                self.journal.append_new(
+                    "llm_call_uncertain", call_id=call_id, error=_safe_error(exc)
+                )
+                raise
             except BudgetExceeded as exc:
                 self.journal.append_new(
                     "llm_call_rejected",
@@ -309,6 +331,7 @@ class JournaledCandidateGenerator:
         context: PhaseContext,
         *,
         rejections: Sequence[str] = (),
+        pending: tuple[CandidateSeed, ...] = (),
     ) -> dict[str, Any]:
         instruction = (
             "Propose a small, falsifiable batch of at most "
@@ -329,6 +352,13 @@ class JournaledCandidateGenerator:
                 " Do not re-propose those questions or a reworded variant of them;"
                 " propose what they now make worth asking next."
             )
+        if pending:
+            instruction += (
+                " pending_questions are already queued and will be considered this round."
+                " Do not propose them again. Propose only additional evidence gaps;"
+                " you may conclude proposal generation when no useful new question remains."
+                " That does not cancel the queued questions or declare the user goal complete."
+            )
         return {
             "round_index": context.round_index,
             "data_state_witness": context.data_state_witness,
@@ -341,6 +371,14 @@ class JournaledCandidateGenerator:
             "already_settled": [
                 {"finding": finding.statement, "verdict": finding.verdict}
                 for finding in settled
+            ],
+            "pending_questions": [
+                {
+                    "hypothesis_id": seed.hypothesis_id,
+                    "statement": seed.proposal.statement,
+                    "predicate": seed.proposal.predicate.model_dump(mode="json"),
+                }
+                for seed in pending
             ],
             "method_families": sorted(self.supported_method_families),
             "instruction": instruction,
@@ -380,7 +418,10 @@ def settled_findings(state: ExplorationWorkflowState) -> tuple[PriorFinding, ...
     stops the reworded duplicates that dedup cannot see.
     """
     findings: list[PriorFinding] = []
-    for insight in sorted(state.insights.values(), key=lambda item: item.insight_id):
+    for insight in sorted(
+        state.insights.values(),
+        key=lambda item: (-item.last_updated_round, -item.created_round, item.insight_id),
+    ):
         bundle = state.admitted_bundles.get(insight.claim_bundle_id)
         if bundle is None:
             continue
@@ -394,7 +435,52 @@ def settled_findings(state: ExplorationWorkflowState) -> tuple[PriorFinding, ...
         findings.append(
             PriorFinding(statement=statement, verdict=insight.trust_level)
         )
-    return tuple(findings[-_MAX_SETTLED_FINDINGS:])
+    return tuple(findings[:_MAX_SETTLED_FINDINGS])
+
+
+def pending_candidates(
+    context: PhaseContext,
+    *,
+    state: ExplorationWorkflowState,
+    recovery: CompletedStepRecoveryPort,
+    response_digests: Mapping[str, str],
+) -> tuple[CandidateSeed, ...]:
+    """Rehydrate unselected admitted questions from journal-bound proposal batches.
+
+    Selection consumes a question even if its execution was inconclusive; a
+    deferred question has never consumed that opportunity. No extra mutable
+    queue or recovery cursor is introduced.
+    """
+    selected = {item.hypothesis_id for item in state.decisions if item.chosen}
+    latest = {item.hypothesis_id: item for item in state.decisions}
+    eligible = sorted(
+        (
+            item for item in latest.values()
+            if item.status == "admitted" and item.hypothesis_id not in selected
+        ),
+        key=lambda item: (-item.priority, item.hypothesis_fingerprint),
+    )[:_MAX_PENDING_CANDIDATES]
+    required = {item.hypothesis_id for item in eligible}
+    found: dict[str, CandidateSeed] = {}
+    for round_index in sorted(state.scheduling_commits, reverse=True):
+        if round_index >= context.round_index or not required:
+            continue
+        step_id = phase_step_id(context.exploration_id, round_index, SupervisorPhase.GENERATE)
+        batch = recovery.load_required(step_id)
+        if not isinstance(batch, CandidateBatch):
+            raise SupervisorInvariantError("pending questions require a durable candidate batch.")
+        if candidate_batch_digest(batch) != response_digests.get(step_id):
+            raise SupervisorInvariantError("pending question batch fails its journal digest.")
+        for seed in batch.candidates:
+            if isinstance(seed, CandidateSeed) and seed.hypothesis_id in required:
+                decision = latest[seed.hypothesis_id]
+                if seed.hypothesis_fingerprint != decision.hypothesis_fingerprint:
+                    raise SupervisorInvariantError("pending question identity changed.")
+                found[seed.hypothesis_id] = seed
+                required.remove(seed.hypothesis_id)
+    if required:
+        raise SupervisorInvariantError("pending question recovery body is missing.")
+    return tuple(found[item.hypothesis_id] for item in eligible)
 
 
 def _column_payload(fact: ColumnFact) -> dict[str, Any]:
@@ -529,6 +615,13 @@ def compose_exploration_workflow(
             coverage_completed=lambda: frozenset(state.coverage_completed),
             dataset_facts=dict(dataset_facts or {}),
             prior_findings=lambda: settled_findings(state),
+            pending_candidates=lambda context: pending_candidates(
+                context, state=state, recovery=recovery,
+                response_digests={
+                    event.step_id: event.response_digest
+                    for event in journal.events() if isinstance(event, LlmCallCompletedEvent)
+                },
+            ),
         ),
         scheduler=DeterministicSchedulerPort(
             policy=scheduler_policy,
@@ -662,7 +755,7 @@ def scheduling_decision_digest(decisions: Sequence[SchedulingDecision]) -> str:
 
 def _probe_outcome_is_usable(execution: ProbeExecutionResult) -> bool:
     """Whether the round may continue on what this probe already committed."""
-    if execution.status in {"completed", "limit_reached"}:
+    if execution.status in {"completed", "limit_reached", "budget_exhausted"}:
         return True
     return (
         execution.status == "failed"
@@ -729,6 +822,8 @@ class SupervisorProbeExecutorPort:
                     columns=candidate.proposal.columns,
                 ),
             )
+        except BudgetUsageUncertain:
+            raise
         except BudgetExceeded as exc:
             raise SupervisorBudgetExhausted(str(exc)) from exc
         except (SessionCancelled, CancellationError) as exc:
@@ -767,6 +862,7 @@ class SupervisorProbeExecutorPort:
         if journal_state is None:
             raise SupervisorInvariantError("probe executor requires an initialized journal.")
         shared_seen = set(journal_state.completed_probe_fingerprints)
+        budget_exhausted = Event()
         def dispatch(state: ProbeFanoutState) -> list[Send]:
             return [
                 Send("probe", {"index": index, "candidate": candidate})
@@ -774,7 +870,12 @@ class SupervisorProbeExecutorPort:
             ]
 
         def probe(state: ProbeDispatchState) -> dict[str, Any]:
-            result = self._run_probe(context, state["candidate"], journal_state, shared_seen)
+            if budget_exhausted.is_set():
+                result = ProbeExecutionResult(status="budget_exhausted")
+            else:
+                result = self._run_probe(context, state["candidate"], journal_state, shared_seen)
+                if result.status == "budget_exhausted":
+                    budget_exhausted.set()
             return {"results": [(state["index"], result)]}
 
         builder = StateGraph(ProbeFanoutState)
@@ -802,6 +903,11 @@ class SupervisorProbeExecutorPort:
             executions = self._execute_concurrent(context, candidates)
         else:
             for candidate in candidates:
+                if executions and executions[-1].status == "budget_exhausted":
+                    # Preserve selection/result alignment without starting more
+                    # inference or tools after a prior probe exhausted budget.
+                    executions.append(ProbeExecutionResult(status="budget_exhausted"))
+                    continue
                 journal_state = self.journal.rebuild()
                 if journal_state is None:
                     raise SupervisorInvariantError(
@@ -856,7 +962,8 @@ class SupervisorProbeExecutorPort:
                 tuple(replace(execution, artifacts=[]) for execution in executions),
                 tuple(receipts),
                 tuple(bindings),
-            )
+            ),
+            budget_exhausted=any(item.status == "budget_exhausted" for item in executions),
         )
 
 

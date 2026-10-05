@@ -21,7 +21,13 @@ from eda_platform.agents.model_workflow import (
 from eda_platform.agents.question_agent import propose_llm_question_candidates
 from eda_platform.agents.reporting import generate_agentic_report
 from eda_platform.agents.semantic_bootstrap import bootstrap_semantics
-from eda_platform.core.budget import BudgetExceeded, SessionBudgetPolicy
+from eda_platform.core.artifact_identity import unique_artifacts
+from eda_platform.core.budget import (
+    BudgetExceeded,
+    BudgetUsageUncertain,
+    SessionBudgetExceeded,
+    SessionBudgetPolicy,
+)
 from eda_platform.core.column_roles import (
     ColumnRoleName,
     ColumnRoleSet,
@@ -77,7 +83,11 @@ from eda_platform.drivers.question_exec import (
 from eda_platform.drivers.report_artifacts import build_agentic_report_artifacts
 from eda_platform.schemas.artifacts import Artifact, ArtifactType, DatasetProfile
 from eda_platform.schemas.cleaning import CleaningRecipe
-from eda_platform.schemas.questions import QuestionCandidate, QuestionCandidateSet
+from eda_platform.schemas.questions import (
+    QuestionCandidate,
+    QuestionCandidateSet,
+    QuestionExecutionResult,
+)
 from eda_platform.schemas.relations import (
     RelationshipCandidate,
     RelationshipCandidateSet,
@@ -1126,7 +1136,26 @@ class DiscoverQuestionsStep:
         binding = self._binding(ctx, frozen)
 
         def run(active: ModelWorkflow) -> dict[str, Any]:
-            artifacts = self._run(ctx, WorkflowModelClient(self.llm, active), frozen)
+            try:
+                artifacts = self._run(ctx, WorkflowModelClient(self.llm, active), frozen)
+            except BudgetUsageUncertain:
+                raise
+            except BudgetExceeded as exc:
+                if isinstance(exc, SessionBudgetExceeded) and exc.dimension == "wall_seconds":
+                    raise
+                # This boundary includes semantic bootstrap and question drafting.
+                # Existing fixed EDA stays intact; deterministic roles/templates
+                # remain useful when no ordinary model allowance is left.
+                raise_if_cancelled(ctx.cancel_check, operation="deterministic question discovery")
+                ctx.emit_trace(TraceEvent(
+                    session_id=ctx.session_id, event_type="budget_degraded", name=self.name,
+                    finished_at=datetime.now(UTC),
+                    summary={"reason": str(exc)[:500], "status": "limited",
+                             "delivery": "deterministic_discovery"},
+                ))
+                artifacts = [item.model_copy(update={
+                    "warnings": [*item.warnings, "budget_exhausted: deterministic discovery"],
+                }) for item in self._run(ctx, OfflineLLMClient(), frozen)]
             return {"artifacts": [item.model_dump(mode="json") for item in artifacts]}
 
         saved = run_model_workflow(
@@ -1651,56 +1680,96 @@ class ExecuteTopQuestionsStep:
             if agent_route
             else []
         )
+        exhausted: BudgetExceeded | None = None
         for candidate in selected:
+            raise_if_cancelled(ctx.cancel_check, operation="question execution")
             # Disclose machine-confirmed joins in result risks.
             if candidate.required_relations:
                 notes = exec_whitelist.disclosure_notes(candidate.required_relations)
                 if notes:
                     candidate = candidate.model_copy(update={"risks": [*candidate.risks, *notes]})
-            produced: list[Artifact] | None = None
-            if agent_route and question_needs_method_agent(candidate):
-                agent_run = execute_question_with_tools(
-                    candidate,
-                    datasets=self.loaded_datasets,
-                    project_id=ctx.project_id,
-                    session_id=ctx.session_id,
-                    parent_ids=parent_ids,
-                    llm=cast(LLMClient, self.llm),
-                    context_artifacts=context_artifacts,
-                    store=ctx.store,
-                    payload_policy=self.payload_policy,
-                )
-                if agent_run.degraded_reason is None:
-                    produced = agent_run.artifacts
-                else:
-                    agent_route = not agent_run.route_unsupported
-                    ctx.emit_trace(
-                        TraceEvent(
+            if exhausted is None:
+                try:
+                    produced: list[Artifact] | None = None
+                    if agent_route and question_needs_method_agent(candidate):
+                        agent_run = execute_question_with_tools(
+                            candidate,
+                            datasets=self.loaded_datasets,
+                            project_id=ctx.project_id,
                             session_id=ctx.session_id,
-                            event_type="agent_route_degraded",
-                            name="execute_top_questions",
-                            summary={
-                                "question_id": candidate.question_id,
-                                "reason": agent_run.degraded_reason,
-                            },
+                            parent_ids=parent_ids,
+                            llm=cast(LLMClient, self.llm),
+                            context_artifacts=context_artifacts,
+                            store=ctx.store,
+                            payload_policy=self.payload_policy,
                         )
-                    )
-            if produced is None:
-                produced = execute_question_candidate(
-                    candidate,
-                    datasets=self.loaded_datasets,
-                    project_id=ctx.project_id,
-                    session_id=ctx.session_id,
-                    parent_ids=parent_ids,
-                    llm=self.llm,
-                    confirmed_joins=confirmed_joins,
-                    catalog=(llm_catalog if candidate.origin == "llm" else template_catalog),
-                    persistence=GraphPersistence(
-                        ctx.store.session_dir(ctx.project_id, ctx.session_id),
-                        "question-sql:" + candidate.question_id,
-                    ),
+                        if agent_run.degraded_reason is None:
+                            produced = agent_run.artifacts
+                        else:
+                            agent_route = not agent_run.route_unsupported
+                            ctx.emit_trace(
+                                TraceEvent(
+                                    session_id=ctx.session_id,
+                                    event_type="agent_route_degraded",
+                                    name="execute_top_questions",
+                                    summary={
+                                        "question_id": candidate.question_id,
+                                        "reason": agent_run.degraded_reason,
+                                    },
+                                )
+                            )
+                    if produced is None:
+                        produced = execute_question_candidate(
+                            candidate,
+                            datasets=self.loaded_datasets,
+                            project_id=ctx.project_id,
+                            session_id=ctx.session_id,
+                            parent_ids=parent_ids,
+                            llm=self.llm,
+                            confirmed_joins=confirmed_joins,
+                            catalog=(
+                                llm_catalog if candidate.origin == "llm" else template_catalog
+                            ),
+                            persistence=GraphPersistence(
+                                ctx.store.session_dir(ctx.project_id, ctx.session_id),
+                                "question-sql:" + candidate.question_id,
+                            ),
+                        )
+                except BudgetUsageUncertain:
+                    raise
+                except BudgetExceeded as exc:
+                    if isinstance(exc, SessionBudgetExceeded) and exc.dimension == "wall_seconds":
+                        raise
+                    exhausted = exc
+                    ctx.emit_trace(TraceEvent(
+                        session_id=ctx.session_id, event_type="budget_degraded",
+                        name=self.name, finished_at=datetime.now(UTC),
+                        summary={"reason": str(exc)[:500], "question_id": candidate.question_id,
+                                 "status": "limited", "delivery": "deterministic_report"},
+                    ))
+            if exhausted is not None:
+                result = QuestionExecutionResult(
+                    question_id=candidate.question_id, question=candidate.question_en,
+                    origin=candidate.origin, status="failed", outcome="abstained",
+                    abstention_code="budget_exhausted", findings=[],
+                    error="Analysis stopped at the run budget limit; this question is unfinished.",
+                    exploratory=candidate.exploratory, metric_id=candidate.metric_id,
+                    answer_contract=candidate.answer_contract,
                 )
-            artifacts.extend(produced)
+                payload = result.model_dump(mode="json")
+                produced = [Artifact(
+                    id=make_artifact_id("qexec", {"session_id": ctx.session_id, **payload}),
+                    type=ArtifactType.QUESTION_EXECUTION_RESULT,
+                    project_id=ctx.project_id, session_id=ctx.session_id,
+                    parents=parent_ids, payload=payload,
+                )]
+            assert produced is not None
+            # Persist each finished question before starting another paid graph.
+            # Pipeline commit may safely repeat these content-addressed writes.
+            produced = unique_artifacts(produced)
+            combined = unique_artifacts([*artifacts, *produced])
+            ctx.store.save_artifacts(produced, immutable=True)
+            artifacts = combined
             qexec = next(
                 (
                     artifact
@@ -1837,19 +1906,45 @@ class ExportAgenticReportStep:
             )
             for artifact_id in self.artifact_ids
         ]
-        report = generate_agentic_report(
-            artifacts,
-            project_id=ctx.project_id,
-            session_id=ctx.session_id,
-            business_context=self.business_context,
-            llm=self.llm,
-            narrator_llm=self.narrator_llm,
-            payload_policy=self.payload_policy,
-            persistence=GraphPersistence(
-                ctx.store.session_dir(ctx.project_id, ctx.session_id),
-                "report:" + self.cache_key(ctx),
-            ),
-        )
+        budget_limited = False
+        try:
+            report = generate_agentic_report(
+                artifacts,
+                project_id=ctx.project_id,
+                session_id=ctx.session_id,
+                business_context=self.business_context,
+                llm=self.llm,
+                narrator_llm=self.narrator_llm,
+                payload_policy=self.payload_policy,
+                persistence=GraphPersistence(
+                    ctx.store.session_dir(ctx.project_id, ctx.session_id),
+                    "report:" + self.cache_key(ctx),
+                ),
+            )
+        except BudgetUsageUncertain:
+            raise
+        except BudgetExceeded as exc:
+            if isinstance(exc, SessionBudgetExceeded) and exc.dimension == "wall_seconds":
+                raise
+            # Admission/settlement exhaustion has a known outcome. Preserve the
+            # verified inputs and finish delivery without another provider call.
+            raise_if_cancelled(ctx.cancel_check, operation="deterministic report delivery")
+            budget_limited = True
+            ctx.emit_trace(TraceEvent(
+                session_id=ctx.session_id, event_type="budget_degraded", name=self.name,
+                finished_at=datetime.now(UTC),
+                summary={"reason": str(exc)[:500], "status": "limited",
+                         "delivery": "deterministic_report"},
+            ))
+            report = generate_agentic_report(
+                artifacts, project_id=ctx.project_id, session_id=ctx.session_id,
+                business_context=self.business_context, llm=OfflineLLMClient(),
+                narrator_llm=None, payload_policy=self.payload_policy,
+                persistence=GraphPersistence(
+                    ctx.store.session_dir(ctx.project_id, ctx.session_id),
+                    "report:budget-delivery:" + self.cache_key(ctx),
+                ),
+            )
         # A live-LLM run that fell back to the deterministic report must not
         # look identical to a healthy one: this flag is what marks the job
         # degraded (worker completion summary) and lights the header badge.
@@ -1864,6 +1959,9 @@ class ExportAgenticReportStep:
                     summary={
                         "degraded": True,
                         "reason": (
+                            "The report model budget was exhausted; this report was assembled "
+                            "deterministically from verified evidence."
+                            if budget_limited else
                             "The language model was unavailable or repeatedly "
                             "invalid, so this report was assembled "
                             "deterministically from verified evidence."
@@ -1943,13 +2041,18 @@ class ExportAgenticReportStep:
                     },
                 ),
             )
-        return build_agentic_report_artifacts(
+        produced = build_agentic_report_artifacts(
             report,
             artifacts,
             project_id=ctx.project_id,
             session_id=ctx.session_id,
             payload_policy=self.payload_policy,
         )
+        if budget_limited:
+            produced = [item.model_copy(update={
+                "warnings": [*item.warnings, "budget_exhausted: deterministic report"],
+            }) for item in produced]
+        return produced
 
 
 def _retag_raw_artifact(
@@ -2561,6 +2664,10 @@ def run_auto_eda(
         for artifact in question_result.artifacts
         if artifact.type is ArtifactType.QUESTION_CANDIDATE_SET
     )
+    discovery_limited = any(
+        "budget_exhausted: deterministic discovery" in item.warnings
+        for item in question_result.artifacts
+    )
     question_execution_result = run_pipeline(
         [
             ExecuteTopQuestionsStep(
@@ -2573,12 +2680,18 @@ def run_auto_eda(
                         *value_map_result.artifacts, *question_result.artifacts,
                     ]
                 ],
-                llm=llm,
+                llm=OfflineLLMClient() if discovery_limited else llm,
                 payload_policy=payload_policy,
             )
         ],
         ctx,
     )
+    budget_limited = discovery_limited or any(
+        item.type is ArtifactType.QUESTION_EXECUTION_RESULT
+        and item.payload.get("abstention_code") == "budget_exhausted"
+        for item in question_execution_result.artifacts
+    )
+    delivery_llm = OfflineLLMClient() if budget_limited else llm
     dataset_frame_pool.clear()
 
     report_parent_ids = [
@@ -2604,8 +2717,8 @@ def run_auto_eda(
                 ExportAgenticReportStep(
                     report_parent_ids,
                     business_context=business_context,
-                    llm=llm,
-                    narrator_llm=narrator_llm,
+                    llm=delivery_llm,
+                    narrator_llm=None if budget_limited else narrator_llm,
                     payload_policy=payload_policy,
                 )
             ],
@@ -2614,6 +2727,20 @@ def run_auto_eda(
         if generate_report
         else None
     )
+    budget_limited = budget_limited or (
+        report_result is not None and any(
+            "budget_exhausted: deterministic report" in item.warnings
+            for item in report_result.artifacts
+        )
+    )
+    if budget_limited and report_result is not None:
+        ctx.emit_trace(TraceEvent(
+            session_id=actual_session_id, event_type="report_degraded",
+            name="export_agentic_report", finished_at=datetime.now(UTC),
+            summary={"degraded": True, "status": "limited",
+                     "reason": "The run budget was exhausted; completed evidence was delivered "
+                               "in a deterministic report, with unfinished analysis disclosed."},
+        ))
     report_markdown = ""
     if report_result is not None:
         report_artifact = next(
@@ -2647,7 +2774,7 @@ def run_auto_eda(
     # Cosmetic LLM title upgrade (never a number source): one cheap text call
     # over dataset names + business context + executive-summary claim texts.
     # Any failure keeps the deterministic title already in the manifest.
-    llm_title = _llm_session_title(
+    llm_title = None if budget_limited else _llm_session_title(
         ctx,
         llm,
         dataset_names=[source.record.name for source in dataset_sources],
@@ -2676,7 +2803,9 @@ def run_auto_eda(
         execution_fingerprint=ctx.execution_fingerprint,
         emit_trace=ctx.emit_trace,
     )
-    store.mark_session_status(project_id, actual_session_id, "completed")
+    store.mark_session_status(
+        project_id, actual_session_id, "limited" if budget_limited else "completed"
+    )
 
     return AutoEDAResult(
         project_id=project_id,
@@ -3407,7 +3536,11 @@ def _llm_session_title(
             )
         )
         return title or None
+    except BudgetUsageUncertain:
+        raise
     except BudgetExceeded as exc:
+        if isinstance(exc, SessionBudgetExceeded) and exc.dimension == "wall_seconds":
+            raise
         # Cosmetic work is the first budget degradation tier. Preserve the
         # deterministic title and make the budget decision observable.
         with suppress(Exception):

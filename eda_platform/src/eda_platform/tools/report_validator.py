@@ -1065,6 +1065,14 @@ def _quality_issue_numbers(
         for issue in evidence_pack.quality_issues
         if issue.artifact_id == evidence.artifact_id
     ]
+    if evidence.locator.strip() == "actionable_issue_count":
+        # Cardinality is derived from the actual issue collection, not from
+        # prose or the caller's EvidenceRef.value. Health/info entries are not
+        # problems, even when all per-issue metrics are absent.
+        if not issues:
+            return []
+        return [(float(sum(issue.severity in {"warn", "critical"} for issue in issues)),
+                 "raw", "exact", None)]
     structured = [
         issue
         for issue in issues
@@ -1360,6 +1368,13 @@ _PLATFORM_CLAIM_PREFIXES = (
     _EXEC_SUMMARY_COPY_PREFIX,
     *_FALLBACK_INVENTORY_PREFIXES,
 )
+
+
+def is_inventory_claim(claim_id: str | None) -> bool:
+    """Structural availability statements cannot serve as executive findings."""
+    return bool(claim_id) and claim_id.startswith(
+        (_INJECTED_OVERVIEW_PREFIX, *_FALLBACK_INVENTORY_PREFIXES)
+    )
 
 
 def is_platform_authored_claim(claim_id: str | None) -> bool:

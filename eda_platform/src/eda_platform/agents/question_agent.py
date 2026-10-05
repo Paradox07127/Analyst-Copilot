@@ -474,8 +474,13 @@ def build_data_summary(
     confirmed_joins: Collection[str] = (),
     max_columns: int = _SUMMARY_MAX_COLUMNS,
     max_sample_values: int = _SUMMARY_MAX_SAMPLES,
+    payload_policy: PayloadPolicy = "schema+aggregates",
 ) -> str:
     """Render compact dataset, role, and relation context for question generation."""
+    # A column example is a source value, even when wrapped in a schema summary.
+    sample_limit = (
+        max(0, max_sample_values) if payload_policy == "schema+aggregates+sample" else 0
+    )
     lines: list[str] = []
     for profile in sorted(profiles, key=lambda item: item.name):
         role_set = (role_sets or {}).get(profile.name)
@@ -494,7 +499,7 @@ def build_data_summary(
                 marker = "?" if role.provenance == "unverified" else ""
                 role_text = f", role={role.role.value}{marker}"
             samples = ", ".join(
-                str(value) for value in detail.sample_values[:max_sample_values]
+                str(value) for value in detail.sample_values[:sample_limit]
             )
             sample_text = f"; e.g. {samples}" if samples else ""
             lines.append(
@@ -899,6 +904,7 @@ def _manifest(
             relationship_candidates=relationship_candidates,
             relationship_validations=relationship_validations,
             confirmed_joins=confirmed_joins,
+            payload_policy=payload_policy,
         ),
         "confirmed_join_whitelist": sorted(confirmed_joins),
     }

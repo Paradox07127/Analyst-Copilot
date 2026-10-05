@@ -347,10 +347,9 @@ def test_generate_agentic_report_revalidates_when_hard_gate_prunes_all_claims(
     assert result.bundle.status is ReportStatus.VALIDATED
     assert result.audit.status is ReportStatus.VALIDATED
     assert result.audit.findings == []
-    assert retained_ids == [
-        "exec_summary_dataset_overview_ds_sales",
-        "dataset_overview_ds_sales",
-    ]
+    assert retained_ids == ["dataset_overview_ds_sales"]
+    summary = next(s for s in result.bundle.sections if s.title == "Executive Summary")
+    assert "No validated conclusion" in summary.body
     assert result.validation_events[-1].status == "validated"
     assert result.validation_events[-1].pruned_claim_count == 1
     assert "Hard validator removed 1 unsupported claim(s)." in result.audit.semantic_notes
@@ -516,7 +515,7 @@ def test_offline_report_covers_every_dataset_in_file_sections(tmp_path: Path) ->
     for claim in quality_claims:
         evidence = claim.evidence[0]
         actual_count = sum(
-            issue.artifact_id == evidence.artifact_id
+            issue.artifact_id == evidence.artifact_id and issue.severity in {"warn", "critical"}
             for issue in result.evidence_pack.quality_issues
         )
         assert evidence.value == actual_count
@@ -547,3 +546,30 @@ def _artifacts(tmp_path: Path) -> list[Artifact]:
         session_id="run_demo",
     )
     return [profile, quality, *charts, *tables]
+
+
+def test_clean_offline_report_verifies_health_without_promoting_inventory(tmp_path: Path) -> None:
+    source = tmp_path / "clean.csv"
+    source.write_text("region,amount\nEast,10\nWest,20\nEast,15\n")
+    loaded = load_csv(source, dataset_id="clean")
+    profile = profile_dataset(loaded, project_id="p", session_id="s")
+    artifacts = [
+        profile,
+        scan_quality(profile, project_id="p", session_id="s"),
+        *create_analysis_tables(loaded, profile, project_id="p", session_id="s"),
+    ]
+    result = generate_agentic_report(
+        artifacts, project_id="p", session_id="s", business_context="Describe available data",
+        llm=OfflineLLMClient(),
+    )
+    quality = next(s for s in result.bundle.sections if s.title == "Data Quality Findings")
+    assert [claim.text for claim in quality.claims] == [
+        "The recorded quality checks flagged 0 warnings or critical issues.",
+    ]
+    assert quality.claims[0].numeric_rollup == "number_verified"
+    assert result.audit.numeric_unverified_claim_count == 0
+    assert result.audit.quantitative_coverage_gap_count == 0
+    assert result.audit.gate_verdict == "pass"
+    summary = next(s for s in result.bundle.sections if s.title == "Executive Summary")
+    assert summary.claims == []
+    assert "No validated conclusion" in summary.body

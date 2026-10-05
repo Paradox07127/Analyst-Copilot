@@ -58,7 +58,11 @@ from eda_platform.tools.evidence import (
     PayloadPolicy,
     build_evidence_pack,
 )
-from eda_platform.tools.report_validator import apply_semantic_gate, validate_report_bundle
+from eda_platform.tools.report_validator import (
+    apply_semantic_gate,
+    is_inventory_claim,
+    validate_report_bundle,
+)
 
 _MAX_ATTEMPTS = 3
 # F5 budget breaker: stop rewriting once repair rounds have spent more than
@@ -371,15 +375,15 @@ def _generate_agentic_report(
     llm_events.extend(TypeAdapter(list[LLMTraceEvent]).validate_python(narration.llm_events))
     if narration.attempted:
         note = (
-            f"Wrote a connective narrative for {narration.written} of "
+            f"Composed an extractive passage for {narration.written} of "
             f"{narration.attempted} eligible section(s), from claims that had "
             "already passed the gates."
         )
         if narration.rejected:
             note += (
-                f" {narration.rejected} draft(s) were discarded for carrying a "
-                "figure the claims do not state, or for citing a claim that "
-                "does not exist; those sections keep their bullets."
+                f" {narration.rejected} draft(s) were discarded because the text "
+                "did not match its cited claims or satisfy the composition contract; "
+                "those sections keep their original claims."
             )
         audit.semantic_notes.append(note)
     bundle.audit = audit
@@ -1486,7 +1490,20 @@ def _deterministic_report_bundle(
         for issue_index, (artifact_id, issues) in enumerate(issues_by_artifact.items()):
             dataset_id = issues[0].dataset_id
             dataset_name = dataset_names.get(dataset_id) or dataset_id
-            issue_count = len(issues)
+            issue_count = sum(issue.severity in {"warn", "critical"} for issue in issues)
+            if issue_count == 0:
+                if any(issue.code == "no_high_missing" for issue in issues):
+                    _section(bundle, "Data Quality Findings").claims.append(ReportClaim(
+                        id=f"quality_health_{dataset_id}",
+                        text="The recorded quality checks flagged 0 warnings or critical issues.",
+                        evidence=[EvidenceRef(
+                            kind="artifact", artifact_id=artifact_id,
+                            locator="actionable_issue_count", value=0,
+                        )],
+                        referenced_datasets=[dataset_name],
+                        confidence="high",
+                    ))
+                continue
             _section(bundle, "Data Quality Findings").claims.append(
                 ReportClaim(
                     id=(
@@ -1502,19 +1519,13 @@ def _deterministic_report_bundle(
                         EvidenceRef(
                             kind="artifact",
                             artifact_id=artifact_id,
-                            locator="issues",
+                            locator="actionable_issue_count",
                             value=issue_count,
                         )
                     ],
                     referenced_datasets=[dataset_name],
                     quality_issue_refs=[artifact_id],
                     confidence="high",
-                    # F3 exemption kept for legacy artifacts only: their
-                    # QualityIssue prose resolves no numbers (F1). Structured
-                    # sets (§11.3) resolve the "issues" locator to the set
-                    # cardinality, so on new runs this count verifies and the
-                    # exemption becomes a no-op.
-                    deterministic_source=True,
                 )
             )
     if evidence_pack.analysis_tables:
@@ -2009,7 +2020,10 @@ def _apply_executive_summary_fallback(
         for claim in source_section.claims
     ]
     qualified = [
-        claim for claim in source_claims if not _is_shape_claim_text(claim.text)
+        claim for claim in source_claims
+        if not _is_shape_claim_text(claim.text)
+        and not is_inventory_claim(claim.id)
+        and not (claim.id or "").startswith("quality_health_")
     ]
     # Prefer answered business questions over generic technical claims.
     question_qualified = [
@@ -2022,7 +2036,9 @@ def _apply_executive_summary_fallback(
     if qualified:
         selected = _select_executive_claims(qualified, question_results)
     else:
-        selected = source_claims[:_EXEC_SUMMARY_CLAIM_LIMIT]
+        # An artifact inventory is not an analytical conclusion. An empty
+        # summary remains explicitly unavailable in the standard renderer.
+        return 0
     injected = 0
     for index, claim in enumerate(selected, start=1):
         section.claims.append(

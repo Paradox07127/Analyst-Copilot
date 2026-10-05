@@ -249,7 +249,7 @@ def test_terminal_trace_fault_rolls_back_job_and_run(
     assert _event_types(store, str(job["job_id"])) == ["job.queued", "job.started"]
 
 
-def test_completed_worker_preserves_resource_limited_session_outcome(
+def test_completed_worker_preserves_limited_session_outcome(
     lifecycle: tuple[ArtifactStore, JobLifecycleRepository],
 ) -> None:
     store, repository = lifecycle
@@ -258,8 +258,8 @@ def test_completed_worker_preserves_resource_limited_session_outcome(
     repository.acknowledge_spawn(claim, pid=os.getpid(), birth_identity="test")
     assert repository.child_start(claim) is not None
 
-    # Resource preflight is a successful worker exit but not a completed EDA
-    # session.  The driver records this outcome before returning to the worker.
+    # Resource admission and exhausted analysis budgets can both exit cleanly
+    # with limited delivery. Neither implies that ingestion never happened.
     store.mark_session_status("demo", str(job["session_id"]), "limited")
     assert repository.finish(claim, "completed") is True
 
@@ -277,7 +277,8 @@ def test_completed_worker_preserves_resource_limited_session_outcome(
         ).fetchone()[0]
     payload = json.loads(str(payload_json))
     assert payload["summary"]["session_status"] == "limited"
-    assert "before data ingestion" in payload["summary"]["detail"]
+    assert "configured limit" in payload["summary"]["detail"]
+    assert "before data ingestion" not in payload["summary"]["detail"]
 
 
 def test_terminal_row_cannot_be_revived_by_stale_runner(

@@ -819,6 +819,8 @@ def test_dedup_drops_duplicate_questions() -> None:
         origin="llm",
         target_datasets=["time_series_sales.csv"],
         sql_template=None,
+        analysis_mode="descriptive",
+        referenced_columns={"time_series_sales.csv": ["order_date", "amount"]},
         score=QuestionScore(
             data_availability=1.0,
             statistical_signal=1.0,

@@ -228,6 +228,8 @@ class ProbeSelection:
 @dataclass(frozen=True, slots=True)
 class ProbeOutcome:
     payload: object | None = None
+    # End new work, but let already-committed receipts pass the normal gates.
+    budget_exhausted: bool = False
 
 
 @dataclass(frozen=True, slots=True)

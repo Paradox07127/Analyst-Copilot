@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
 
 from langgraph.func import entrypoint, task
 from pydantic import BaseModel, ValidationError
 
-from eda_platform.core.budget import BudgetExceeded
+from eda_platform.core.budget import BudgetExceeded, BudgetUsageUncertain, SessionBudgetExceeded
 from eda_platform.core.cancellation import CancellationError
 from eda_platform.core.graph_execution import (
     GraphEffectUncertain,
@@ -39,7 +40,8 @@ class _BlockedEffect(BaseException):
     """Keep unresolved effects out of domain code's ordinary fallback/retry catches."""
 
     def __init__(
-        self, error: GraphEffectUncertain | GraphIdentityError | CancellationError
+        self,
+        error: GraphEffectUncertain | GraphIdentityError | CancellationError | BudgetUsageUncertain,
     ) -> None:
         self.error = error
         super().__init__(str(error))
@@ -89,6 +91,16 @@ class ModelWorkflow:
                     ) from exc
                 return {"error": {"message": str(exc)[:1000],
                                   "budget": isinstance(exc, BudgetExceeded),
+                                  "budget_type": type(exc).__name__,
+                                  "budget_details": (
+                                      {"dimension": exc.dimension, "limit": str(exc.limit),
+                                       "attempted": str(exc.attempted), "call_id": exc.call_id,
+                                       "stage": exc.stage}
+                                      if isinstance(exc, SessionBudgetExceeded) else
+                                      {"call_id": exc.call_id, "stage": exc.stage,
+                                       "missing": list(exc.missing)}
+                                      if isinstance(exc, BudgetUsageUncertain) else None
+                                  ),
                                   "value": isinstance(exc, ValueError),
                                   "malformed": isinstance(
                                       exc, (MalformedProviderResponseError, ValidationError)
@@ -119,6 +131,20 @@ class ModelWorkflow:
         if error is not None:
             self.last_usage_record = error.get("usage")
             if error["budget"]:
+                details = error.get("budget_details") or {}
+                if error.get("budget_type") == "BudgetUsageUncertain":
+                    # Persist uncertainty, but keep domain fallback handlers from
+                    # mistaking it for a definite admission rejection on replay.
+                    raise _BlockedEffect(BudgetUsageUncertain(
+                        details["call_id"], stage=details["stage"],
+                        missing=tuple(details["missing"]),
+                    ))
+                if error.get("budget_type") == "SessionBudgetExceeded":
+                    raise SessionBudgetExceeded(
+                        details["dimension"], limit=Decimal(details["limit"]),
+                        attempted=Decimal(details["attempted"]),
+                        call_id=details["call_id"], stage=details["stage"],
+                    )
                 raise BudgetExceeded(error["message"])
             if error.get("malformed"):
                 raise MalformedProviderResponseError(error["message"])

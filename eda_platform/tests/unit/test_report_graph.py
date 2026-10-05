@@ -51,7 +51,7 @@ class ReportLLM:
         )
         if task == "report_section_narrative":
             return schema.model_validate({
-                "text": "These findings describe the available evidence.",
+                "text": payload["claims"][0]["text"],
                 "cited_claim_ids": [payload["claims"][0]["id"]],
             })
         return schema.model_validate(self.plans.pop(0).model_dump())
